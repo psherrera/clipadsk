@@ -591,13 +591,21 @@ async def chat_with_transcript(req: ChatRequest):
     if not groq_client:
         raise HTTPException(status_code=500, detail="Groq API no configurada")
     
+    # --- RECORTE DE SEGURIDAD PARA RATE LIMITS (6000 TPM) ---
+    # Si la transcripcion es muy larga, la recortamos para que quepa en el limite gratuito de Groq.
+    # 20,000 caracteres son aprox 5,000 tokens, lo que deja margen para la respuesta.
+    transcript_safe = req.transcript
+    if len(transcript_safe) > 20000:
+        print(f"Aviso: Transcripcion muy larga ({len(transcript_safe)} chars). Recortando para evitar error 413.")
+        transcript_safe = transcript_safe[:10000] + "\n\n[...] [Parte omitida por longitud] [...] \n\n" + transcript_safe[-10000:]
+
     try:
         system_prompt = f"""
         Eres un asistente experto que analiza transcripciones de videos. 
-        Tu objetivo es responder preguntas del usuario basándote únicamente en la siguiente transcripción:
+        Tu objetivo es responder preguntas del usuario basándote únicamente en la siguiente transcripción (puede estar recortada por longitud):
         
         --- TRANSCRIPCIÓN ---
-        {req.transcript}
+        {transcript_safe}
         --- FIN ---
         
         Responde de forma concisa, útil y en español. Si la respuesta no está en la transcripción, dilo amablemente.

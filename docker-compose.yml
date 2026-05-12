@@ -1,0 +1,33 @@
+version: '3.8'
+
+# Uso: docker-compose up -d --build
+# Frontend: http://localhost
+# Backend:  http://localhost:5000
+
+services:
+  backend:
+    build: ./backend
+    container_name: clipadsk-backend
+    ports:
+      - "5000:5000"
+    volumes:
+      - ./backend/downloads:/app/downloads   # archivos descargados
+      - ./backend/model:/app/model           # modelo Whisper (cache)
+      - ./backend/cookies.txt:/app/cookies.txt:ro  # opcional – cookies YT
+    environment:
+      - PYTHONUNBUFFERED=1
+      - WHISPER_CACHE_DIR=/app/model
+      - GROQ_API_KEY=${GROQ_API_KEY:-}       # opcional; dejar vacío si no se usa
+    restart: unless-stopped
+
+  frontend:
+    image: nginx:alpine
+    container_name: clipadsk-frontend
+    ports:
+      - "80:80"
+    volumes:
+      - ./frontend:/usr/share/nginx/html:ro
+    depends_on:
+      - backend
+    restart: unless-stopped
+

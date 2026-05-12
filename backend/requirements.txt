@@ -1,0 +1,12 @@
+fastapi
+uvicorn
+yt-dlp>=2026.03.13
+pydantic
+python-multipart
+requests
+groq
+deep-translator
+python-dotenv
+pydub
+instaloader
+bgutil-ytdlp-pot-provider

@@ -62,13 +62,13 @@ if %errorlevel% neq 0 (
 
 :: ── Abrir frontend directamente (sin nginx) ──────────────────
 echo [+] Abriendo interfaz...
-start "" "%~dp0frontend\index.html"
+start http://127.0.0.1:5000
 
 echo.
 echo ==========================================
 echo   ¡Todo listo! 
 echo   Backend : http://127.0.0.1:5000
-echo   Frontend: archivo local (index.html)
+echo   Frontend: http://127.0.0.1:5000
 echo.
 echo   Cierra la ventana "Clipadsk Backend"
 echo   para apagar el servidor.

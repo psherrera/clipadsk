@@ -129,6 +129,40 @@ def translate_to_spanish(text):
         print(f"Error traducción: {e}")
         return text
 
+def cleanup_transcript_with_ai(text: str) -> str:
+    """Usa la IA para limpiar repeticiones, corregir puntuación y añadir párrafos."""
+    if not groq_client or len(text) < 100:
+        return text
+    
+    try:
+        # Truncar si es absurdamente largo para la limpieza
+        safe_text = text[:8000] if len(text) > 8000 else text
+        
+        prompt = f"""
+        Sos un editor experto. Tu tarea es LIMPIAR y FORMATEAR la siguiente transcripción de un video.
+        
+        INSTRUCCIONES:
+        1. ELIMINÁ repeticiones de frases (a veces el sistema de transcripción repite lo mismo varias veces por error).
+        2. AGREGÁ puntuación correcta (comas, puntos).
+        3. DIVIDÍ el texto en párrafos lógicos (usá DOBLE SALTO DE LÍNEA entre párrafos) para que el texto sea legible.
+        4. No resumas, mantené el contenido original pero bien escrito.
+        5. Respondé SOLO con el texto limpio.
+        
+        TRANSCRIPCIÓN A LIMPIAR:
+        {safe_text}
+        """
+        
+        completion = groq_client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.3,
+            max_tokens=2048,
+        )
+        return completion.choices[0].message.content.strip()
+    except Exception as e:
+        print(f"Error limpiando transcripción: {e}")
+        return text
+
 # --- MODELOS DE DATOS ---
 class VideoRequest(BaseModel):
     url: str
@@ -482,6 +516,10 @@ async def get_transcript(req: VideoRequest):
                     content = re.sub(r'<[^>]*>', '', content)
                     final_text = ' '.join([line.strip() for line in content.split('\n') if line.strip()])
                     if is_english: final_text = translate_to_spanish(final_text)
+                    
+                    # Limpieza con IA opcional para mejorar legibilidad
+                    final_text = cleanup_transcript_with_ai(final_text)
+                    
                     cache[url] = final_text
                     save_cache(cache)
                     return {"transcript": final_text, "method": "subtitles"}
@@ -567,9 +605,12 @@ async def get_transcript(req: VideoRequest):
                                     language="es"
                                 )
                         
-                        cache[url] = transcription.strip()
+                        # Limpieza con IA
+                        transcription = cleanup_transcript_with_ai(transcription.strip())
+                        
+                        cache[url] = transcription
                         save_cache(cache)
-                        return {"transcript": transcription.strip(), "method": "groq_whisper_v3"}
+                        return {"transcript": transcription, "method": "groq_whisper_v3"}
                     except Exception as ge:
                         print(f"Error en Groq: {ge}")
                         raise Exception(f"Error en Groq API: {str(ge)}")
@@ -595,9 +636,9 @@ async def chat_with_transcript(req: ChatRequest):
     # Si la transcripcion es muy larga, la recortamos para que quepa en el limite gratuito de Groq.
     # 20,000 caracteres son aprox 5,000 tokens, lo que deja margen para la respuesta.
     transcript_safe = req.transcript
-    if len(transcript_safe) > 20000:
+    if len(transcript_safe) > 12000:
         print(f"Aviso: Transcripcion muy larga ({len(transcript_safe)} chars). Recortando para evitar error 413.")
-        transcript_safe = transcript_safe[:10000] + "\n\n[...] [Parte omitida por longitud] [...] \n\n" + transcript_safe[-10000:]
+        transcript_safe = transcript_safe[:6000] + "\n\n[...] [Parte omitida por longitud] [...] \n\n" + transcript_safe[-6000:]
 
     try:
         system_prompt = f"""
@@ -608,7 +649,14 @@ async def chat_with_transcript(req: ChatRequest):
         {transcript_safe}
         --- FIN ---
         
-        Responde de forma concisa, útil y en español. Si la respuesta no está en la transcripción, dilo amablemente.
+        Responde de forma concisa, útil y en español. 
+        
+        REGLAS DE FORMATO:
+        1. Usá **negritas** para nombres de productos, marcas o conceptos clave.
+        2. Usá "punto y aparte" (doble salto de línea) entre párrafos o puntos de una lista para que el texto "respire" y sea fácil de leer.
+        3. Si hacés una lista, que cada ítem esté separado por una línea en blanco.
+        
+        Si la respuesta no está en la transcripción, dilo amablemente.
         """
         
         completion = groq_client.chat.completions.create(
@@ -878,6 +926,9 @@ async def transcript_audio_file(
                     )
 
             transcript_text = str(transcription).strip()
+            # Limpieza con IA
+            transcript_text = cleanup_transcript_with_ai(transcript_text)
+            
             return {
                 "transcript": transcript_text,
                 "method": "groq_whisper_v3_file",
@@ -908,8 +959,10 @@ TRANSCRIPCIÓN:
     "quotes": """Sos un asistente para periodistas especializados en comunicación política e imagen pública.
 Dado el siguiente texto transcripto, extraé las CITAS TEXTUALES más relevantes para una nota periodística.
 Para cada cita, indicá en formato:
-• "[cita textual]" — [contexto breve de por qué es relevante]
 
+• **[cita textual]** — [contexto breve de por qué es relevante]
+
+Separá cada cita con un DOBLE SALTO DE LÍNEA para que el texto sea legible.
 Seleccioná máximo 5 citas. Si no hay citas claras, indicalo.
 Respondé solo con las citas, sin introducción.
 
@@ -931,11 +984,13 @@ TRANSCRIPCIÓN:
 {transcript}""",
 
     "angle": """Sos un editor de medios con experiencia en periodismo político y comunicación institucional.
-Dado el siguiente texto transcripto, sugerí 3 ÁNGULOS PERIODÍSTICOS posibles para cubrir este contenido:
-Para cada ángulo incluí:
-• Título sugerido para la nota
-• Por qué es el ángulo más relevante
+Dado el siguiente texto transcripto, sugerí 3 ÁNGULOS PERIODÍSTICOS posibles para cubrir este contenido.
 
+Para cada ángulo incluí:
+• **Título sugerido**
+• **Justificación**: Por qué es el ángulo más relevante.
+
+Separá cada propuesta con un DOBLE SALTO DE LÍNEA.
 Respondé directamente con los 3 ángulos, sin introducción.
 
 TRANSCRIPCIÓN:
@@ -958,7 +1013,9 @@ async def analyze_transcript(req: AnalyzeRequest):
         raise HTTPException(status_code=400, detail="La transcripción es demasiado corta para analizar.")
 
     # Truncar si es muy larga (Groq tiene límite de tokens)
-    transcript = req.transcript[:12000] if len(req.transcript) > 12000 else req.transcript
+    transcript = req.transcript
+    if len(transcript) > 12000:
+        transcript = transcript[:6000] + "\n\n[...] [Parte omitida por longitud] [...] \n\n" + transcript[-6000:]
 
     prompt = JOURNALIST_PROMPTS[req.mode].format(transcript=transcript)
 

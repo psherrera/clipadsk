@@ -4,7 +4,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>ClipAmbl - Transcriptor para Periodistas</title>
+    <title>Clipadsk - Transcriptor para Periodistas</title>
     
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -42,10 +42,10 @@
     <!-- Login Modal -->
     <div id="login-modal" class="fixed inset-0 z-[100] flex items-center justify-center bg-background-dark p-6">
         <div class="glass max-w-[440px] w-full p-10 rounded-3xl text-center shadow-2xl fade-in">
-            <div class="bg-primary/20 w-20 h-20 rounded-2xl flex items-center justify-center mx-auto mb-6 border border-primary/30">
-                <span class="material-symbols-outlined text-primary text-5xl">radio_button_checked</span>
+            <div class="w-20 h-20 rounded-2xl flex items-center justify-center mx-auto mb-6">
+                <img src="logo.png" alt="Clipadsk Logo" class="w-full h-full object-contain">
             </div>
-            <h1 class="text-3xl font-bold mb-2">ClipAmbl</h1>
+            <h1 class="text-3xl font-bold mb-2">Clipadsk</h1>
             <p class="text-slate-400 mb-8 text-sm">Acceso privado — Transcriptor para periodistas.</p>
             <div class="space-y-6">
                 <div class="relative">
@@ -71,10 +71,10 @@
     <!-- Header -->
     <header class="sticky top-0 z-50 glass border-b border-primary/20 px-6 py-4 flex items-center justify-between">
         <div class="flex items-center gap-3">
-            <div class="bg-primary p-2 rounded-lg shadow-lg shadow-primary/20">
-                <span class="material-symbols-outlined text-white">radio_button_checked</span>
+            <div class="w-10 h-10 rounded-lg overflow-hidden shadow-lg shadow-primary/20">
+                <img src="logo.png" alt="Clipadsk Logo" class="w-full h-full object-contain">
             </div>
-            <h1 class="text-xl font-bold tracking-tight bg-clip-text text-transparent bg-gradient-to-r from-white to-slate-400">ClipAmbl</h1>
+            <h1 class="text-xl font-bold tracking-tight bg-clip-text text-transparent bg-gradient-to-r from-white to-slate-400">Clipadsk</h1>
         </div>
         <div class="flex items-center gap-3">
             <div id="status-badge" class="flex items-center gap-2 px-3 py-1 bg-slate-800/50 border border-white/5 rounded-full">
@@ -141,7 +141,7 @@
         <section id="history-section" class="hidden space-y-4">
             <div class="flex items-center justify-between">
                 <h3 class="text-lg font-bold text-white">Transcripciones guardadas</h3>
-                <button onclick="const h=getHistory();if(h.length&&confirm('Borrar todo el historial?')){localStorage.removeItem('clipambl_history');document.getElementById('history-list').innerHTML='';}" class="text-xs text-red-400 hover:text-red-300 transition-colors">Borrar todo</button>
+                <button onclick="const h=getHistory();if(h.length&&confirm('Borrar todo el historial?')){localStorage.removeItem('clipadsk_history');document.getElementById('history-list').innerHTML='';}" class="text-xs text-red-400 hover:text-red-300 transition-colors">Borrar todo</button>
             </div>
             <div id="history-list" class="space-y-3"></div>
         </section>
@@ -301,7 +301,7 @@
         </div>
     </nav>
 
-    <script src="main.js?v=2.0" defer></script>
+    <script src="main.js?v=2.1" defer></script>
     <script>
         if ('serviceWorker' in navigator) {
             window.addEventListener('load', () => {

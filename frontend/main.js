@@ -1,5 +1,5 @@
 /**
- * ClipAmbl - Frontend v2.0
+ * Clipadsk - Frontend v2.0
  * Herramienta de transcripción para periodistas y comunicadores.
  * Mejoras: WhatsApp upload, TikTok/Twitter/Facebook, herramientas periodísticas, historial.
  */
@@ -44,7 +44,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const isLocal      = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1' || window.location.protocol === 'file:';
     const isSharedPort = window.location.port === '5000' || window.location.port === '10000';
     const API_BASE     = (isLocal && !isSharedPort) ? 'http://127.0.0.1:5000/api' : '/api';
-    const APP_PASSWORD = 'pablo';
+    const APP_PASSWORD = 'acceso';
 
     let currentTab             = 'youtube';
     let currentTranscript      = '';
@@ -68,7 +68,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     // ─── HISTORY ─────────────────────────────────────────────────────────────────
-    const HISTORY_KEY = 'clipambl_history';
+    const HISTORY_KEY = 'clipadsk_history';
 
     function getHistory() {
         try { return JSON.parse(localStorage.getItem(HISTORY_KEY) || '[]'); }
@@ -396,7 +396,7 @@ document.addEventListener('DOMContentLoaded', () => {
         const methodLabels = { subtitles: 'Subtitulos directos', groq_whisper_v3: 'IA Whisper v3 (Groq)', groq_whisper_v3_file: 'IA Whisper v3 - Archivo', cache: 'Cache local' };
         
         // Solo el texto va al contenedor con scroll
-        transcriptContent.innerHTML = `<p class="text-slate-300 text-sm leading-relaxed">${text}</p>`;
+        transcriptContent.innerHTML = `<div class="text-slate-300 text-sm leading-relaxed whitespace-pre-wrap">${formatAIResponse(text)}</div>`;
         
         // Actualizar etiqueta de metodo
         const methodTag = document.createElement('div');
@@ -577,7 +577,7 @@ document.addEventListener('DOMContentLoaded', () => {
                         Copiar
                     </button>
                 </div>
-                <div class="ai-result-text text-slate-300 text-sm leading-relaxed whitespace-pre-wrap">${data.result}</div>`;
+                <div class="ai-result-text text-slate-300 text-sm leading-relaxed whitespace-pre-wrap">${formatAIResponse(data.result)}</div>`;
 
         } catch (err) {
             outputEl.innerHTML = `<p class="text-red-400 text-xs">Error: ${err.message}</p>`;
@@ -620,6 +620,21 @@ document.addEventListener('DOMContentLoaded', () => {
         document.body.appendChild(toast);
         setTimeout(() => { toast.style.opacity = '0'; setTimeout(() => toast.remove(), 400); }, 3500);
     }
+
+    /**
+     * Formatea la respuesta de la IA convirtiendo markdown basico a HTML
+     * y asegurando que los saltos de linea se respeten.
+     */
+    function formatAIResponse(text) {
+        if (!text) return "";
+        let formatted = text
+            // Negritas: **texto** -> <b>texto</b>
+            .replace(/\*\*(.*?)\*\*/g, '<b class="text-white font-bold">$1</b>')
+            // Cursivas: *texto* -> <i>texto</i>
+            .replace(/\*(.*?)\*/g, '<i>$1</i>');
+        
+        return formatted;
+    }
     // ─── AI CHAT LOGIC ──────────────────────────────────────────────────────────
     const chatInput    = document.getElementById('chat-input');
     const chatSendBtn  = document.getElementById('chat-send-btn');
@@ -657,7 +672,7 @@ document.addEventListener('DOMContentLoaded', () => {
             chatResponse.innerHTML = `
                 <div class="flex items-start gap-3">
                     <span class="material-symbols-outlined text-primary text-base mt-0.5">smart_toy</span>
-                    <p class="text-slate-200">${data.answer}</p>
+                    <div class="text-slate-200 text-sm leading-relaxed whitespace-pre-wrap">${formatAIResponse(data.answer)}</div>
                 </div>`;
         } catch (err) {
             chatResponse.innerHTML = `<p class="text-red-400 text-xs">Error: ${err.message}</p>`;

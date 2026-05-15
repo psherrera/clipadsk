@@ -732,9 +732,46 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 
     // ─── COPY / DOWNLOAD (card de video) ────────────────────────────────────────
+
+    /**
+     * Devuelve la transcripción con el mismo formato de párrafos que se ve en
+     * pantalla pero en texto plano (\n\n entre párrafos), listo para copiar o .txt
+     */
+    function getFormattedPlainText() {
+        if (!currentTranscript) return '';
+        const t = currentTranscript.trim();
+        // Si ya tiene párrafos explícitos, respetar
+        if (t.includes('\n\n')) return t;
+        // Saltos simples → párrafos
+        if (t.includes('\n')) {
+            return t.split('\n').map(l => l.trim()).filter(l => l).join('\n\n');
+        }
+        // Intentar dividir por oraciones
+        const sentences = t.match(/[^.!?]+[.!?]+["']?\s*/g);
+        if (sentences && sentences.length > 3) {
+            const out = [];
+            for (let i = 0; i < sentences.length; i += 4) {
+                const chunk = sentences.slice(i, i + 4).join('').trim();
+                if (chunk) out.push(chunk);
+            }
+            return out.join('\n\n');
+        }
+        // Último recurso: párrafos de 70 palabras
+        const words = t.split(/\s+/).filter(w => w);
+        if (words.length > 70) {
+            const out = [];
+            for (let i = 0; i < words.length; i += 70) {
+                const chunk = words.slice(i, i + 70).join(' ').trim();
+                if (chunk) out.push(chunk);
+            }
+            return out.join('\n\n');
+        }
+        return t;
+    }
+
     copyTranscriptBtn?.addEventListener('click', () => {
         if (!currentTranscript) return;
-        navigator.clipboard.writeText(currentTranscript);
+        navigator.clipboard.writeText(getFormattedPlainText());
         const orig = copyTranscriptBtn.innerHTML;
         copyTranscriptBtn.innerHTML = '<span class="material-symbols-outlined text-sm">check</span> COPIADO';
         setTimeout(() => { copyTranscriptBtn.innerHTML = orig; }, 2000);
@@ -742,11 +779,15 @@ document.addEventListener('DOMContentLoaded', () => {
 
     downloadTxtBtn?.addEventListener('click', () => {
         if (!currentTranscript) return;
+        const title = (titleEl?.textContent || 'transcripcion').trim().substring(0, 60);
+        const safeTitle = title.replace(/[/\\?%*:|"<>]/g, '-');
+        const header = `${title}\n${'─'.repeat(Math.min(title.length, 60))}\n\n`;
         const a = document.createElement('a');
-        a.href = URL.createObjectURL(new Blob([currentTranscript], { type: 'text/plain' }));
-        a.download = `${titleEl?.textContent.substring(0, 30) || 'transcripcion'}.txt`;
+        a.href = URL.createObjectURL(new Blob([header + getFormattedPlainText()], { type: 'text/plain;charset=utf-8' }));
+        a.download = `${safeTitle}.txt`;
         a.click();
     });
+
 
     downloadThumbBtn?.addEventListener('click', () => { if (currentMaxResThumbnail) window.open(currentMaxResThumbnail, '_blank'); });
 

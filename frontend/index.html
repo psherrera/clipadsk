@@ -18,6 +18,8 @@
     <link rel="apple-touch-icon" href="icon.svg">
     
     <link rel="stylesheet" href="style.css?v=3.3">
+    <!-- JSZip: crear archivos .zip en el navegador sin backend -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
 
     <script id="tailwind-config">
         tailwind.config = {
@@ -265,7 +267,7 @@
                                     </button>
                                 </div>
                                 <button id="download-txt-btn" class="hidden bg-white/5 hover:bg-white/10 border border-white/5 py-3 rounded-xl text-slate-300 font-bold text-sm flex items-center justify-center gap-2 transition-all">
-                                    <span class="material-symbols-outlined text-lg">article</span> Descargar .txt
+                                    <span class="material-symbols-outlined text-lg">folder_zip</span> Descargar .zip
                                 </button>
                             </div>
                         </div>
@@ -337,7 +339,7 @@
 
     <!-- Bottom Nav eliminado ya que se integró en el header -->
 
-    <script src="main.js?v=3.1" defer></script>
+    <script src="main.js?v=3.2" defer></script>
     <script>
         if ('serviceWorker' in navigator) {
             window.addEventListener('load', () => {

@@ -777,16 +777,52 @@ document.addEventListener('DOMContentLoaded', () => {
         setTimeout(() => { copyTranscriptBtn.innerHTML = orig; }, 2000);
     });
 
-    downloadTxtBtn?.addEventListener('click', () => {
+    downloadTxtBtn?.addEventListener('click', async () => {
         if (!currentTranscript) return;
-        const title = (titleEl?.textContent || 'transcripcion').trim().substring(0, 60);
+
+        const title     = (titleEl?.textContent || 'Transcripcion').trim().substring(0, 60);
         const safeTitle = title.replace(/[/\\?%*:|"<>]/g, '-');
-        const header = `${title}\n${'─'.repeat(Math.min(title.length, 60))}\n\n`;
-        const a = document.createElement('a');
-        a.href = URL.createObjectURL(new Blob([header + getFormattedPlainText()], { type: 'text/plain;charset=utf-8' }));
-        a.download = `${safeTitle}.txt`;
-        a.click();
+        const header    = `${title}\n${'─'.repeat(Math.min(title.length, 60))}\n\n`;
+        const content   = header + getFormattedPlainText();
+
+        // Feedback visual
+        const origHtml = downloadTxtBtn.innerHTML;
+        downloadTxtBtn.innerHTML = '<span class="material-symbols-outlined text-lg animate-spin">progress_activity</span> Generando...';
+        downloadTxtBtn.disabled = true;
+
+        try {
+            if (typeof JSZip === 'undefined') throw new Error('JSZip no cargó');
+
+            const zip  = new JSZip();
+            zip.file(`${safeTitle}.txt`, content, { binary: false });
+
+            const blob = await zip.generateAsync({
+                type: 'blob',
+                compression: 'DEFLATE',
+                compressionOptions: { level: 6 }
+            });
+
+            const a = document.createElement('a');
+            a.href     = URL.createObjectURL(blob);
+            a.download = `${safeTitle}.zip`;
+            a.click();
+            setTimeout(() => URL.revokeObjectURL(a.href), 10000);
+
+            downloadTxtBtn.innerHTML = '<span class="material-symbols-outlined text-lg">check</span> Descargado';
+            setTimeout(() => { downloadTxtBtn.innerHTML = origHtml; downloadTxtBtn.disabled = false; }, 2500);
+
+        } catch (err) {
+            // Fallback a .txt si JSZip falla
+            console.warn('JSZip no disponible, descargando .txt:', err);
+            const a = document.createElement('a');
+            a.href     = URL.createObjectURL(new Blob([content], { type: 'text/plain;charset=utf-8' }));
+            a.download = `${safeTitle}.txt`;
+            a.click();
+            downloadTxtBtn.innerHTML = origHtml;
+            downloadTxtBtn.disabled  = false;
+        }
     });
+
 
 
     downloadThumbBtn?.addEventListener('click', () => { if (currentMaxResThumbnail) window.open(currentMaxResThumbnail, '_blank'); });

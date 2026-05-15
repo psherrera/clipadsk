@@ -27,6 +27,7 @@ import asyncio
 import base64
 import random
 import time
+import sqlite3
 try:
     from pydub import AudioSegment
 except ImportError:
@@ -100,20 +101,65 @@ for p in ffmpeg_extra_paths:
         nuevo_path = p + os.pathsep + nuevo_path
 os.environ["PATH"] = nuevo_path
 
-# --- CACHÉ ---
+# --- BASE DE DATOS (SQLite) ---
+DB_FILE = os.path.join(BASE_DIR, 'clipadsk.db')
 
-def load_cache():
+def init_db():
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute('''CREATE TABLE IF NOT EXISTS transcripts 
+                 (url TEXT PRIMARY KEY, transcript TEXT, date_added TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+    
+    # Migración desde JSON antiguo si existe
     if os.path.exists(CACHE_FILE):
+        print("DEBUG DB: Migrando historial de JSON a SQLite...")
         try:
             with open(CACHE_FILE, 'r', encoding='utf-8') as f:
-                return json.load(f)
-        except:
-            return {}
-    return {}
+                old_data = json.load(f)
+                for url, text in old_data.items():
+                    c.execute("INSERT OR IGNORE INTO transcripts (url, transcript) VALUES (?, ?)", (url, text))
+            conn.commit()
+            # Renombrar archivo viejo para evitar re-migración
+            os.rename(CACHE_FILE, CACHE_FILE + ".migrated")
+            print("DEBUG DB: Migración completada con éxito.")
+        except Exception as e:
+            print(f"DEBUG DB: Error en migración: {e}")
+    conn.close()
+
+# Inicializar DB al arrancar
+init_db()
+
+def load_cache():
+    """Mantiene compatibilidad con el código existente pero lee de SQLite."""
+    try:
+        conn = sqlite3.connect(DB_FILE)
+        c = conn.cursor()
+        c.execute("SELECT url, transcript FROM transcripts")
+        rows = c.fetchall()
+        conn.close()
+        return {row[0]: row[1] for row in rows}
+    except Exception as e:
+        print(f"DEBUG DB: Error leyendo cache: {e}")
+        return {}
+
+def save_cache_entry(url, transcript):
+    """Guarda una entrada individual en la DB."""
+    try:
+        conn = sqlite3.connect(DB_FILE)
+        c = conn.cursor()
+        c.execute("INSERT OR REPLACE INTO transcripts (url, transcript) VALUES (?, ?)", (url, transcript))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"DEBUG DB: Error guardando en db: {e}")
 
 def save_cache(cache):
-    with open(CACHE_FILE, 'w', encoding='utf-8') as f:
-        json.dump(cache, f, ensure_ascii=False, indent=2)
+    """Mantiene compatibilidad (aunque es menos eficiente que save_cache_entry)."""
+    # En el flujo actual, save_cache se llama con todo el dict.
+    # Para SQLite es mejor guardar solo el nuevo, pero para no romper el flujo:
+    for url, text in cache.items():
+        save_cache_entry(url, text)
+
 
 # --- TRADUCCIÓN ---
 def translate_to_spanish(text):

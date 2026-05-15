@@ -248,18 +248,11 @@ class VideoRequest(BaseModel):
     groq_api_key: Optional[str] = None
     uid: Optional[str] = None
 
-class LoginRequest(BaseModel):
-    password: str
+
 
 # --- ENDPOINTS ---
 
-@app.post("/api/login")
-async def login(req: LoginRequest):
-    correct_password = os.environ.get('APP_PASSWORD', 'acceso')
-    if req.password == correct_password:
-        return {"success": True}
-    else:
-        raise HTTPException(status_code=401, detail="Contraseña incorrecta")
+
 
 # --- SANITIZACIÓN DE URLS ---
 def sanitize_url(url: str) -> str:

@@ -30,10 +30,6 @@ document.addEventListener('DOMContentLoaded', () => {
     const appSubtitle          = document.getElementById('app-subtitle');
     const tabTitle             = document.getElementById('tab-title');
     const inputIcon            = document.getElementById('input-icon');
-    const loginModal           = document.getElementById('login-modal');
-    const loginBtn             = document.getElementById('login-btn');
-    const passwordInput        = document.getElementById('app-password');
-    const loginError           = document.getElementById('login-error');
     const clearUrlBtn          = document.getElementById('clear-url-btn');
     const statusDot            = document.getElementById('status-dot');
     const statusText           = document.getElementById('status-text');
@@ -227,39 +223,7 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     });
 
-    // ─── LOGIN ───────────────────────────────────────────────────────────────────
-    loginBtn?.addEventListener('click', async () => {
-        const pass = passwordInput.value;
-        const oldText = loginBtn.textContent;
-        loginBtn.textContent = "Verificando...";
-        loginBtn.disabled = true;
-        
-        try {
-            const r = await fetch(`${API_BASE}/login`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ password: pass })
-            });
-            
-            if (r.ok) {
-                loginModal.classList.add('opacity-0');
-                setTimeout(() => loginModal.classList.add('hidden'), 400);
-                localStorage.setItem('app_logged_in', 'true');
-            } else {
-                throw new Error("Contraseña incorrecta");
-            }
-        } catch (e) {
-            loginError?.classList.remove('hidden');
-            passwordInput.value = '';
-            loginModal.querySelector('.glass')?.classList.add('animate-bounce');
-            setTimeout(() => loginModal.querySelector('.glass')?.classList.remove('animate-bounce'), 500);
-        } finally {
-            loginBtn.textContent = oldText;
-            loginBtn.disabled = false;
-        }
-    });
-    passwordInput?.addEventListener('keypress', e => { if (e.key === 'Enter') loginBtn?.click(); });
-    if (localStorage.getItem('app_logged_in') === 'true') loginModal?.classList.add('hidden');
+
 
     // ─── SERVER STATUS ───────────────────────────────────────────────────────────
     const updateStatusUI = (status) => {

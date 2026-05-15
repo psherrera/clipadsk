@@ -41,27 +41,7 @@
 
 <body class="bg-background-dark font-display text-slate-100 flex flex-col min-h-screen">
 
-    <!-- Login Modal -->
-    <div id="login-modal" class="fixed inset-0 z-[100] flex items-center justify-center bg-background-dark p-6">
-        <div class="glass max-w-[440px] w-full p-10 rounded-3xl text-center shadow-2xl fade-in">
-            <div class="w-20 h-20 rounded-2xl flex items-center justify-center mx-auto mb-6">
-                <img src="logo.png" alt="Clipadsk Logo" class="w-full h-full object-contain">
-            </div>
-            <h1 class="text-3xl font-bold mb-2">Clipadsk</h1>
-            <p class="text-slate-400 mb-8 text-sm">Acceso privado — Transcriptor para periodistas.</p>
-            <div class="space-y-6">
-                <div class="relative">
-                    <span class="material-symbols-outlined absolute left-4 top-1/2 -translate-y-1/2 text-slate-500">lock</span>
-                    <input type="password" id="app-password" placeholder="Contraseña..."
-                        class="w-full bg-slate-900 border border-white/10 rounded-xl py-5 pl-12 pr-4 text-lg focus:ring-2 focus:ring-primary focus:border-transparent outline-none transition-all placeholder:text-slate-600">
-                </div>
-                <button id="login-btn" class="w-full glow-button py-5 rounded-2xl text-xl font-extrabold flex items-center justify-center gap-3 transition-transform active:scale-95">
-                    Entrar <span class="material-symbols-outlined text-2xl">verified_user</span>
-                </button>
-                <p id="login-error" class="text-red-400 text-sm font-medium hidden">Contraseña incorrecta</p>
-            </div>
-        </div>
-    </div>
+
 
     <!-- Background Blobs -->
     <div class="background-blobs">
@@ -339,7 +319,7 @@
 
     <!-- Bottom Nav eliminado ya que se integró en el header -->
 
-    <script src="main.js?v=3.2" defer></script>
+    <script src="main.js?v=3.3" defer></script>
     <script>
         if ('serviceWorker' in navigator) {
             window.addEventListener('load', () => {

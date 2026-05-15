@@ -167,6 +167,8 @@ def cleanup_transcript_with_ai(text: str) -> str:
 class VideoRequest(BaseModel):
     url: str
     format_id: Optional[str] = "best"
+    start_time: Optional[str] = None
+    end_time: Optional[str] = None
 
 # --- ENDPOINTS ---
 
@@ -233,23 +235,7 @@ def get_robust_opts(target_url, extra={}):
 
     # Estrategia específica por plataforma
     if is_youtube:
-        # Si hay cookies, usamos web_safari (más robusto) o android.
-        # Si no hay, forzamos android/ios.
-        if 'cookiefile' in opts:
-            opts['extractor_args'] = {
-                'youtube': {
-                    'player_client': ['web_safari', 'android'],
-                    'player_skip': ['tv', 'tv_embedded', 'mweb']
-                }
-            }
-        else:
-            opts['extractor_args'] = {
-                'youtube': {
-                    'player_client': ['android', 'ios'],
-                    'player_skip': ['web', 'web_safari', 'tv', 'tv_embedded', 'mweb']
-                }
-            }
-        
+        # Dejamos que yt-dlp use sus clientes por defecto (web, tv, etc.) para que encuentre todas las calidades (1080p, 720p)
         opts['user_agent'] = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_4_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4.1 Mobile/15E148 Safari/604.1'
         print(f"DEBUG: Estrategia YouTube optimizada (Cookies: {'Si' if 'cookiefile' in opts else 'No'})")
 
@@ -718,6 +704,19 @@ async def download_video(req: VideoRequest, background_tasks: BackgroundTasks):
     else:
         fmt = 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best'
 
+    extra_opts = {
+        'format': fmt,
+        'outtmpl': output_template,
+        'merge_output_format': 'mp4',
+    }
+
+    if req.start_time or req.end_time:
+        from yt_dlp.utils import parse_duration, download_range_func
+        start_sec = parse_duration(req.start_time) if req.start_time else 0
+        end_sec = parse_duration(req.end_time) if req.end_time else float('inf')
+        extra_opts['download_ranges'] = download_range_func(None, [(start_sec, end_sec)])
+        extra_opts['force_keyframes_at_cuts'] = True
+
     # Intentar descarga con 3 estrategias
     downloaded = False
     last_err = ""
@@ -725,11 +724,7 @@ async def download_video(req: VideoRequest, background_tasks: BackgroundTasks):
     # --- ESTRATEGIA 1: Celular sin cookies (La que funcionó para info) ---
     try:
         print("DEBUG: Descarga Intento 1 - Celular sin cookies...")
-        opts = get_robust_opts(url, {
-            'format': fmt,
-            'outtmpl': output_template,
-            'merge_output_format': 'mp4',
-        })
+        opts = get_robust_opts(url, extra_opts)
         opts.pop('cookiefile', None)
         opts['extractor_args'] = {'youtube': {'player_client': ['android', 'ios']}}
         with yt_dlp.YoutubeDL(opts) as ydl:
@@ -743,11 +738,7 @@ async def download_video(req: VideoRequest, background_tasks: BackgroundTasks):
     if not downloaded:
         try:
             print("DEBUG: Descarga Intento 2 - Con cookies...")
-            opts = get_robust_opts(url, {
-                'format': fmt,
-                'outtmpl': output_template,
-                'merge_output_format': 'mp4',
-            })
+            opts = get_robust_opts(url, extra_opts)
             with yt_dlp.YoutubeDL(opts) as ydl:
                 ydl.download([url])
                 downloaded = True
@@ -759,11 +750,7 @@ async def download_video(req: VideoRequest, background_tasks: BackgroundTasks):
     if not downloaded:
         try:
             print("DEBUG: Descarga Intento 3 - Forzando iOS...")
-            opts = get_robust_opts(url, {
-                'format': fmt,
-                'outtmpl': output_template,
-                'merge_output_format': 'mp4',
-            })
+            opts = get_robust_opts(url, extra_opts)
             opts.pop('cookiefile', None)
             opts['extractor_args'] = {'youtube': {'player_client': ['ios']}}
             with yt_dlp.YoutubeDL(opts) as ydl:

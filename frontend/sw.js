@@ -1,9 +1,9 @@
-const CACHE_NAME = 'streamvault-v2.0';
+const CACHE_NAME = 'clipadsk-v2.6';
 const ASSETS = [
     './',
     './index.html',
     './style.css?v=2.0',
-    './main.js?v=2.0',
+    './main.js?v=2.6',
     './icon.svg',
     './manifest.json'
 ];

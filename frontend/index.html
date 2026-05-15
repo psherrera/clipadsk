@@ -150,9 +150,9 @@
         <section id="video-info-card" class="glass rounded-3xl overflow-hidden hidden fade-in shadow-2xl">
             <div class="flex flex-col md:flex-row divide-y md:divide-y-0 md:divide-x divide-white/5">
                 <!-- Thumbnail -->
-                <div class="md:w-2/5 relative aspect-video md:aspect-auto">
-                    <img id="video-thumbnail" src="" alt="Miniatura" class="w-full h-full object-cover" referrerpolicy="no-referrer">
-                    <div id="video-duration" class="absolute bottom-4 right-4 bg-black/80 px-2 py-1 rounded-md text-xs font-bold text-white">0:00</div>
+                <div class="md:w-2/5 relative aspect-video md:aspect-auto bg-black/40 flex items-center justify-center">
+                    <img id="video-thumbnail" src="" alt="Miniatura" class="w-full h-full object-contain drop-shadow-2xl" referrerpolicy="no-referrer">
+                    <div id="video-duration" class="absolute bottom-4 right-4 bg-black/80 px-2 py-1 rounded-md text-xs font-bold text-white shadow-lg">0:00</div>
                 </div>
                 <!-- Info -->
                 <div class="md:w-3/5 p-7 flex flex-col space-y-5">
@@ -169,6 +169,19 @@
                             <div class="relative">
                                 <select id="format-select" class="w-full bg-slate-900/50 border border-white/10 rounded-xl py-3.5 px-4 text-slate-200 appearance-none focus:ring-2 focus:ring-primary cursor-pointer"></select>
                                 <span class="material-symbols-outlined absolute right-4 top-1/2 -translate-y-1/2 pointer-events-none text-slate-500">expand_more</span>
+                            </div>
+                        </div>
+                        <div class="flex flex-col gap-2 mt-2">
+                            <label class="text-[10px] font-bold text-slate-500 uppercase tracking-widest">Recortar Video (Opcional)</label>
+                            <div class="grid grid-cols-2 gap-3">
+                                <div class="relative">
+                                    <span class="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500 text-[11px] font-bold">Desde:</span>
+                                    <input type="text" id="clip-start" placeholder="00:00" class="w-full bg-slate-900/50 border border-white/10 rounded-xl py-3 pl-14 pr-3 text-sm text-slate-200 focus:ring-2 focus:ring-primary outline-none" autocomplete="off">
+                                </div>
+                                <div class="relative">
+                                    <span class="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500 text-[11px] font-bold">Hasta:</span>
+                                    <input type="text" id="clip-end" placeholder="00:00" class="w-full bg-slate-900/50 border border-white/10 rounded-xl py-3 pl-14 pr-3 text-sm text-slate-200 focus:ring-2 focus:ring-primary outline-none" autocomplete="off">
+                                </div>
                             </div>
                         </div>
                         <div class="flex flex-col gap-3">
@@ -301,7 +314,7 @@
         </div>
     </nav>
 
-    <script src="main.js?v=2.1" defer></script>
+    <script src="main.js?v=2.6" defer></script>
     <script>
         if ('serviceWorker' in navigator) {
             window.addEventListener('load', () => {

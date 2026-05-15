@@ -278,6 +278,20 @@ document.addEventListener('DOMContentLoaded', () => {
         transcriptSection?.classList.add('hidden');
         showTranscriptBtn?.classList.add('hidden');
         downloadTxtBtn?.classList.add('hidden');
+        
+        const chatInputBox = document.getElementById('chat-input');
+        if (chatInputBox) chatInputBox.value = '';
+        
+        const chatResponseBox = document.getElementById('chat-response');
+        if (chatResponseBox) {
+            chatResponseBox.innerHTML = '';
+            chatResponseBox.classList.add('hidden');
+        }
+        
+        document.querySelectorAll('[id$="-ai-output"]').forEach(el => {
+            el.innerHTML = '';
+            el.classList.add('hidden');
+        });
 
         const detected = detectPlatformFromUrl(url);
         if (detected !== currentTab && detected !== 'youtube') switchTab(detected);
@@ -332,6 +346,9 @@ document.addEventListener('DOMContentLoaded', () => {
     downloadBtn?.addEventListener('click', async () => {
         const url = videoUrlInput?.value.trim();
         const formatId = formatSelect?.value;
+        const startTime = document.getElementById('clip-start')?.value.trim();
+        const endTime = document.getElementById('clip-end')?.value.trim();
+
         downloadBtn.disabled = true;
         downloadProgress?.classList.remove('hidden');
 
@@ -341,14 +358,29 @@ document.addEventListener('DOMContentLoaded', () => {
         }, 700);
 
         try {
-            const r = await fetch(`${API_BASE}/download`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ url, format_id: formatId }) });
+            const bodyData = { url, format_id: formatId };
+            if (startTime) bodyData.start_time = startTime;
+            if (endTime) bodyData.end_time = endTime;
+
+            const r = await fetch(`${API_BASE}/download`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(bodyData) });
             if (!r.ok) { const e = await r.json(); throw new Error(e.detail || 'Error en descarga'); }
             clearInterval(interval);
             updateProgress(95, 'Preparando archivo...');
             const blob = await r.blob();
             const a = document.createElement('a');
             a.href = URL.createObjectURL(blob);
-            a.download = `${titleEl.textContent.substring(0, 30).trim() || 'video'}.mp4`;
+            
+            let filename = `${titleEl.textContent.substring(0, 40).trim() || 'video'}`;
+            
+            const selectedText = formatSelect?.options[formatSelect?.selectedIndex]?.text || '';
+            const qualityMatch = selectedText.split(' ')[0];
+            if (qualityMatch && qualityMatch !== 'Mejor') {
+                filename += `_${qualityMatch}`;
+            }
+            
+            if (startTime) filename += `_desde_${startTime.replace(/:/g, '-')}`;
+            a.download = `${filename}.mp4`;
+            
             document.body.appendChild(a); a.click();
             URL.revokeObjectURL(a.href); a.remove();
             updateProgress(100, 'Descarga completada!');

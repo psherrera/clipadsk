@@ -39,12 +39,15 @@ document.addEventListener('DOMContentLoaded', () => {
     const statusText           = document.getElementById('status-text');
     const pwaInstallBtn        = document.getElementById('pwa-install-btn');
     const navItems             = document.querySelectorAll('.nav-item');
+    
+    // GROQ API KEY ELEMENTS
+    const groqApiKeyInput      = document.getElementById('groq-api-key-input');
+    const saveApiKeyBtn        = document.getElementById('save-api-key-btn');
 
     // ─── CONFIG ─────────────────────────────────────────────────────────────────
     const isLocal      = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1' || window.location.protocol === 'file:';
     const isSharedPort = window.location.port === '5000' || window.location.port === '10000';
     const API_BASE     = (isLocal && !isSharedPort) ? 'http://127.0.0.1:5000/api' : '/api';
-    const APP_PASSWORD = 'acceso';
 
     let currentTab             = 'youtube';
     let currentTranscript      = '';
@@ -54,10 +57,9 @@ document.addEventListener('DOMContentLoaded', () => {
     const PLATFORMS = {
         youtube:   { hosts: ['youtube.com', 'youtu.be'],             icon: 'subscriptions', label: 'YouTube',   placeholder: 'Pega el enlace de YouTube...' },
         instagram: { hosts: ['instagram.com'],                        icon: 'photo_library', label: 'Instagram', placeholder: 'Pega el enlace del Reel o Video...' },
-        tiktok:    { hosts: ['tiktok.com', 'vm.tiktok.com'],         icon: 'music_note',    label: 'TikTok',    placeholder: 'Pega el enlace de TikTok...' },
-        twitter:   { hosts: ['twitter.com', 'x.com', 't.co'],       icon: 'tag',           label: 'Twitter/X', placeholder: 'Pega el enlace del tweet con video...' },
-        facebook:  { hosts: ['facebook.com', 'fb.watch', 'fb.com'], icon: 'group',         label: 'Facebook',  placeholder: 'Pega el enlace del video de Facebook...' },
+        redes:     { hosts: ['tiktok.com', 'vm.tiktok.com', 'twitter.com', 'x.com', 't.co', 'facebook.com', 'fb.watch', 'fb.com'], icon: 'share', label: 'Redes (TikTok/X/FB)', placeholder: 'Pega enlace de TikTok, X o Facebook...' },
         whatsapp:  { hosts: [],                                       icon: 'mic',           label: 'WhatsApp',  placeholder: 'Sube un audio de WhatsApp (.ogg/.mp3)' },
+        history:   { hosts: [],                                       icon: 'settings',      label: 'Configuracion', placeholder: '' },
     };
 
     function detectPlatformFromUrl(url) {
@@ -69,6 +71,44 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // ─── HISTORY ─────────────────────────────────────────────────────────────────
     const HISTORY_KEY = 'clipadsk_history';
+    const GROQ_KEY_STORE = 'clipadsk_groq_api_key';
+
+    if (groqApiKeyInput) {
+        groqApiKeyInput.value = localStorage.getItem(GROQ_KEY_STORE) || '';
+    }
+    
+    saveApiKeyBtn?.addEventListener('click', () => {
+        const key = groqApiKeyInput?.value.trim();
+        if (key) {
+            localStorage.setItem(GROQ_KEY_STORE, key);
+            showToast('API Key guardada correctamente', 'success');
+        } else {
+            localStorage.removeItem(GROQ_KEY_STORE);
+            showToast('API Key eliminada', 'info');
+        }
+    });
+
+    // ─── CLEAR DOWNLOADS ─────────────────────────────────────────────────────────
+    const clearDownloadsBtn = document.getElementById('clear-downloads-btn');
+    clearDownloadsBtn?.addEventListener('click', async () => {
+        if (!confirm('¿Estás seguro que deseas borrar todos los archivos descargados? Esto liberará espacio en el disco duro de la computadora.')) return;
+        
+        const originalText = clearDownloadsBtn.innerHTML;
+        clearDownloadsBtn.innerHTML = '<div class="w-4 h-4 border-2 border-orange-400 border-t-transparent rounded-full animate-spin"></div> Borrando...';
+        clearDownloadsBtn.disabled = true;
+
+        try {
+            const r = await fetch(`${API_BASE}/clear-downloads`, { method: 'DELETE' });
+            const data = await r.json();
+            if (r.ok) showToast('Descargas borradas correctamente, espacio liberado', 'success');
+            else throw new Error(data.detail || 'Error al borrar descargas');
+        } catch (err) {
+            showToast(err.message, 'error');
+        } finally {
+            clearDownloadsBtn.innerHTML = originalText;
+            clearDownloadsBtn.disabled = false;
+        }
+    });
 
     function getHistory() {
         try { return JSON.parse(localStorage.getItem(HISTORY_KEY) || '[]'); }
@@ -94,8 +134,8 @@ document.addEventListener('DOMContentLoaded', () => {
             container.innerHTML = `
                 <div class="text-center py-16 text-slate-500">
                     <span class="material-symbols-outlined text-5xl mb-4 block opacity-30">history</span>
-                    <p class="text-sm">Aun no hay transcripciones guardadas.</p>
-                    <p class="text-xs mt-1 opacity-60">Se guardan automaticamente al transcribir.</p>
+                    <p class="text-sm">Aún no hay transcripciones guardadas.</p>
+                    <p class="text-xs mt-1 opacity-60">Se guardan automáticamente al transcribir.</p>
                 </div>`;
             return;
         }
@@ -170,10 +210,10 @@ document.addEventListener('DOMContentLoaded', () => {
         videoInfoCard?.classList.add('hidden');
 
         if (cfg) {
-            if (tabTitle)    tabTitle.textContent    = `${cfg.label} Transcriptor`;
-            if (appSubtitle) appSubtitle.textContent = `Transcribi contenido de ${cfg.label} con IA.`;
+            if (tabTitle)    tabTitle.textContent    = tab === 'history' ? 'Configuración y Guardados' : `${cfg.label} Transcriptor`;
+            if (appSubtitle) appSubtitle.textContent = tab === 'history' ? 'Ajustes, claves de API y transcripciones locales.' : `Transcribí contenido de ${cfg.label} con IA.`;
             if (inputIcon)   inputIcon.textContent   = cfg.icon;
-            if (videoUrlInput) videoUrlInput.placeholder = cfg.placeholder;
+            if (videoUrlInput && tab !== 'history') videoUrlInput.placeholder = cfg.placeholder;
         }
 
         if (tab === 'history') renderHistory();
@@ -188,16 +228,34 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 
     // ─── LOGIN ───────────────────────────────────────────────────────────────────
-    loginBtn?.addEventListener('click', () => {
-        if (passwordInput.value === APP_PASSWORD) {
-            loginModal.classList.add('opacity-0');
-            setTimeout(() => loginModal.classList.add('hidden'), 400);
-            localStorage.setItem('app_logged_in', 'true');
-        } else {
+    loginBtn?.addEventListener('click', async () => {
+        const pass = passwordInput.value;
+        const oldText = loginBtn.textContent;
+        loginBtn.textContent = "Verificando...";
+        loginBtn.disabled = true;
+        
+        try {
+            const r = await fetch(`${API_BASE}/login`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ password: pass })
+            });
+            
+            if (r.ok) {
+                loginModal.classList.add('opacity-0');
+                setTimeout(() => loginModal.classList.add('hidden'), 400);
+                localStorage.setItem('app_logged_in', 'true');
+            } else {
+                throw new Error("Contraseña incorrecta");
+            }
+        } catch (e) {
             loginError?.classList.remove('hidden');
             passwordInput.value = '';
             loginModal.querySelector('.glass')?.classList.add('animate-bounce');
             setTimeout(() => loginModal.querySelector('.glass')?.classList.remove('animate-bounce'), 500);
+        } finally {
+            loginBtn.textContent = oldText;
+            loginBtn.disabled = false;
         }
     });
     passwordInput?.addEventListener('keypress', e => { if (e.key === 'Enter') loginBtn?.click(); });
@@ -352,13 +410,19 @@ document.addEventListener('DOMContentLoaded', () => {
         downloadBtn.disabled = true;
         downloadProgress?.classList.remove('hidden');
 
-        let progress = 0;
-        const interval = setInterval(() => {
-            if (progress < 88) { progress += Math.random() * 4; updateProgress(Math.floor(progress), 'Procesando en el servidor...'); }
-        }, 700);
+        const uid = Math.random().toString(36).substring(2, 15);
+        const interval = setInterval(async () => {
+            try {
+                const r = await fetch(`${API_BASE}/progress/${uid}`);
+                if (r.ok) {
+                    const data = await r.json();
+                    updateProgress(data.progress || 0, data.text || 'Procesando en el servidor...');
+                }
+            } catch (e) {}
+        }, 800);
 
         try {
-            const bodyData = { url, format_id: formatId };
+            const bodyData = { url, format_id: formatId, uid };
             if (startTime) bodyData.start_time = startTime;
             if (endTime) bodyData.end_time = endTime;
 
@@ -389,7 +453,10 @@ document.addEventListener('DOMContentLoaded', () => {
             clearInterval(interval);
             showToast(`Error: ${err.message}`, 'error');
             downloadProgress?.classList.add('hidden');
-        } finally { downloadBtn.disabled = false; }
+        } finally { 
+            clearInterval(interval);
+            downloadBtn.disabled = false; 
+        }
     });
 
     // ─── TRANSCRIPT FROM URL ─────────────────────────────────────────────────────
@@ -400,13 +467,30 @@ document.addEventListener('DOMContentLoaded', () => {
         transcriptContent.innerHTML = `
             <div class="flex items-center gap-3 text-slate-400">
                 <div class="w-5 h-5 border-2 border-slate-700 border-t-accent rounded-full animate-spin flex-shrink-0"></div>
-                <p class="text-sm animate-pulse">Transcribiendo con IA... puede tardar hasta 60 segundos.</p>
+                <p id="transcript-progress-text" class="text-sm animate-pulse">Iniciando proceso...</p>
             </div>`;
         showTranscriptBtn.disabled = true;
 
+        const uid = Math.random().toString(36).substring(2, 15);
+        const pollInterval = setInterval(async () => {
+            try {
+                const r = await fetch(`${API_BASE}/progress/${uid}`);
+                if (r.ok) {
+                    const data = await r.json();
+                    const textEl = document.getElementById('transcript-progress-text');
+                    if (textEl && data.text) {
+                        textEl.textContent = `${data.text} (${data.progress}%)`;
+                    }
+                }
+            } catch (e) {}
+        }, 800);
+
         try {
-            const r    = await fetch(`${API_BASE}/transcript`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ url }) });
+            const reqBody = { url, groq_api_key: localStorage.getItem(GROQ_KEY_STORE) || undefined, uid };
+            const r    = await fetch(`${API_BASE}/transcript`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(reqBody) });
             const data = await r.json();
+
+            clearInterval(pollInterval);
 
             if (data.error) {
                 transcriptContent.innerHTML = `<div class="bg-red-500/10 p-4 rounded-xl border border-red-500/20 text-red-400 text-sm">Error: ${data.error.replace(/\u001b\[[0-9;]*m/g, '')}</div>`;
@@ -420,31 +504,37 @@ document.addEventListener('DOMContentLoaded', () => {
             saveToHistory({ url, platform: detectPlatformFromUrl(url), title: titleEl.textContent || url, transcript: data.transcript });
 
         } catch (err) {
+            clearInterval(pollInterval);
             transcriptContent.innerHTML = `<p class="text-red-400 text-sm">Error al conectar con el servidor.</p>`;
-        } finally { showTranscriptBtn.disabled = false; }
+        } finally { 
+            clearInterval(pollInterval);
+            showTranscriptBtn.disabled = false; 
+        }
     });
 
     function renderTranscript(text, method) {
-        const methodLabels = { subtitles: 'Subtitulos directos', groq_whisper_v3: 'IA Whisper v3 (Groq)', groq_whisper_v3_file: 'IA Whisper v3 - Archivo', cache: 'Cache local' };
+        const methodLabels = { subtitles: 'Subtítulos directos', groq_whisper_v3: 'IA Whisper v3 (Groq)', groq_whisper_v3_file: 'IA Whisper v3 - Archivo', cache: 'Caché local' };
         
-        // Solo el texto va al contenedor con scroll
-        transcriptContent.innerHTML = `<div class="text-slate-300 text-sm leading-relaxed whitespace-pre-wrap">${formatAIResponse(text)}</div>`;
-        
-        // Actualizar etiqueta de metodo
-        const methodTag = document.createElement('div');
-        methodTag.className = "flex items-center gap-2 text-[10px] font-bold text-slate-500 uppercase tracking-widest bg-white/5 py-1 px-3 rounded-full w-fit mt-4 mb-2";
-        methodTag.innerHTML = `<span class="material-symbols-outlined text-xs">auto_awesome</span> ${methodLabels[method] || method}`;
-        transcriptContent.appendChild(methodTag);
-
-        // Mostrar herramientas y chat
-        document.getElementById('ai-chat-section')?.classList.remove('hidden');
-        
-        // Inyectar herramientas si no estan
+        // 1. Inyectar herramientas ARRIBA (antes del texto)
         const toolsContainer = document.getElementById('journalist-tools-wrapper');
         if (toolsContainer) {
             toolsContainer.innerHTML = buildJournalistToolsHtml('vc');
             toolsContainer.classList.remove('hidden');
         }
+
+        // 2. Texto de transcripción con etiqueta de método
+        transcriptContent.innerHTML = `
+            <div class="flex items-center gap-2 text-[10px] font-bold text-slate-500 uppercase tracking-widest bg-white/5 py-1 px-3 rounded-full w-fit mb-4">
+                <span class="material-symbols-outlined text-xs">auto_awesome</span>
+                ${methodLabels[method] || method}
+            </div>
+            <div class="text-slate-300 text-sm leading-relaxed">${formatAIResponse(text)}</div>`;
+
+        // 3. Mostrar sección de chat
+        document.getElementById('ai-chat-section')?.classList.remove('hidden');
+        // Limpiar historial de chat al cargar nueva transcripción
+        const chatHistory = document.getElementById('chat-history');
+        if (chatHistory) chatHistory.innerHTML = '';
     }
 
     // ─── WHATSAPP FILE UPLOAD ────────────────────────────────────────────────────
@@ -477,6 +567,7 @@ document.addEventListener('DOMContentLoaded', () => {
         const formData = new FormData();
         formData.append('file', file);
         formData.append('language', 'es');
+        formData.append('groq_api_key', localStorage.getItem(GROQ_KEY_STORE) || '');
 
         try {
             const r    = await fetch(`${API_BASE}/transcript-file`, { method: 'POST', body: formData });
@@ -539,26 +630,31 @@ document.addEventListener('DOMContentLoaded', () => {
     // ─── JOURNALIST TOOLS ────────────────────────────────────────────────────────
     function buildJournalistToolsHtml(prefix) {
         return `
-        <div id="${prefix}-tools-container" class="border-t border-white/5 pt-4 mt-2">
-            <div class="flex items-center gap-2 mb-3">
+        <div id="${prefix}-tools-container">
+            <div class="flex items-center gap-2 mb-4">
                 <span class="bg-primary/20 text-primary p-1.5 rounded-lg flex items-center"><span class="material-symbols-outlined text-sm">newspaper</span></span>
-                <h5 class="font-bold text-white text-sm">Herramientas periodisticas</h5>
+                <h5 class="font-bold text-white text-sm">Herramientas periodísticas</h5>
+                <span class="ml-auto text-[10px] font-bold text-slate-600 uppercase tracking-widest">IA</span>
             </div>
-            <div class="grid grid-cols-2 gap-2">
-                <button data-tool="summary" data-prefix="${prefix}" class="j-tool-btn bg-white/5 hover:bg-primary/20 border border-white/5 py-3 px-3 rounded-xl text-slate-300 text-xs font-bold flex items-center gap-2 transition-all">
-                    <span class="material-symbols-outlined text-base text-primary">summarize</span> Resumen
+            <div class="grid grid-cols-2 sm:grid-cols-4 gap-2 mb-4">
+                <button data-tool="summary" data-prefix="${prefix}" class="j-tool-btn group bg-primary/10 hover:bg-primary/25 border border-primary/20 hover:border-primary/40 py-3.5 px-3 rounded-xl text-slate-200 text-sm font-bold flex flex-col items-center gap-1.5 transition-all active:scale-95">
+                    <span class="material-symbols-outlined text-xl text-primary group-hover:scale-110 transition-transform">summarize</span>
+                    <span>Resumen</span>
                 </button>
-                <button data-tool="quotes" data-prefix="${prefix}" class="j-tool-btn bg-white/5 hover:bg-accent/20 border border-white/5 py-3 px-3 rounded-xl text-slate-300 text-xs font-bold flex items-center gap-2 transition-all">
-                    <span class="material-symbols-outlined text-base text-accent">format_quote</span> Citas
+                <button data-tool="quotes" data-prefix="${prefix}" class="j-tool-btn group bg-accent/10 hover:bg-accent/20 border border-accent/20 hover:border-accent/40 py-3.5 px-3 rounded-xl text-slate-200 text-sm font-bold flex flex-col items-center gap-1.5 transition-all active:scale-95">
+                    <span class="material-symbols-outlined text-xl text-accent group-hover:scale-110 transition-transform">format_quote</span>
+                    <span>Citas</span>
                 </button>
-                <button data-tool="data" data-prefix="${prefix}" class="j-tool-btn bg-white/5 hover:bg-orange-500/20 border border-white/5 py-3 px-3 rounded-xl text-slate-300 text-xs font-bold flex items-center gap-2 transition-all">
-                    <span class="material-symbols-outlined text-base text-orange-400">data_object</span> Datos duros
+                <button data-tool="data" data-prefix="${prefix}" class="j-tool-btn group bg-orange-500/10 hover:bg-orange-500/20 border border-orange-500/20 hover:border-orange-500/40 py-3.5 px-3 rounded-xl text-slate-200 text-sm font-bold flex flex-col items-center gap-1.5 transition-all active:scale-95">
+                    <span class="material-symbols-outlined text-xl text-orange-400 group-hover:scale-110 transition-transform">data_object</span>
+                    <span>Datos duros</span>
                 </button>
-                <button data-tool="angle" data-prefix="${prefix}" class="j-tool-btn bg-white/5 hover:bg-emerald-500/20 border border-white/5 py-3 px-3 rounded-xl text-slate-300 text-xs font-bold flex items-center gap-2 transition-all">
-                    <span class="material-symbols-outlined text-base text-emerald-400">lightbulb</span> Angulos de nota
+                <button data-tool="angle" data-prefix="${prefix}" class="j-tool-btn group bg-emerald-500/10 hover:bg-emerald-500/20 border border-emerald-500/20 hover:border-emerald-500/40 py-3.5 px-3 rounded-xl text-slate-200 text-sm font-bold flex flex-col items-center gap-1.5 transition-all active:scale-95">
+                    <span class="material-symbols-outlined text-xl text-emerald-400 group-hover:scale-110 transition-transform">lightbulb</span>
+                    <span>Ángulos de nota</span>
                 </button>
             </div>
-            <div id="${prefix}-ai-output" class="hidden mt-4 bg-black/30 rounded-2xl p-5 border border-white/5 fade-in"></div>
+            <div id="${prefix}-ai-output" class="hidden mt-2 bg-black/30 rounded-2xl p-5 border border-white/5 fade-in"></div>
         </div>`;
     }
 
@@ -572,17 +668,17 @@ document.addEventListener('DOMContentLoaded', () => {
         if (!mode || !prefix) return;
 
         if (!currentTranscript || currentTranscript.length < 50) {
-            showToast('Primero transcribi un audio o video', 'error'); return;
+            showToast('Primero transcribí un audio o video', 'error'); return;
         }
 
         const outputEl = document.getElementById(`${prefix}-ai-output`);
         if (!outputEl) return;
 
         const cfg = {
-            summary : { label: 'Resumen ejecutivo', icon: 'summarize',    color: 'text-primary' },
-            quotes  : { label: 'Citas textuales',   icon: 'format_quote', color: 'text-accent' },
+            summary : { label: 'Resumen ejecutivo',  icon: 'summarize',    color: 'text-primary' },
+            quotes  : { label: 'Citas textuales',    icon: 'format_quote', color: 'text-accent' },
             data    : { label: 'Datos duros',        icon: 'data_object',  color: 'text-orange-400' },
-            angle   : { label: 'Angulos de nota',    icon: 'lightbulb',    color: 'text-emerald-400' },
+            angle   : { label: 'Ángulos de nota',    icon: 'lightbulb',    color: 'text-emerald-400' },
         }[mode];
 
         outputEl.classList.remove('hidden');
@@ -595,7 +691,8 @@ document.addEventListener('DOMContentLoaded', () => {
             <p class="text-slate-500 text-xs animate-pulse">Analizando con IA...</p>`;
 
         try {
-            const r    = await fetch(`${API_BASE}/analyze`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ transcript: currentTranscript, mode }) });
+            const reqBody = { transcript: currentTranscript, mode, groq_api_key: localStorage.getItem(GROQ_KEY_STORE) || undefined };
+            const r    = await fetch(`${API_BASE}/analyze`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(reqBody) });
             const data = await r.json();
             if (!r.ok) throw new Error(data.detail || 'Error en el analisis');
 
@@ -609,10 +706,28 @@ document.addEventListener('DOMContentLoaded', () => {
                         Copiar
                     </button>
                 </div>
-                <div class="ai-result-text text-slate-300 text-sm leading-relaxed whitespace-pre-wrap">${formatAIResponse(data.result)}</div>`;
+                <div class="ai-result-text text-slate-300 text-sm leading-relaxed">${formatAIResponse(data.result)}</div>`;
 
         } catch (err) {
-            outputEl.innerHTML = `<p class="text-red-400 text-xs">Error: ${err.message}</p>`;
+            const isRateLimit = err.message.includes('429') || err.message.includes('Límite') || err.message.includes('rate_limit');
+            outputEl.innerHTML = isRateLimit
+                ? `<div class="flex flex-col gap-3">
+                    <div class="flex items-start gap-3">
+                        <span class="material-symbols-outlined text-amber-400 text-xl flex-shrink-0">warning</span>
+                        <div>
+                            <p class="font-bold text-amber-300 text-sm mb-1">Límite de Groq alcanzado</p>
+                            <p class="text-slate-400 text-xs leading-relaxed">Alcanzaste el límite de tokens gratuitos por hoy. Podés:</p>
+                        </div>
+                    </div>
+                    <ul class="text-xs text-slate-400 space-y-1 pl-4">
+                        <li>• Esperá unos minutos e intentá de nuevo</li>
+                        <li>• Configurá tu propia API key en <strong class="text-primary cursor-pointer" onclick="document.querySelector('[data-tab=history]')?.click()">Configuración →</strong></li>
+                    </ul>
+                   </div>`
+                : `<div class="flex items-start gap-2">
+                    <span class="material-symbols-outlined text-red-400 text-base flex-shrink-0">error</span>
+                    <p class="text-red-400 text-xs">${err.message}</p>
+                  </div>`;
         }
     });
 
@@ -654,18 +769,62 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     /**
-     * Formatea la respuesta de la IA convirtiendo markdown basico a HTML
-     * y asegurando que los saltos de linea se respeten.
+     * Formatea la respuesta de la IA convirtiendo markdown básico a HTML
+     * y dividiendo el texto en párrafos legibles automáticamente.
      */
     function formatAIResponse(text) {
         if (!text) return "";
-        let formatted = text
-            // Negritas: **texto** -> <b>texto</b>
-            .replace(/\*\*(.*?)\*\*/g, '<b class="text-white font-bold">$1</b>')
-            // Cursivas: *texto* -> <i>texto</i>
-            .replace(/\*(.*?)\*/g, '<i>$1</i>');
-        
-        return formatted;
+
+        // 1. Escapar HTML básico por seguridad
+        let t = text
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;');
+
+        // 2. Markdown → HTML
+        t = t
+            .replace(/\*\*(.*?)\*\*/g, '<strong class="text-white font-bold">$1</strong>')
+            .replace(/\*(.*?)\*/g, '<em>$1</em>')
+            // Bullet points: • o - al inicio de línea
+            .replace(/^[•\-]\s+(.+)$/gm, '<li class="ml-4 list-disc">$1</li>');
+
+        // 3. Dividir en párrafos
+        if (t.includes('\n\n')) {
+            // Texto con párrafos explícitos (respuesta de IA limpiada)
+            return t.split('\n\n')
+                .map(p => p.trim())
+                .filter(p => p)
+                .map(p => {
+                    const inner = p.replace(/\n/g, '<br>');
+                    // Si es lista, envolver en <ul>
+                    if (inner.includes('<li')) return `<ul class="space-y-1 mb-3">${inner}</ul>`;
+                    return `<p class="transcript-paragraph">${inner}</p>`;
+                })
+                .join('');
+        }
+
+        if (t.includes('\n')) {
+            // Texto con saltos simples
+            return t.split('\n')
+                .filter(l => l.trim())
+                .map(l => `<p class="transcript-paragraph">${l}</p>`)
+                .join('');
+        }
+
+        // 4. Texto plano sin saltos (ej: subtítulos de YouTube pegados en una línea).
+        // Dividir automáticamente cada 4 oraciones para que "respire".
+        const sentences = t.match(/[^.!?]+[.!?]+["']?\s*/g);
+        if (sentences && sentences.length > 4) {
+            const paragraphs = [];
+            for (let i = 0; i < sentences.length; i += 4) {
+                const chunk = sentences.slice(i, i + 4).join('').trim();
+                if (chunk) paragraphs.push(`<p class="transcript-paragraph">${chunk}</p>`);
+            }
+            return paragraphs.join('');
+        }
+
+        // Texto corto sin oraciones claras: devolver como párrafo único
+        return `<p class="transcript-paragraph">${t}</p>`;
     }
     // ─── AI CHAT LOGIC ──────────────────────────────────────────────────────────
     const chatInput    = document.getElementById('chat-input');
@@ -675,18 +834,37 @@ document.addEventListener('DOMContentLoaded', () => {
     chatSendBtn?.addEventListener('click', async () => {
         const question = chatInput?.value.trim();
         if (!question) return;
-        if (!currentTranscript) { showToast('Espera a que termine la transcripcion', 'error'); return; }
+        if (!currentTranscript) { showToast('Esperá a que termine la transcripción', 'error'); return; }
+
+        // Agregar mensaje del usuario al historial
+        const chatHistory = document.getElementById('chat-history');
+        if (chatHistory) {
+            const userBubble = document.createElement('div');
+            userBubble.className = 'flex items-start gap-3 justify-end fade-in';
+            userBubble.innerHTML = `
+                <div class="bg-primary/20 border border-primary/20 rounded-2xl rounded-tr-sm px-4 py-2.5 text-sm text-slate-200 max-w-[85%]">
+                    ${question.replace(/</g, '&lt;')}
+                </div>
+                <span class="material-symbols-outlined text-primary text-base mt-0.5 flex-shrink-0">person</span>`;
+            chatHistory.appendChild(userBubble);
+        }
 
         chatInput.value = '';
         chatInput.disabled = true;
         chatSendBtn.disabled = true;
-        
-        chatResponse.classList.remove('hidden');
-        chatResponse.innerHTML = `
-            <div class="flex items-center gap-3">
-                <div class="w-4 h-4 border-2 border-primary/20 border-t-primary rounded-full animate-spin"></div>
-                <p class="text-xs text-slate-400 animate-pulse">Pensando...</p>
+
+        // Burbuja de carga
+        const loadingBubble = document.createElement('div');
+        loadingBubble.className = 'flex items-start gap-3 fade-in';
+        loadingBubble.innerHTML = `
+            <span class="material-symbols-outlined text-primary text-base mt-0.5 flex-shrink-0">smart_toy</span>
+            <div class="bg-white/5 border border-white/5 rounded-2xl rounded-tl-sm px-4 py-3 text-sm text-slate-400 flex items-center gap-2">
+                <div class="w-3 h-3 border-2 border-primary/20 border-t-primary rounded-full animate-spin"></div>
+                Pensando...
             </div>`;
+        chatHistory?.appendChild(loadingBubble);
+        chatResponse?.classList.remove('hidden');
+        loadingBubble.scrollIntoView({ behavior: 'smooth', block: 'end' });
 
         try {
             const r = await fetch(`${API_BASE}/chat`, {
@@ -695,23 +873,28 @@ document.addEventListener('DOMContentLoaded', () => {
                 body: JSON.stringify({ 
                     url: videoUrlInput.value, 
                     question: question,
-                    transcript: currentTranscript 
+                    transcript: currentTranscript,
+                    groq_api_key: localStorage.getItem(GROQ_KEY_STORE) || undefined
                 })
             });
             const data = await r.json();
             if (!r.ok) throw new Error(data.detail || 'Error en el chat');
 
-            chatResponse.innerHTML = `
-                <div class="flex items-start gap-3">
-                    <span class="material-symbols-outlined text-primary text-base mt-0.5">smart_toy</span>
-                    <div class="text-slate-200 text-sm leading-relaxed whitespace-pre-wrap">${formatAIResponse(data.answer)}</div>
+            // Reemplazar burbuja de carga con la respuesta
+            loadingBubble.innerHTML = `
+                <span class="material-symbols-outlined text-primary text-base mt-0.5 flex-shrink-0">smart_toy</span>
+                <div class="bg-white/5 border border-white/5 rounded-2xl rounded-tl-sm px-4 py-2.5 text-sm text-slate-200 leading-relaxed whitespace-pre-wrap max-w-[85%]">
+                    ${formatAIResponse(data.answer)}
                 </div>`;
         } catch (err) {
-            chatResponse.innerHTML = `<p class="text-red-400 text-xs">Error: ${err.message}</p>`;
+            loadingBubble.innerHTML = `
+                <span class="material-symbols-outlined text-red-400 text-base mt-0.5 flex-shrink-0">error</span>
+                <div class="bg-red-500/10 border border-red-500/20 rounded-2xl px-4 py-2.5 text-sm text-red-400">${err.message}</div>`;
         } finally {
             chatInput.disabled = false;
             chatSendBtn.disabled = false;
             chatInput.focus();
+            loadingBubble.scrollIntoView({ behavior: 'smooth', block: 'end' });
         }
     });
 

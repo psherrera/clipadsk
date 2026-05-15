@@ -10,7 +10,7 @@ echo.
 :: ── Verificar Python ─────────────────────────────────────────
 python --version >nul 2>&1
 if %errorlevel% neq 0 (
-    echo [+] Python no encontrado. Intentando instalar automaticamente (Windows 10/11)...
+    echo [+] Python no encontrado. Intentando instalar automaticamente ^(Windows 10/11^)...
     winget --version >nul 2>&1
     if %errorlevel% neq 0 (
         echo [ERROR] Tu Windows no soporta auto-instalacion. Instala Python desde https://python.org

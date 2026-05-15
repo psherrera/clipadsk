@@ -161,10 +161,66 @@ input::placeholder {
 
 /* Transcript Specific Styles */
 .transcript-body {
-    max-height: 400px;
+    max-height: 500px;
     overflow-y: auto;
     padding-right: 10px;
 }
+
+@media (min-width: 1024px) {
+    .transcript-body {
+        max-height: none; /* En desktop ocupa el espacio flex disponible */
+    }
+}
+
+/* ── Desktop: Layout de pantalla completa sin scroll de página ── */
+@media (min-width: 1024px) {
+    body {
+        height: 100dvh;
+        overflow: hidden;
+        display: flex;
+        flex-direction: column;
+    }
+
+    body > header {
+        flex-shrink: 0;
+    }
+
+    /* El main ocupa el espacio restante */
+    main.app-main {
+        flex: 1;
+        min-height: 0;
+        overflow: hidden;
+        align-items: stretch !important;
+        padding-bottom: 1.5rem !important;
+    }
+
+    /* Cada columna scrollea por su cuenta */
+    .app-col-left,
+    .app-col-right {
+        height: 100%;
+        overflow-y: auto;
+        overflow-x: hidden;
+        padding-right: 4px;
+        /* scrollbar delgada para no ocupar espacio */
+        scrollbar-width: thin;
+        scrollbar-color: rgba(137,90,246,0.3) transparent;
+    }
+
+    .app-col-left::-webkit-scrollbar,
+    .app-col-right::-webkit-scrollbar { width: 4px; }
+    .app-col-left::-webkit-scrollbar-thumb,
+    .app-col-right::-webkit-scrollbar-thumb {
+        background: rgba(137,90,246,0.35);
+        border-radius: 4px;
+    }
+}
+
+/* Párrafos de transcripción */
+.transcript-paragraph {
+    margin-bottom: 0.85rem;
+    line-height: 1.75;
+}
+.transcript-paragraph:last-child { margin-bottom: 0; }
 
 /* Media preview specifically for results */
 .thumbnail-wrapper {

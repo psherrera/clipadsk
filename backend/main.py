@@ -129,39 +129,72 @@ def translate_to_spanish(text):
         print(f"Error traducción: {e}")
         return text
 
-def cleanup_transcript_with_ai(text: str) -> str:
+def get_local_groq(api_key: str = None):
+    if api_key and api_key.strip():
+        try:
+            from groq import Groq
+            return Groq(api_key=api_key.strip())
+        except Exception:
+            return groq_client
+    return groq_client
+
+def cleanup_transcript_with_ai(text: str, client=None) -> str:
     """Usa la IA para limpiar repeticiones, corregir puntuación y añadir párrafos."""
-    if not groq_client or len(text) < 100:
+    actual_client = client or groq_client
+    if not actual_client or len(text) < 100:
         return text
     
     try:
-        # Truncar si es absurdamente largo para la limpieza
-        safe_text = text[:8000] if len(text) > 8000 else text
-        
-        prompt = f"""
-        Sos un editor experto. Tu tarea es LIMPIAR y FORMATEAR la siguiente transcripción de un video.
-        
-        INSTRUCCIONES:
-        1. ELIMINÁ repeticiones de frases (a veces el sistema de transcripción repite lo mismo varias veces por error).
-        2. AGREGÁ puntuación correcta (comas, puntos).
-        3. DIVIDÍ el texto en párrafos lógicos (usá DOBLE SALTO DE LÍNEA entre párrafos) para que el texto sea legible.
-        4. No resumas, mantené el contenido original pero bien escrito.
-        5. Respondé SOLO con el texto limpio.
-        
-        TRANSCRIPCIÓN A LIMPIAR:
-        {safe_text}
-        """
-        
-        completion = groq_client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.3,
-            max_tokens=2048,
-        )
-        return completion.choices[0].message.content.strip()
+        # Si el texto es muy largo, procesarlo en fragmentos para no perder Llama-3 ni pasarnos de tokens
+        max_chunk_length = 6000
+        if len(text) > max_chunk_length:
+            chunks = [text[i:i+max_chunk_length] for i in range(0, len(text), max_chunk_length)]
+            cleaned_chunks = []
+            for chunk in chunks:
+                prompt = f"""Sos un editor experto. Tu tarea es LIMPIAR y FORMATEAR esta parte de una transcripción.
+                1. ELIMINÁ repeticiones de frases.
+                2. AGREGÁ puntuación (comas, puntos).
+                3. DIVIDÍ en párrafos con doble salto de línea.
+                4. NO RESUMAS, mantené el contenido original.
+                TEXTO:
+                {chunk}"""
+                completion = actual_client.chat.completions.create(
+                    model="llama-3.3-70b-versatile",
+                    messages=[{"role": "user", "content": prompt}],
+                    temperature=0.3,
+                    max_tokens=4000,
+                )
+                cleaned_chunks.append(completion.choices[0].message.content.strip())
+            return "\n\n".join(cleaned_chunks)
+        else:
+            prompt = f"""Sos un editor experto. Tu tarea es LIMPIAR y FORMATEAR la siguiente transcripción de un video.
+            1. ELIMINÁ repeticiones de frases.
+            2. AGREGÁ puntuación correcta (comas, puntos).
+            3. DIVIDÍ el texto en párrafos lógicos con doble salto de línea.
+            4. NO RESUMAS, mantené el contenido original.
+            TRANSCRIPCIÓN:
+            {text}"""
+            completion = actual_client.chat.completions.create(
+                model="llama-3.3-70b-versatile",
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.3,
+                max_tokens=4000,
+            )
+            return completion.choices[0].message.content.strip()
     except Exception as e:
         print(f"Error limpiando transcripción: {e}")
         return text
+
+# --- PROGRESO GLOBAL ---
+progress_store = {}
+
+def update_progress(uid: str, progress: int, text: str):
+    if uid:
+        progress_store[uid] = {"progress": progress, "text": text}
+
+@app.get("/api/progress/{uid}")
+async def get_progress(uid: str):
+    return progress_store.get(uid, {"progress": 0, "text": "Procesando en el servidor..."})
 
 # --- MODELOS DE DATOS ---
 class VideoRequest(BaseModel):
@@ -169,11 +202,58 @@ class VideoRequest(BaseModel):
     format_id: Optional[str] = "best"
     start_time: Optional[str] = None
     end_time: Optional[str] = None
+    groq_api_key: Optional[str] = None
+    uid: Optional[str] = None
+
+class LoginRequest(BaseModel):
+    password: str
 
 # --- ENDPOINTS ---
 
+@app.post("/api/login")
+async def login(req: LoginRequest):
+    correct_password = os.environ.get('APP_PASSWORD', 'acceso')
+    if req.password == correct_password:
+        return {"success": True}
+    else:
+        raise HTTPException(status_code=401, detail="Contraseña incorrecta")
 
-# --- UNIFIED ROBUST OPTIONS (COOKIES & CLIENTS) ---
+# --- SANITIZACIÓN DE URLS ---
+def sanitize_url(url: str) -> str:
+    """
+    Normaliza URLs de video antes de pasarlas a yt-dlp.
+    Problemas que resuelve:
+    - youtu.be/ID?si=... → youtube.com/watch?v=ID
+    - watch?v=ID&feature=youtu.be → watch?v=ID
+    - Elimina parámetros de tracking/referral que confunden a yt-dlp
+    """
+    from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
+    url = url.strip()
+
+    try:
+        parsed = urlparse(url)
+        
+        # Convertir youtu.be → youtube.com/watch?v=
+        if parsed.netloc in ('youtu.be', 'www.youtu.be'):
+            video_id = parsed.path.lstrip('/')
+            if video_id:
+                url = f"https://www.youtube.com/watch?v={video_id}"
+                parsed = urlparse(url)
+        
+        # Para URLs de YouTube, limpiar parámetros no esenciales
+        if 'youtube.com' in parsed.netloc:
+            qs = parse_qs(parsed.query, keep_blank_values=False)
+            # Solo conservar v, list, index, t (tiempo)
+            clean_params = {k: v for k, v in qs.items() if k in ('v', 'list', 'index', 't')}
+            new_query = urlencode({k: v[0] for k, v in clean_params.items()})
+            url = urlunparse(parsed._replace(query=new_query))
+    except Exception as e:
+        print(f"DEBUG: sanitize_url error (usando original): {e}")
+
+    print(f"DEBUG: URL sanitizada → {url}")
+    return url
+
+
 def get_robust_opts(target_url, extra={}):
     """Genera opciones unificadas para yt-dlp con soporte para cookies locales y de entorno."""
     USER_AGENTS = [
@@ -314,7 +394,7 @@ def get_instagram_info(url):
 
 @app.post("/api/video-info")
 async def get_video_info(req: VideoRequest, request: Request):
-    url = req.url
+    url = sanitize_url(req.url)
     is_instagram = 'instagram.com' in url
 
     # --- INSTAGRAM: usar instaloader ---
@@ -449,7 +529,7 @@ async def get_video_info(req: VideoRequest, request: Request):
 
 @app.post("/api/transcript")
 async def get_transcript(req: VideoRequest):
-    url = req.url
+    url = sanitize_url(req.url)
     is_youtube = 'youtube.com' in url or 'youtu.be' in url
     cache = load_cache()
     if url in cache:
@@ -457,12 +537,14 @@ async def get_transcript(req: VideoRequest):
 
     with tempfile.TemporaryDirectory() as tmpdir:
         try:
+            local_groq = get_local_groq(req.groq_api_key)
             if is_youtube:
                 # --- INTENTO DE SUBS CON 3 ESTRATEGIAS ---
                 sub_extracted = False
                 
                 # 1. Celular sin cookies
                 try:
+                    update_progress(req.uid, 10, "Buscando subtítulos (1/2)...")
                     opts = get_robust_opts(url, {'skip_download': True, 'writesubtitles': True, 'writeautomaticsub': True, 'subtitleslangs': ['es.*', 'en.*'], 'outtmpl': os.path.join(tmpdir, 'sub.%(ext)s')})
                     opts.pop('cookiefile', None)
                     opts['extractor_args'] = {'youtube': {'player_client': ['android', 'ios']}}
@@ -474,6 +556,7 @@ async def get_transcript(req: VideoRequest):
                 # 2. Con cookies
                 if not sub_extracted:
                     try:
+                        update_progress(req.uid, 20, "Buscando subtítulos (2/2)...")
                         opts = get_robust_opts(url, {'skip_download': True, 'writesubtitles': True, 'writeautomaticsub': True, 'subtitleslangs': ['es.*', 'en.*'], 'outtmpl': os.path.join(tmpdir, 'sub.%(ext)s')})
                         with yt_dlp.YoutubeDL(opts) as ydl:
                             ydl.download([url])
@@ -504,10 +587,12 @@ async def get_transcript(req: VideoRequest):
                     if is_english: final_text = translate_to_spanish(final_text)
                     
                     # Limpieza con IA opcional para mejorar legibilidad
-                    final_text = cleanup_transcript_with_ai(final_text)
+                    update_progress(req.uid, 80, "Aplicando limpieza con IA...")
+                    final_text = cleanup_transcript_with_ai(final_text, local_groq)
                     
                     cache[url] = final_text
                     save_cache(cache)
+                    update_progress(req.uid, 100, "¡Transcripción lista!")
                     return {"transcript": final_text, "method": "subtitles"}
 
             raise Exception("No direct subtitles")
@@ -546,7 +631,7 @@ async def get_transcript(req: VideoRequest):
 
             if audio_downloaded and audio_file:
                 # 2.1 Intentar con Groq API (Más rápido y ligero)
-                if groq_client:
+                if local_groq:
                     try:
                         file_size_mb = os.path.getsize(audio_file) / (1024 * 1024)
                         transcription = ""
@@ -565,7 +650,7 @@ async def get_transcript(req: VideoRequest):
                                         chunk.export(c_file.name, format="mp3", bitrate="64k")
                                         print(f"Transcribiendo parte {idx+1}/{len(chunks)}...")
                                         with open(c_file.name, "rb") as f:
-                                            part_text = groq_client.audio.transcriptions.create(
+                                            part_text = local_groq.audio.transcriptions.create(
                                                 file=(c_file.name, f.read()),
                                                 model="whisper-large-v3",
                                                 response_format="text",
@@ -574,8 +659,9 @@ async def get_transcript(req: VideoRequest):
                                             transcription += part_text + " "
                                         os.remove(c_file.name)
                             else:
+                                update_progress(req.uid, 40, "Enviando a Whisper (IA)...")
                                 with open(audio_file, "rb") as f:
-                                    transcription = groq_client.audio.transcriptions.create(
+                                    transcription = local_groq.audio.transcriptions.create(
                                         file=(audio_file, f.read()),
                                         model="whisper-large-v3",
                                         response_format="text",
@@ -583,8 +669,9 @@ async def get_transcript(req: VideoRequest):
                                     )
                         else:
                             # Fallback sin pydub (solo si file < 25MB)
+                            update_progress(req.uid, 40, "Enviando a Whisper (IA)...")
                             with open(audio_file, "rb") as f:
-                                transcription = groq_client.audio.transcriptions.create(
+                                transcription = local_groq.audio.transcriptions.create(
                                     file=(audio_file, f.read()),
                                     model="whisper-large-v3",
                                     response_format="text",
@@ -592,10 +679,12 @@ async def get_transcript(req: VideoRequest):
                                 )
                         
                         # Limpieza con IA
-                        transcription = cleanup_transcript_with_ai(transcription.strip())
+                        update_progress(req.uid, 80, "Aplicando limpieza de texto con IA...")
+                        transcription = cleanup_transcript_with_ai(transcription.strip(), local_groq)
                         
                         cache[url] = transcription
                         save_cache(cache)
+                        update_progress(req.uid, 100, "¡Transcripción lista!")
                         return {"transcript": transcription, "method": "groq_whisper_v3"}
                     except Exception as ge:
                         print(f"Error en Groq: {ge}")
@@ -607,15 +696,16 @@ async def get_transcript(req: VideoRequest):
         except Exception as final_e:
             return JSONResponse(status_code=500, content={"error": str(final_e)})
 
-
 class ChatRequest(BaseModel):
     url: str
     question: str
     transcript: str
+    groq_api_key: Optional[str] = None
 
 @app.post("/api/chat")
 async def chat_with_transcript(req: ChatRequest):
-    if not groq_client:
+    local_groq = get_local_groq(req.groq_api_key)
+    if not local_groq:
         raise HTTPException(status_code=500, detail="Groq API no configurada")
     
     # --- RECORTE DE SEGURIDAD PARA RATE LIMITS (6000 TPM) ---
@@ -645,7 +735,7 @@ async def chat_with_transcript(req: ChatRequest):
         Si la respuesta no está en la transcripción, dilo amablemente.
         """
         
-        completion = groq_client.chat.completions.create(
+        completion = local_groq.chat.completions.create(
             model="llama-3.1-8b-instant",
             messages=[
                 {"role": "system", "content": system_prompt},
@@ -662,7 +752,7 @@ async def chat_with_transcript(req: ChatRequest):
 
 @app.post("/api/download")
 async def download_video(req: VideoRequest, background_tasks: BackgroundTasks):
-    url = req.url
+    url = sanitize_url(req.url)
     format_id = req.format_id
     uid = str(uuid.uuid4())
 
@@ -709,6 +799,19 @@ async def download_video(req: VideoRequest, background_tasks: BackgroundTasks):
         'outtmpl': output_template,
         'merge_output_format': 'mp4',
     }
+    
+    def my_hook(d):
+        if d['status'] == 'downloading':
+            p = d.get('_percent_str', '0%').replace('\x1b[0;94m','').replace('\x1b[0m','').strip()
+            # extract number
+            try:
+                p_val = float(p.replace('%',''))
+                update_progress(req.uid, int(p_val * 0.9), f"Descargando video: {p}")
+            except: pass
+        elif d['status'] == 'finished':
+            update_progress(req.uid, 90, "Descarga completada, procesando con FFmpeg...")
+
+    extra_opts['progress_hooks'] = [my_hook]
 
     if req.start_time or req.end_time:
         from yt_dlp.utils import parse_duration, download_range_func
@@ -720,10 +823,12 @@ async def download_video(req: VideoRequest, background_tasks: BackgroundTasks):
     # Intentar descarga con 3 estrategias
     downloaded = False
     last_err = ""
+    update_progress(req.uid, 5, "Iniciando proceso...")
 
     # --- ESTRATEGIA 1: Celular sin cookies (La que funcionó para info) ---
     try:
         print("DEBUG: Descarga Intento 1 - Celular sin cookies...")
+        update_progress(req.uid, 10, "Conectando al servidor (1/3)...")
         opts = get_robust_opts(url, extra_opts)
         opts.pop('cookiefile', None)
         opts['extractor_args'] = {'youtube': {'player_client': ['android', 'ios']}}
@@ -738,6 +843,7 @@ async def download_video(req: VideoRequest, background_tasks: BackgroundTasks):
     if not downloaded:
         try:
             print("DEBUG: Descarga Intento 2 - Con cookies...")
+            update_progress(req.uid, 15, "Reintentando con cookies (2/3)...")
             opts = get_robust_opts(url, extra_opts)
             with yt_dlp.YoutubeDL(opts) as ydl:
                 ydl.download([url])
@@ -750,6 +856,7 @@ async def download_video(req: VideoRequest, background_tasks: BackgroundTasks):
     if not downloaded:
         try:
             print("DEBUG: Descarga Intento 3 - Forzando iOS...")
+            update_progress(req.uid, 20, "Forzando modo iOS (3/3)...")
             opts = get_robust_opts(url, extra_opts)
             opts.pop('cookiefile', None)
             opts['extractor_args'] = {'youtube': {'player_client': ['ios']}}
@@ -761,6 +868,7 @@ async def download_video(req: VideoRequest, background_tasks: BackgroundTasks):
             print(f"DEBUG: Descarga Intento 3 falló: {str(e)[:100]}")
 
     if downloaded:
+        update_progress(req.uid, 100, "¡Archivo listo!")
         # Encontrar archivo
         for f in os.listdir(DOWNLOAD_FOLDER):
             if uid in f:
@@ -830,14 +938,16 @@ MAX_AUDIO_SIZE_MB = 50
 @app.post("/api/transcript-file")
 async def transcript_audio_file(
     file: UploadFile = File(...),
-    language: str = Form(default="es")
+    language: str = Form(default="es"),
+    groq_api_key: str = Form(default=None)
 ):
     """
     Transcribe un archivo de audio subido directamente.
     Soporta WhatsApp (.ogg/.opus), grabaciones de voz (.m4a/.mp3), y más.
     """
-    if not groq_client:
-        raise HTTPException(status_code=503, detail="Groq API no configurada. Agregá GROQ_API_KEY en las variables de entorno.")
+    local_groq = get_local_groq(groq_api_key)
+    if not local_groq:
+        raise HTTPException(status_code=503, detail="Groq API no configurada. Configura tu API Key en la interfaz.")
 
     # Validar extensión
     ext = os.path.splitext(file.filename or '')[1].lower()
@@ -904,7 +1014,7 @@ async def transcript_audio_file(
                         chunk.export(c_file.name, format="mp3", bitrate="64k")
                         print(f"Transcribiendo parte {idx+1}/{len(chunks)}...")
                         with open(c_file.name, "rb") as cf:
-                            part_text = groq_client.audio.transcriptions.create(
+                            part_text = local_groq.audio.transcriptions.create(
                                 file=(c_file.name, cf.read(), "audio/mpeg"),
                                 model="whisper-large-v3",
                                 response_format="text",
@@ -921,7 +1031,7 @@ async def transcript_audio_file(
                     mime_type = "audio/ogg"
 
                 with open(audio_path, "rb") as f:
-                    transcription = groq_client.audio.transcriptions.create(
+                    transcription = local_groq.audio.transcriptions.create(
                         file=(os.path.basename(audio_path), f.read(), mime_type),
                         model="whisper-large-v3",
                         response_format="text",
@@ -930,7 +1040,7 @@ async def transcript_audio_file(
 
             transcript_text = str(transcription).strip()
             # Limpieza con IA
-            transcript_text = cleanup_transcript_with_ai(transcript_text)
+            transcript_text = cleanup_transcript_with_ai(transcript_text, local_groq)
             
             return {
                 "transcript": transcript_text,
@@ -943,12 +1053,24 @@ async def transcript_audio_file(
             print(f"Error en transcripción de archivo: {e}")
             raise HTTPException(status_code=500, detail=f"Error al transcribir: {str(e)}")
 
+# --- LIMPIEZA DE DESCARGAS ---
+@app.delete("/api/clear-downloads")
+async def clear_downloads():
+    try:
+        import shutil
+        if os.path.exists(DOWNLOAD_FOLDER):
+            shutil.rmtree(DOWNLOAD_FOLDER)
+        os.makedirs(DOWNLOAD_FOLDER, exist_ok=True)
+        return {"status": "success", "message": "Descargas locales eliminadas correctamente."}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 # --- HERRAMIENTAS PERIODÍSTICAS (IA) ---
 
 class AnalyzeRequest(BaseModel):
     transcript: str
     mode: str  # "summary" | "quotes" | "data" | "angle"
+    groq_api_key: Optional[str] = None
 
 JOURNALIST_PROMPTS = {
     "summary": """Sos un asistente para periodistas especializados en comunicación política e imagen pública.
@@ -1006,7 +1128,8 @@ async def analyze_transcript(req: AnalyzeRequest):
     Analiza una transcripción con IA para uso periodístico.
     Modos: summary (resumen), quotes (citas), data (datos duros), angle (ángulos de nota)
     """
-    if not groq_client:
+    local_groq = get_local_groq(req.groq_api_key)
+    if not local_groq:
         raise HTTPException(status_code=503, detail="Groq API no configurada.")
 
     if req.mode not in JOURNALIST_PROMPTS:
@@ -1022,19 +1145,39 @@ async def analyze_transcript(req: AnalyzeRequest):
 
     prompt = JOURNALIST_PROMPTS[req.mode].format(transcript=transcript)
 
-    try:
-        response = groq_client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=1000,
-            temperature=0.3
-        )
-        result = response.choices[0].message.content.strip()
-        return {"result": result, "mode": req.mode}
+    # Modelos a intentar en orden: el grande primero, el liviano como fallback
+    MODELS_TO_TRY = ["llama-3.3-70b-versatile", "llama-3.1-8b-instant"]
 
-    except Exception as e:
-        print(f"Error en análisis periodístico: {e}")
-        raise HTTPException(status_code=500, detail=f"Error al analizar: {str(e)}")
+    last_error = None
+    for model in MODELS_TO_TRY:
+        try:
+            response = local_groq.chat.completions.create(
+                model=model,
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=1000,
+                temperature=0.3
+            )
+            result = response.choices[0].message.content.strip()
+            return {"result": result, "mode": req.mode, "model_used": model}
+
+        except Exception as e:
+            err_str = str(e)
+            print(f"Error con modelo {model}: {e}")
+
+            # Rate limit (429): intentar con el siguiente modelo
+            if "rate_limit_exceeded" in err_str or "429" in err_str:
+                last_error = e
+                print(f"Rate limit en {model}, intentando con el siguiente modelo...")
+                continue
+            else:
+                # Error distinto al rate limit: falla inmediata con mensaje claro
+                raise HTTPException(status_code=500, detail=f"Error al analizar: {err_str}")
+
+    # Si todos los modelos fallaron por rate limit
+    raise HTTPException(
+        status_code=429,
+        detail="⚠️ Límite de uso de Groq alcanzado por hoy. Podés:\n1. Esperá unos minutos e intentá de nuevo.\n2. Configurar tu propia API key de Groq en Configuración (gratis en console.groq.com)."
+    )
 
 
 # --- SERVIDO DE FRONTEND ---

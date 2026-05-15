@@ -811,10 +811,9 @@ document.addEventListener('DOMContentLoaded', () => {
                 .join('');
         }
 
-        // 4. Texto plano sin saltos (ej: subtítulos de YouTube pegados en una línea).
-        // Dividir automáticamente cada 4 oraciones para que "respire".
+        // 4. Texto plano sin saltos — intentar dividir por oraciones (. ! ?)
         const sentences = t.match(/[^.!?]+[.!?]+["']?\s*/g);
-        if (sentences && sentences.length > 4) {
+        if (sentences && sentences.length > 3) {
             const paragraphs = [];
             for (let i = 0; i < sentences.length; i += 4) {
                 const chunk = sentences.slice(i, i + 4).join('').trim();
@@ -823,7 +822,19 @@ document.addEventListener('DOMContentLoaded', () => {
             return paragraphs.join('');
         }
 
-        // Texto corto sin oraciones claras: devolver como párrafo único
+        // 5. Último recurso: texto sin signos de puntuación (letra de canción, stream).
+        // Dividir en párrafos cada 70 palabras para que sea legible.
+        const words = t.split(/\s+/).filter(w => w);
+        if (words.length > 70) {
+            const paragraphs = [];
+            for (let i = 0; i < words.length; i += 70) {
+                const chunk = words.slice(i, i + 70).join(' ').trim();
+                if (chunk) paragraphs.push(`<p class="transcript-paragraph">${chunk}</p>`);
+            }
+            return paragraphs.join('');
+        }
+
+        // Texto corto: párrafo único
         return `<p class="transcript-paragraph">${t}</p>`;
     }
     // ─── AI CHAT LOGIC ──────────────────────────────────────────────────────────

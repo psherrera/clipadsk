@@ -138,6 +138,49 @@ def get_local_groq(api_key: str = None):
             return groq_client
     return groq_client
 
+def remove_repetitions(text: str) -> str:
+    """
+    Elimina repeticiones de frases que Whisper (y subtítulos VTT) generan.
+    Usa un algoritmo de ventana deslizante que no consume tokens de Groq.
+    Ejemplo de entrada:  "Cómo andan tanto tiempo Cómo andan tanto tiempo los extrañé"
+    Ejemplo de salida:   "Cómo andan tanto tiempo los extrañé"
+    """
+    if not text or len(text) < 30:
+        return text
+
+    words = text.split()
+    if len(words) < 6:
+        return text
+
+    result = []
+    i = 0
+    MAX_PHRASE = min(30, len(words) // 2)
+
+    while i < len(words):
+        found_repeat = False
+        # Probar ventanas desde las más grandes a las más pequeñas
+        for phrase_len in range(MAX_PHRASE, 3, -1):
+            if i + phrase_len * 2 > len(words):
+                continue
+            phrase = words[i:i + phrase_len]
+            next_phrase = words[i + phrase_len:i + phrase_len * 2]
+            if phrase == next_phrase:
+                result.extend(phrase)
+                i += phrase_len
+                # Colapsar repeticiones consecutivas adicionales del mismo fragmento
+                while i + phrase_len <= len(words) and words[i:i + phrase_len] == phrase:
+                    i += phrase_len
+                found_repeat = True
+                break
+        if not found_repeat:
+            result.append(words[i])
+            i += 1
+
+    cleaned = ' '.join(result)
+    print(f"DEBUG remove_repetitions: {len(words)} palabras → {len(result)} palabras")
+    return cleaned
+
+
 def cleanup_transcript_with_ai(text: str, client=None) -> str:
     """Usa la IA para limpiar repeticiones, corregir puntuación y añadir párrafos."""
     actual_client = client or groq_client
@@ -586,7 +629,10 @@ async def get_transcript(req: VideoRequest):
                     final_text = ' '.join([line.strip() for line in content.split('\n') if line.strip()])
                     if is_english: final_text = translate_to_spanish(final_text)
                     
-                    # Limpieza con IA opcional para mejorar legibilidad
+                    # Paso 1: deduplicar sin IA (rápido)
+                    final_text = remove_repetitions(final_text)
+                    
+                    # Paso 2: Limpieza con IA para puntuación y párrafos
                     update_progress(req.uid, 80, "Aplicando limpieza con IA...")
                     final_text = cleanup_transcript_with_ai(final_text, local_groq)
                     
@@ -678,9 +724,12 @@ async def get_transcript(req: VideoRequest):
                                     language="es"
                                 )
                         
-                        # Limpieza con IA
+                        # Paso 1: Deduplicar repeticiones de Whisper (sin IA, rápido)
+                        transcription_clean = remove_repetitions(transcription.strip())
+                        
+                        # Paso 2: Limpieza con IA para puntuación y párrafos
                         update_progress(req.uid, 80, "Aplicando limpieza de texto con IA...")
-                        transcription = cleanup_transcript_with_ai(transcription.strip(), local_groq)
+                        transcription = cleanup_transcript_with_ai(transcription_clean, local_groq)
                         
                         cache[url] = transcription
                         save_cache(cache)

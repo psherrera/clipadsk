@@ -862,20 +862,29 @@ async def transcript_audio_file(
 
         print(f"DEBUG: Archivo recibido: {file.filename} ({size_mb:.2f} MB), ext: {ext}")
 
-        # Convertir a MP3 si es necesario (WhatsApp usa .ogg/opus)
+        # Convertir a MP3 si es necesario usando pydub
         audio_path = input_path
         if ext in {'.ogg', '.opus', '.m4a', '.wav', '.aac', '.weba', '.webm'}:
             converted_path = os.path.join(tmpdir, "converted.mp3")
-            import subprocess
-            result = subprocess.run(
-                ['ffmpeg', '-i', input_path, '-ar', '16000', '-ac', '1', '-b:a', '64k', converted_path],
-                capture_output=True, text=True
-            )
-            if result.returncode == 0 and os.path.exists(converted_path):
-                audio_path = converted_path
-                print(f"DEBUG: Convertido a MP3 exitosamente")
-            else:
-                print(f"DEBUG: ffmpeg error: {result.stderr}")
+            try:
+                if AudioSegment:
+                    audio = AudioSegment.from_file(input_path)
+                    # Convertimos a mp3 a 64k mono para que sea liviano
+                    audio = audio.set_frame_rate(16000).set_channels(1)
+                    audio.export(converted_path, format="mp3", bitrate="64k")
+                    audio_path = converted_path
+                    print("DEBUG: Convertido a MP3 exitosamente usando pydub")
+                else:
+                    import subprocess
+                    converted_path = os.path.join(tmpdir, "converted.wav")
+                    subprocess.run(
+                        ['ffmpeg', '-y', '-i', input_path, '-ar', '16000', '-ac', '1', converted_path],
+                        capture_output=True, check=True
+                    )
+                    audio_path = converted_path
+                    print("DEBUG: Convertido a WAV exitosamente usando ffmpeg nativo")
+            except Exception as e:
+                print(f"DEBUG: Error en conversion a MP3: {e}")
                 # Intentar con el archivo original si la conversión falla
                 audio_path = input_path
 
@@ -896,7 +905,7 @@ async def transcript_audio_file(
                         print(f"Transcribiendo parte {idx+1}/{len(chunks)}...")
                         with open(c_file.name, "rb") as cf:
                             part_text = groq_client.audio.transcriptions.create(
-                                file=(c_file.name, cf.read()),
+                                file=(c_file.name, cf.read(), "audio/mpeg"),
                                 model="whisper-large-v3",
                                 response_format="text",
                                 language=language
@@ -904,9 +913,16 @@ async def transcript_audio_file(
                             transcription += str(part_text) + " "
                         os.remove(c_file.name)
             else:
+                if audio_path.endswith('.mp3'):
+                    mime_type = "audio/mpeg"
+                elif audio_path.endswith('.wav'):
+                    mime_type = "audio/wav"
+                else:
+                    mime_type = "audio/ogg"
+
                 with open(audio_path, "rb") as f:
                     transcription = groq_client.audio.transcriptions.create(
-                        file=(os.path.basename(audio_path), f.read()),
+                        file=(os.path.basename(audio_path), f.read(), mime_type),
                         model="whisper-large-v3",
                         response_format="text",
                         language=language

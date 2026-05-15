@@ -254,7 +254,23 @@
                                 <button id="download-btn" class="glow-button w-full py-4 rounded-xl font-bold flex items-center justify-center gap-3 transition-all">
                                     <span class="material-symbols-outlined">download</span> Descargar Video
                                 </button>
+
+                                <div class="space-y-2">
+                                    <label class="text-[10px] font-bold text-slate-500 uppercase tracking-widest">Idioma de salida (IA)</label>
+                                    <div class="grid grid-cols-3 gap-2">
+                                        <button class="lang-btn active py-2 rounded-lg border border-primary/40 bg-primary/10 text-xs font-bold transition-all flex items-center justify-center gap-1" data-lang="es">
+                                            <span class="text-[14px]">🇪🇸</span> ES
+                                        </button>
+                                        <button class="lang-btn py-2 rounded-lg border border-white/10 bg-white/5 text-slate-400 text-xs font-bold transition-all flex items-center justify-center gap-1" data-lang="en">
+                                            <span class="text-[14px]">🇺🇸</span> EN
+                                        </button>
+                                        <button class="lang-btn py-2 rounded-lg border border-white/10 bg-white/5 text-slate-400 text-xs font-bold transition-all flex items-center justify-center gap-1" data-lang="original">
+                                            <span class="text-[14px]">🎬</span> Org.
+                                        </button>
+                                    </div>
+                                </div>
                                 <div class="grid grid-cols-2 gap-3">
+
                                     <button id="show-transcript-btn" class="hidden bg-white/5 hover:bg-white/10 border border-white/5 py-3 rounded-xl text-slate-300 font-bold text-sm flex items-center justify-center gap-2 transition-all">
                                         <span class="material-symbols-outlined text-lg">description</span> Transcribir
                                     </button>

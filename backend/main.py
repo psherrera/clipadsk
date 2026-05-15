@@ -227,14 +227,15 @@ def remove_repetitions(text: str) -> str:
     return cleaned
 
 
-def cleanup_transcript_with_ai(text: str, client=None) -> str:
-    """Usa la IA para limpiar repeticiones, corregir puntuación y añadir párrafos."""
+def cleanup_transcript_with_ai(text: str, client=None, target_lang="es") -> str:
+    """Usa la IA para limpiar repeticiones, corregir puntuación y añadir párrafos en el idioma elegido."""
     actual_client = client or groq_client
-    if not actual_client or len(text) < 100:
+    if not actual_client or len(text) < 50:
         return text
     
+    lang_name = "Español" if target_lang == "es" else ("Inglés" if target_lang == "en" else "el idioma original del video")
+    
     try:
-        # Si el texto es muy largo, procesarlo en fragmentos para no perder Llama-3 ni pasarnos de tokens
         max_chunk_length = 6000
         if len(text) > max_chunk_length:
             chunks = [text[i:i+max_chunk_length] for i in range(0, len(text), max_chunk_length)]
@@ -244,7 +245,8 @@ def cleanup_transcript_with_ai(text: str, client=None) -> str:
                 1. ELIMINÁ repeticiones de frases.
                 2. AGREGÁ puntuación (comas, puntos).
                 3. DIVIDÍ en párrafos con doble salto de línea.
-                4. NO RESUMAS, mantené el contenido original.
+                4. EL IDIOMA DE SALIDA DEBE SER: {lang_name}.
+                5. NO RESUMAS, mantené el contenido original.
                 TEXTO:
                 {chunk}"""
                 completion = actual_client.chat.completions.create(
@@ -260,7 +262,8 @@ def cleanup_transcript_with_ai(text: str, client=None) -> str:
             1. ELIMINÁ repeticiones de frases.
             2. AGREGÁ puntuación correcta (comas, puntos).
             3. DIVIDÍ el texto en párrafos lógicos con doble salto de línea.
-            4. NO RESUMAS, mantené el contenido original.
+            4. EL IDIOMA DE SALIDA DEBE SER: {lang_name}.
+            5. NO RESUMAS, mantené el contenido original.
             TRANSCRIPCIÓN:
             {text}"""
             completion = actual_client.chat.completions.create(
@@ -274,12 +277,27 @@ def cleanup_transcript_with_ai(text: str, client=None) -> str:
         print(f"Error limpiando transcripción: {e}")
         return text
 
+
 # --- PROGRESO GLOBAL ---
 progress_store = {}
 
 def update_progress(uid: str, progress: int, text: str):
     if uid:
         progress_store[uid] = {"progress": progress, "text": text}
+        add_log(uid, f"Progreso {progress}%: {text}")
+
+# --- LOGS DE ERROR PARA SOPORTE ---
+log_store = {}
+
+def add_log(uid: str, message: str):
+    if not uid: return
+    if uid not in log_store: log_store[uid] = []
+    timestamp = time.strftime("%H:%M:%S")
+    log_store[uid].append(f"[{timestamp}] {message}")
+    print(f"DEBUG LOG [{uid}]: {message}")
+
+def get_session_logs(uid: str) -> str:
+    return "\n".join(log_store.get(uid, ["No hay logs disponibles para esta sesion."]))
 
 @app.get("/api/progress/{uid}")
 async def get_progress(uid: str):
@@ -293,6 +311,12 @@ class VideoRequest(BaseModel):
     end_time: Optional[str] = None
     groq_api_key: Optional[str] = None
     uid: Optional[str] = None
+    target_lang: Optional[str] = "es" # es, en, original
+
+@app.get("/api/logs/{uid}")
+async def get_logs(uid: str):
+    return JSONResponse(content={"logs": get_session_logs(uid)})
+
 
 
 
@@ -612,17 +636,28 @@ async def get_video_info(req: VideoRequest, request: Request):
 @app.post("/api/transcript")
 async def get_transcript(req: VideoRequest):
     url = sanitize_url(req.url)
+    uid = req.uid
+    lang = req.target_lang or "es"
+    
+    add_log(uid, f"Iniciando transcripcion para: {url} | Idioma: {lang}")
+    
     is_youtube = 'youtube.com' in url or 'youtu.be' in url
+    
+    # Cache por URL e Idioma
+    cache_key = f"{url}_{lang}"
     cache = load_cache()
-    if url in cache:
-        return {"transcript": cache[url], "method": "cache"}
+    if cache_key in cache:
+        add_log(uid, "Resultado recuperado de cache local.")
+        return {"transcript": cache[cache_key], "method": "cache"}
 
     with tempfile.TemporaryDirectory() as tmpdir:
         try:
             local_groq = get_local_groq(req.groq_api_key)
             if is_youtube:
+                add_log(uid, "Intentando extraer subtitulos de YouTube...")
                 # --- INTENTO DE SUBS CON 3 ESTRATEGIAS ---
                 sub_extracted = False
+
                 
                 # 1. Celular sin cookies
                 try:
@@ -666,26 +701,34 @@ async def get_transcript(req: VideoRequest):
                     content = re.sub(r'^\d+\n', '', content, flags=re.MULTILINE)
                     content = re.sub(r'<[^>]*>', '', content)
                     final_text = ' '.join([line.strip() for line in content.split('\n') if line.strip()])
-                    if is_english: final_text = translate_to_spanish(final_text)
+                    
+                    if is_english and lang == "es":
+                        add_log(uid, "Traduciendo subtitulos de ingles a español...")
+                        final_text = translate_to_spanish(final_text)
                     
                     # Paso 1: deduplicar sin IA (rápido)
                     final_text = remove_repetitions(final_text)
                     
                     # Paso 2: Limpieza con IA para puntuación y párrafos
-                    update_progress(req.uid, 80, "Aplicando limpieza con IA...")
-                    final_text = cleanup_transcript_with_ai(final_text, local_groq)
+                    update_progress(req.uid, 80, f"Aplicando limpieza con IA ({lang})...")
+                    final_text = cleanup_transcript_with_ai(final_text, local_groq, lang)
                     
-                    cache[url] = final_text
-                    save_cache(cache)
+                    save_cache_entry(cache_key, final_text)
+                    add_log(uid, "Transcripcion via subtitulos completada.")
                     update_progress(req.uid, 100, "¡Transcripción lista!")
                     return {"transcript": final_text, "method": "subtitles"}
 
+
             raise Exception("No direct subtitles")
 
-        except Exception:
+        except Exception as e:
+            add_log(uid, f"Fallo extraccion de subtitulos: {str(e)}")
             # 2. Descargar audio y usar Whisper con 3 estrategias
             audio_downloaded = False
             audio_file = None
+            
+            add_log(uid, "Iniciando descarga de audio para Whisper...")
+
             
             # Estrategia 1: Móvil sin cookies
             try:
@@ -723,60 +766,63 @@ async def get_transcript(req: VideoRequest):
                         if AudioSegment:
                             # Lógica de troceado si es necesario
                             if file_size_mb >= 20:
-                                print(f"Dividiendo audio de {file_size_mb:.1f}MB en partes de 20 min...")
-                                audio = AudioSegment.from_file(audio_file)
-                                chunk_length_ms = 20 * 60 * 1000 # 20 minutos por trozo
-                                chunks = []
-                                for i in range(0, len(audio), chunk_length_ms):
-                                    chunks.append(audio[i:i + chunk_length_ms])
-                                
-                                for idx, chunk in enumerate(chunks):
-                                    with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as c_file:
-                                        chunk.export(c_file.name, format="mp3", bitrate="64k")
-                                        print(f"Transcribiendo parte {idx+1}/{len(chunks)}...")
-                                        with open(c_file.name, "rb") as f:
-                                            part_text = local_groq.audio.transcriptions.create(
-                                                file=(c_file.name, f.read()),
-                                                model="whisper-large-v3",
-                                                response_format="text",
-                                                language="es"
-                                            )
-                                            transcription += part_text + " "
-                                        os.remove(c_file.name)
+                                 add_log(uid, f"Audio grande ({file_size_mb:.1f}MB). Dividiendo en trozos de 20 min...")
+                                 audio = AudioSegment.from_file(audio_file)
+                                 chunk_length_ms = 20 * 60 * 1000 # 20 minutos por trozo
+                                 chunks = []
+                                 for i in range(0, len(audio), chunk_length_ms):
+                                     chunks.append(audio[i:i + chunk_length_ms])
+                                 
+                                 for idx, chunk in enumerate(chunks):
+                                     with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as c_file:
+                                         chunk.export(c_file.name, format="mp3", bitrate="64k")
+                                         add_log(uid, f"Transcribiendo parte {idx+1}/{len(chunks)}...")
+                                         with open(c_file.name, "rb") as f:
+                                             part_text = local_groq.audio.transcriptions.create(
+                                                 file=(c_file.name, f.read()),
+                                                 model="whisper-large-v3",
+                                                 response_format="text",
+                                                 language=lang if lang in ["es", "en"] else None
+                                             )
+                                             transcription += part_text + " "
+                                         os.remove(c_file.name)
+
                             else:
                                 update_progress(req.uid, 40, "Enviando a Whisper (IA)...")
                                 with open(audio_file, "rb") as f:
-                                    transcription = local_groq.audio.transcriptions.create(
+                                    trans_res = local_groq.audio.transcriptions.create(
                                         file=(audio_file, f.read()),
                                         model="whisper-large-v3",
                                         response_format="text",
-                                        language="es"
+                                        language=lang if lang in ["es", "en"] else None
                                     )
+                                transcription = str(trans_res)
                         else:
-                            # Fallback sin pydub (solo si file < 25MB)
-                            update_progress(req.uid, 40, "Enviando a Whisper (IA)...")
+                            add_log(uid, "Enviando audio completo a Whisper (IA)...")
                             with open(audio_file, "rb") as f:
                                 transcription = local_groq.audio.transcriptions.create(
                                     file=(audio_file, f.read()),
                                     model="whisper-large-v3",
                                     response_format="text",
-                                    language="es"
+                                    language=lang if lang in ["es", "en"] else None
                                 )
                         
+                        add_log(uid, "Procesando texto crudo de Whisper...")
                         # Paso 1: Deduplicar repeticiones de Whisper (sin IA, rápido)
-                        transcription_clean = remove_repetitions(transcription.strip())
+                        transcription = remove_repetitions(transcription.strip())
                         
                         # Paso 2: Limpieza con IA para puntuación y párrafos
-                        update_progress(req.uid, 80, "Aplicando limpieza de texto con IA...")
-                        transcription = cleanup_transcript_with_ai(transcription_clean, local_groq)
+                        add_log(uid, f"Aplicando limpieza y formato IA ({lang})...")
+                        transcription = cleanup_transcript_with_ai(transcription, local_groq, lang)
                         
-                        cache[url] = transcription
-                        save_cache(cache)
+                        save_cache_entry(cache_key, transcription)
+                        add_log(uid, "Transcripcion de archivo completada.")
                         update_progress(req.uid, 100, "¡Transcripción lista!")
-                        return {"transcript": transcription, "method": "groq_whisper_v3"}
+                        return {"transcript": transcription, "method": "groq_whisper_v3_file"}
                     except Exception as ge:
-                        print(f"Error en Groq: {ge}")
+                        add_log(uid, f"Error critico en Groq Whisper: {str(ge)}")
                         raise Exception(f"Error en Groq API: {str(ge)}")
+
 
                 raise Exception("Groq API no configurada y no se encontraron subtítulos.")
 
@@ -1026,9 +1072,11 @@ MAX_AUDIO_SIZE_MB = 50
 @app.post("/api/transcript-file")
 async def transcript_audio_file(
     file: UploadFile = File(...),
-    language: str = Form(default="es"),
+    target_lang: str = Form(default="es"),
+    uid: str = Form(default=None),
     groq_api_key: str = Form(default=None)
 ):
+
     """
     Transcribe un archivo de audio subido directamente.
     Soporta WhatsApp (.ogg/.opus), grabaciones de voz (.m4a/.mp3), y más.
@@ -1057,8 +1105,9 @@ async def transcript_audio_file(
 
         with open(input_path, 'wb') as f:
             f.write(content)
+        
+        add_log(uid, f"Archivo recibido para transcribir: {file.filename} ({size_mb:.2f} MB)")
 
-        print(f"DEBUG: Archivo recibido: {file.filename} ({size_mb:.2f} MB), ext: {ext}")
 
         # Convertir a MP3 si es necesario usando pydub
         audio_path = input_path
@@ -1106,9 +1155,10 @@ async def transcript_audio_file(
                                 file=(c_file.name, cf.read(), "audio/mpeg"),
                                 model="whisper-large-v3",
                                 response_format="text",
-                                language=language
-                            )
-                            transcription += str(part_text) + " "
+                                 language=target_lang if target_lang in ["es", "en"] else None
+                             )
+                             transcription += str(part_text) + " "
+
                         os.remove(c_file.name)
             else:
                 if audio_path.endswith('.mp3'):
@@ -1123,13 +1173,15 @@ async def transcript_audio_file(
                         file=(os.path.basename(audio_path), f.read(), mime_type),
                         model="whisper-large-v3",
                         response_format="text",
-                        language=language
+                        language=target_lang if target_lang in ["es", "en"] else None
                     )
 
             transcript_text = str(transcription).strip()
             # Limpieza con IA
-            transcript_text = cleanup_transcript_with_ai(transcript_text, local_groq)
+            add_log(uid, f"Aplicando limpieza y formato IA ({target_lang})...")
+            transcript_text = cleanup_transcript_with_ai(transcript_text, local_groq, target_lang)
             
+            add_log(uid, "Transcripcion de archivo completada con exito.")
             return {
                 "transcript": transcript_text,
                 "method": "groq_whisper_v3_file",
@@ -1138,8 +1190,9 @@ async def transcript_audio_file(
             }
 
         except Exception as e:
-            print(f"Error en transcripción de archivo: {e}")
+            add_log(uid, f"Error en transcripcion de archivo: {str(e)}")
             raise HTTPException(status_code=500, detail=f"Error al transcribir: {str(e)}")
+
 
 # --- LIMPIEZA DE DESCARGAS ---
 @app.delete("/api/clear-downloads")

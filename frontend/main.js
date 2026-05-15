@@ -45,7 +45,11 @@ document.addEventListener('DOMContentLoaded', () => {
     const isSharedPort = window.location.port === '5000' || window.location.port === '10000';
     const API_BASE     = (isLocal && !isSharedPort) ? 'http://127.0.0.1:5000/api' : '/api';
 
+    // UID unico para cada sesion de la pagina (para logs y progreso)
+    const uid = Math.random().toString(36).substring(2, 10);
+    
     let currentTab             = 'youtube';
+
     let currentTranscript      = '';
     let currentMaxResThumbnail = '';
 
@@ -424,6 +428,37 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 
     // ─── TRANSCRIPT FROM URL ─────────────────────────────────────────────────────
+    let selectedTargetLang = 'es';
+    const langBtns = document.querySelectorAll('.lang-btn');
+    langBtns.forEach(btn => {
+        btn.addEventListener('click', (e) => {
+            langBtns.forEach(b => {
+                b.classList.remove('active', 'border-primary/40', 'bg-primary/10', 'text-primary');
+                b.classList.add('border-white/10', 'bg-white/5', 'text-slate-400');
+            });
+            const target = e.currentTarget;
+            target.classList.add('active', 'border-primary/40', 'bg-primary/10', 'text-primary');
+            target.classList.remove('border-white/10', 'bg-white/5', 'text-slate-400');
+            selectedTargetLang = target.dataset.lang;
+        });
+    });
+
+    window.downloadErrorLog = async (sessionUid) => {
+        try {
+            const r = await fetch(`${API_BASE}/logs/${sessionUid}`);
+            const d = await r.json();
+            const blob = new Blob([d.logs], { type: 'text/plain' });
+            const a = document.createElement('a');
+            a.href = URL.createObjectURL(blob);
+            a.download = `reporte_error_${sessionUid}.txt`;
+            a.click();
+        } catch (e) {
+            console.error(e);
+            alert("No se pudo descargar el log.");
+        }
+    };
+
+
     showTranscriptBtn?.addEventListener('click', async () => {
         const url = videoUrlInput?.value.trim();
         transcriptSection?.classList.remove('hidden');
@@ -457,9 +492,23 @@ document.addEventListener('DOMContentLoaded', () => {
             clearInterval(pollInterval);
 
             if (data.error) {
-                transcriptContent.innerHTML = `<div class="bg-red-500/10 p-4 rounded-xl border border-red-500/20 text-red-400 text-sm">Error: ${data.error.replace(/\u001b\[[0-9;]*m/g, '')}</div>`;
+                transcriptContent.innerHTML = `
+                    <div class="bg-red-500/10 p-6 rounded-2xl border border-red-500/20 text-red-400 text-sm space-y-4">
+                        <div class="flex items-center gap-2">
+                            <span class="material-symbols-outlined">error</span>
+                            <p class="font-bold">Error en la transcripción</p>
+                        </div>
+                        <p class="opacity-80">${data.error.replace(/\u001b\[[0-9;]*m/g, '')}</p>
+                        <div class="pt-2">
+                            <p class="text-[10px] text-slate-500 mb-3 italic">Si el error persiste, descarga el reporte y envíaselo al administrador.</p>
+                            <button onclick="downloadErrorLog('${uid}')" class="bg-white/5 hover:bg-white/10 border border-white/10 px-4 py-2.5 rounded-xl text-xs font-bold transition-all flex items-center gap-2">
+                                <span class="material-symbols-outlined text-sm">bug_report</span> Descargar Reporte de Error
+                            </button>
+                        </div>
+                    </div>`;
                 return;
             }
+
 
             currentTranscript = data.transcript;
             renderTranscript(data.transcript, data.method);
@@ -530,8 +579,10 @@ document.addEventListener('DOMContentLoaded', () => {
 
         const formData = new FormData();
         formData.append('file', file);
-        formData.append('language', 'es');
+        formData.append('target_lang', selectedTargetLang);
+        formData.append('uid', uid);
         formData.append('groq_api_key', localStorage.getItem(GROQ_KEY_STORE) || '');
+
 
         try {
             const r    = await fetch(`${API_BASE}/transcript-file`, { method: 'POST', body: formData });

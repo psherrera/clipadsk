@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="es" class="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Clipadsk - Configuración Inicial</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined" rel="stylesheet">
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body { background-color: #0a0812; font-family: 'Outfit', sans-serif; color: #f1f5f9; }
+        .glass { background: rgba(255, 255, 255, 0.03); backdrop-filter: blur(10px); border: 1px solid rgba(255, 255, 255, 0.05); }
+        .accent-gradient { background: linear-gradient(135deg, #895af6, #06b6d4); }
+        .step-number { width: 32px; height: 32px; border-radius: 50%; display: flex; items-center; justify-center; background: rgba(137, 90, 246, 0.2); color: #895af6; font-weight: 800; }
+    </style>
+</head>
+<body class="min-h-screen flex items-center justify-center p-6">
+    <div class="max-w-3xl w-full glass rounded-3xl p-8 md:p-12 shadow-2xl space-y-8">
+        <div class="text-center space-y-4">
+            <div class="w-20 h-20 bg-primary/10 rounded-2xl flex items-center justify-center mx-auto mb-4">
+                <img src="logo.png" alt="Logo" class="w-12 h-12 object-contain">
+            </div>
+            <h1 class="text-4xl font-extrabold tracking-tight">Bienvenido a Clipadsk</h1>
+            <p class="text-slate-400">Guía rápida para poner en marcha el transcriptor en una PC nueva.</p>
+        </div>
+
+        <div class="grid md:grid-cols-2 gap-6">
+            <!-- Step 1: Groq Key -->
+            <div class="glass p-6 rounded-2xl space-y-4 hover:border-primary/30 transition-all">
+                <div class="flex items-center gap-3">
+                    <div class="step-number">1</div>
+                    <h2 class="text-xl font-bold">Llave de IA (Gratis)</h2>
+                </div>
+                <p class="text-sm text-slate-400">Clipadsk usa <b>Groq</b> para transcribir audios en segundos. Es gratis y muy rápido.</p>
+                <div class="space-y-2">
+                    <a href="https://console.groq.com/keys" target="_blank" class="flex items-center justify-between p-3 bg-white/5 rounded-xl hover:bg-white/10 transition-all text-sm group">
+                        <span>Obtener API Key</span>
+                        <span class="material-symbols-outlined text-sm group-hover:translate-x-1 transition-transform">open_in_new</span>
+                    </a>
+                </div>
+                <p class="text-[10px] text-slate-500 italic">Crea una cuenta, ve a "API Keys" y genera una nueva llave.</p>
+            </div>
+
+            <!-- Step 2: Dependencias -->
+            <div class="glass p-6 rounded-2xl space-y-4 hover:border-accent/30 transition-all">
+                <div class="flex items-center gap-3">
+                    <div class="step-number">2</div>
+                    <h2 class="text-xl font-bold">Dependencias</h2>
+                </div>
+                <p class="text-sm text-slate-400">El archivo <b>iniciar.bat</b> intenta descargar todo automáticamente, pero si algo falla:</p>
+                <div class="space-y-2">
+                    <a href="https://www.python.org/downloads/" target="_blank" class="flex items-center justify-between p-3 bg-white/5 rounded-xl hover:bg-white/10 transition-all text-sm">
+                        <span>Descargar Python</span>
+                        <span class="material-symbols-outlined text-sm">download</span>
+                    </a>
+                    <a href="https://ffmpeg.org/download.html" target="_blank" class="flex items-center justify-between p-3 bg-white/5 rounded-xl hover:bg-white/10 transition-all text-sm">
+                        <span>Descargar FFmpeg</span>
+                        <span class="material-symbols-outlined text-sm">download</span>
+                    </a>
+                </div>
+            </div>
+        </div>
+
+        <!-- Instructions -->
+        <div class="glass p-6 rounded-2xl border-l-4 border-primary">
+            <h3 class="font-bold mb-2 flex items-center gap-2">
+                <span class="material-symbols-outlined text-primary">info</span>
+                ¿Cómo empezar?
+            </h3>
+            <ol class="text-sm text-slate-400 space-y-2 list-decimal ml-5">
+                <li>Ejecuta <b>iniciar.bat</b> y espera a que instale las librerías.</li>
+                <li>Cuando abra la ventana del transcriptor, ve a <b>Configuración</b> (icono de engranaje).</li>
+                <li>Pega tu <b>API Key de Groq</b> y dale a guardar.</li>
+                <li>¡Listo! Ya puedes pegar links de YouTube o subir audios.</li>
+            </ol>
+        </div>
+
+        <div class="text-center pt-4">
+            <button onclick="window.location.href='index.html'" class="accent-gradient px-8 py-4 rounded-2xl font-bold shadow-lg shadow-primary/20 hover:scale-105 active:scale-95 transition-all">
+                Ir al Transcriptor
+            </button>
+        </div>
+    </div>
+</body>
+</html>

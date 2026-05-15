@@ -47,19 +47,35 @@ if %errorlevel% neq 0 (
     )
 )
 
+:: ── Verificar yt-dlp.exe ─────────────────────────────────────
+if not exist "yt-dlp.exe" (
+    echo [+] yt-dlp.exe no encontrado. Descargando ultima version...
+    powershell -Command "Invoke-WebRequest -Uri 'https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe' -OutFile 'yt-dlp.exe'"
+    if %errorlevel% neq 0 (
+        echo [ERROR] No se pudo descargar yt-dlp.exe. Verifica tu conexion a internet.
+        pause
+        exit /b 1
+    )
+)
+
 :: ── Instalar dependencias si hace falta ──────────────────────
 if not exist "backend\venv" (
     echo [+] Creando entorno virtual... Esto solo ocurre la primera vez.
     python -m venv backend\venv
     echo [+] Instalando dependencias basicas...
     backend\venv\Scripts\python.exe -m pip install --upgrade pip
-    echo [+] Instalando PyTorch CPU... Este es un archivo grande y tardara unos minutos.
-    backend\venv\Scripts\python.exe -m pip install torch --index-url https://download.pytorch.org/whl/cpu
-    echo [+] Instalando el resto de dependencias: Whisper, FastAPI, etc...
+    
+    :: No instalamos PyTorch completo si solo usamos Groq/Whisper-API, 
+    :: pero pydub y yt-dlp python wrapper son necesarios.
+    echo [+] Instalando dependencias del backend...
     backend\venv\Scripts\python.exe -m pip install -r backend\requirements.txt
+    
     echo [+] Dependencias instaladas correctamente.
+
     echo.
+    set FIRST_RUN=1
 )
+
 
 :: ── Copiar cookies si existen ────────────────────────────────
 if exist "cookies.txt" (
@@ -86,7 +102,11 @@ if %errorlevel% neq 0 (
 
 :: ── Abrir frontend directamente (sin nginx) ──────────────────
 echo [+] Abriendo interfaz...
-start http://127.0.0.1:5000
+if "%FIRST_RUN%"=="1" (
+    start http://127.0.0.1:5000/setup.html
+) else (
+    start http://127.0.0.1:5000
+)
 
 echo.
 echo ==========================================

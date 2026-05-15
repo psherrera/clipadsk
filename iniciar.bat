@@ -7,6 +7,21 @@ echo   Clipadsk - Descargador Local
 echo ==========================================
 echo.
 
+:: ── Verificar Actualizaciones (Git) ──────────────────────────
+if exist ".git" (
+    echo [+] Buscando actualizaciones en el repositorio...
+    git pull origin main
+    echo.
+)
+
+:: ── Actualizar yt-dlp ────────────────────────────────────────
+if exist "yt-dlp.exe" (
+    echo [+] Verificando version del motor de descarga...
+    yt-dlp.exe -U
+    echo.
+)
+
+
 :: ── Verificar Python ─────────────────────────────────────────
 python --version >nul 2>&1
 if %errorlevel% neq 0 (

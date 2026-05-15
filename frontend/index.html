@@ -193,17 +193,46 @@
                     </div>
                 </div>
 
-                <!-- CLEAR DOWNLOADS CONFIG -->
-                <div class="glass rounded-2xl p-5 space-y-3 mb-6">
-                    <div class="flex items-center gap-2">
-                        <span class="material-symbols-outlined text-orange-400 text-xl">folder_delete</span>
-                        <h3 class="text-sm font-bold text-white">Espacio en Disco (Descargas)</h3>
+                <!-- MAINTENANCE & REPAIR -->
+                <div class="glass rounded-2xl p-5 space-y-4 mb-6">
+                    <div class="flex items-center gap-2 mb-1">
+                        <span class="material-symbols-outlined text-red-400 text-xl">build_circle</span>
+                        <h3 class="text-sm font-bold text-white">Mantenimiento y Reparación</h3>
                     </div>
-                    <p class="text-xs text-slate-400 leading-relaxed">Los videos y audios procesados se guardan localmente. Borralos de vez en cuando para liberar espacio en disco. No afectará a tus transcripciones guardadas.</p>
-                    <button id="clear-downloads-btn" class="w-full bg-white/5 hover:bg-orange-500/20 text-orange-400 border border-orange-500/20 px-5 py-3 rounded-xl transition-all font-bold text-sm flex items-center justify-center gap-2">
-                        <span class="material-symbols-outlined text-base">delete_sweep</span> Vaciar carpeta de descargas
-                    </button>
+                    
+                    <div class="grid grid-cols-1 gap-3">
+                        <button id="system-update-app-btn" class="bg-white/5 hover:bg-indigo-500/10 border border-white/5 p-4 rounded-xl flex items-center gap-4 transition-all group">
+                            <div class="w-10 h-10 rounded-lg bg-indigo-500/10 flex items-center justify-center group-hover:bg-indigo-500/20">
+                                <span class="material-symbols-outlined text-indigo-400">update</span>
+                            </div>
+                            <div class="text-left">
+                                <p class="text-sm font-bold text-white">Actualizar Aplicación</p>
+                                <p class="text-[10px] text-slate-500">Descarga los últimos arreglos desde GitHub</p>
+                            </div>
+                        </button>
+
+                        <button id="system-update-engine-btn" class="bg-white/5 hover:bg-amber-500/10 border border-white/5 p-4 rounded-xl flex items-center gap-4 transition-all group">
+                            <div class="w-10 h-10 rounded-lg bg-amber-500/10 flex items-center justify-center group-hover:bg-amber-500/20">
+                                <span class="material-symbols-outlined text-amber-400">settings_suggest</span>
+                            </div>
+                            <div class="text-left">
+                                <p class="text-sm font-bold text-white">Actualizar Motor (yt-dlp)</p>
+                                <p class="text-[10px] text-slate-500">Arregla fallos de descarga de YouTube</p>
+                            </div>
+                        </button>
+
+                        <button id="system-reset-btn" class="bg-white/5 hover:bg-red-500/10 border border-white/5 p-4 rounded-xl flex items-center gap-4 transition-all group">
+                            <div class="w-10 h-10 rounded-lg bg-red-500/10 flex items-center justify-center group-hover:bg-red-500/20">
+                                <span class="material-symbols-outlined text-red-400">restart_alt</span>
+                            </div>
+                            <div class="text-left">
+                                <p class="text-sm font-bold text-white">Limpiar Temporales</p>
+                                <p class="text-[10px] text-slate-500">Borra archivos locales para liberar espacio</p>
+                            </div>
+                        </button>
+                    </div>
                 </div>
+
 
                 <div class="flex items-center justify-between">
                     <h3 class="text-lg font-bold text-white">Transcripciones guardadas</h3>

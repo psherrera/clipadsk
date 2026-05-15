@@ -1003,4 +1003,38 @@ document.addEventListener('DOMContentLoaded', () => {
 
     chatInput?.addEventListener('keypress', e => { if (e.key === 'Enter') chatSendBtn?.click(); });
 
+    // ─── SYSTEM MAINTENANCE ─────────────────────────────────────────────────────
+    const callSystemEndpoint = async (endpoint, btn) => {
+        const originalHtml = btn.innerHTML;
+        btn.disabled = true;
+        btn.innerHTML = `<div class="w-10 h-10 rounded-lg bg-white/5 flex items-center justify-center animate-spin"><span class="material-symbols-outlined">sync</span></div><div class="text-left"><p class="text-sm font-bold text-white">Procesando...</p></div>`;
+        
+        try {
+            const r = await fetch(`${API_BASE}/system/${endpoint}`, { method: 'POST' });
+            const d = await r.json();
+            if (r.ok) {
+                showToast(d.message, 'success');
+                if (endpoint === 'update-app') {
+                    setTimeout(() => window.location.reload(), 2000);
+                }
+            } else {
+                throw new Error(d.error || 'Fallo en la operacion');
+            }
+        } catch (e) {
+            showToast(e.message, 'error');
+        } finally {
+            btn.disabled = false;
+            btn.innerHTML = originalHtml;
+        }
+    };
+
+    document.getElementById('system-update-app-btn')?.addEventListener('click', (e) => callSystemEndpoint('update-app', e.currentTarget));
+    document.getElementById('system-update-engine-btn')?.addEventListener('click', (e) => callSystemEndpoint('update-engine', e.currentTarget));
+    document.getElementById('system-reset-btn')?.addEventListener('click', (e) => {
+        if (confirm('¿Vaciar la carpeta de descargas? No se borrará tu historial.')) {
+            callSystemEndpoint('reset', e.currentTarget);
+        }
+    });
+
+
 });

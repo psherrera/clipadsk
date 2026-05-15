@@ -1348,7 +1348,49 @@ if os.path.exists(FRONTEND_DIR):
 else:
     print(f"ADVERTENCIA: No se encontró la carpeta frontend en {FRONTEND_DIR}")
 
+
+# --- FUNCIONES DE MANTENIMIENTO DEL SISTEMA ---
+
+@app.post("/api/system/update-app")
+async def update_app():
+    """Ejecuta git pull para traer los últimos cambios del código."""
+    try:
+        import subprocess
+        # Intentar git pull
+        result = subprocess.run(["git", "pull", "origin", "main"], capture_output=True, text=True, check=True)
+        return {"status": "ok", "message": "Aplicación actualizada con éxito.", "output": result.stdout}
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": f"Error al actualizar Git: {str(e)}"})
+
+@app.post("/api/system/update-engine")
+async def update_engine():
+    """Actualiza el ejecutable yt-dlp.exe."""
+    try:
+        import subprocess
+        ytdlp_path = os.path.join(ROOT_DIR, "yt-dlp.exe")
+        if not os.path.exists(ytdlp_path):
+            ytdlp_path = "yt-dlp" # Fallback a path si no está en root
+            
+        result = subprocess.run([ytdlp_path, "-U"], capture_output=True, text=True, check=True)
+        return {"status": "ok", "message": "Motor de descarga actualizado.", "output": result.stdout}
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": f"Error al actualizar motor: {str(e)}"})
+
+@app.post("/api/system/reset")
+async def reset_system():
+    """Limpia descargas y base de datos (mantenimiento extremo)."""
+    try:
+        import shutil
+        # 1. Limpiar descargas
+        if os.path.exists(DOWNLOAD_FOLDER):
+            shutil.rmtree(DOWNLOAD_FOLDER)
+            os.makedirs(DOWNLOAD_FOLDER)
+        return {"status": "ok", "message": "Sistema reseteado (descargas limpias)."}
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
 if __name__ == "__main__":
+
     import uvicorn
     port = int(os.environ.get("PORT", 5000))
     uvicorn.run(app, host="0.0.0.0", port=port)

@@ -10,17 +10,41 @@ echo.
 :: ── Verificar Python ─────────────────────────────────────────
 python --version >nul 2>&1
 if %errorlevel% neq 0 (
-    echo [ERROR] Python no encontrado. Instalalo desde https://python.org
+    echo [+] Python no encontrado. Intentando instalar automaticamente (Windows 10/11)...
+    winget --version >nul 2>&1
+    if %errorlevel% neq 0 (
+        echo [ERROR] Tu Windows no soporta auto-instalacion. Instala Python desde https://python.org
+        pause
+        exit /b 1
+    )
+    winget install -e --id Python.Python.3.11 --accept-package-agreements --accept-source-agreements
+    echo.
+    echo ==============================================================
+    echo  PYTHON INSTALADO. Por favor, CIERRA esta ventana y vuelve a
+    echo  abrir iniciar.bat para continuar.
+    echo ==============================================================
     pause
-    exit /b 1
+    exit /b 0
 )
 
 :: ── Verificar FFmpeg ─────────────────────────────────────────
 ffmpeg -version >nul 2>&1
 if %errorlevel% neq 0 (
-    echo [AVISO] FFmpeg no encontrado. La descarga de audio puede fallar.
-    echo         Descargalo desde https://ffmpeg.org/download.html
-    echo.
+    echo [+] FFmpeg no encontrado. Intentando instalar automaticamente...
+    winget --version >nul 2>&1
+    if %errorlevel% neq 0 (
+        echo [AVISO] Tu Windows no soporta auto-instalacion. Descargalo desde https://ffmpeg.org/download.html
+        echo.
+    ) else (
+        winget install -e --id Gyan.FFmpeg --accept-package-agreements --accept-source-agreements
+        echo.
+        echo ==============================================================
+        echo  FFMPEG INSTALADO. Por favor, CIERRA esta ventana y vuelve a
+        echo  abrir iniciar.bat para continuar.
+        echo ==============================================================
+        pause
+        exit /b 0
+    )
 )
 
 :: ── Instalar dependencias si hace falta ──────────────────────

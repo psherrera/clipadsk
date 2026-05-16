@@ -19,8 +19,28 @@ backend/NULL
 Thumbs.db
 
 # Virtual Environment
+.venv/
 venv/
 backend/venv/
 
+# App data and caches
+clipadsk.db
+transcripts_cache.json
+transcripts_cache.json.migrated
+
 # Environments
 .env
+
+# Large Binaries and Media
+*.exe
+*.mp4
+*.zip
+*.txt
+!backend/requirements*.txt
+!README.md
+!cookies.txt.example
+
+# Folders
+scratch/
+backend/downloads/
+backend/__pycache__/

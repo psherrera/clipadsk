@@ -5,6 +5,14 @@
  */
 document.addEventListener('DOMContentLoaded', () => {
 
+    // ─── FIRST-RUN REDIRECT ──────────────────────────────────────────────────────
+    // Si el usuario nunca completó el setup, redirigir antes de cargar nada
+    if (!localStorage.getItem('clipadsk_setup_done')) {
+        window.location.replace('setup.html');
+        return; // Detener el resto del script
+    }
+
+
     // ─── UI ELEMENTS ────────────────────────────────────────────────────────────
     const videoUrlInput        = document.getElementById('video-url');
     const fetchBtn             = document.getElementById('fetch-info-btn');
@@ -59,6 +67,7 @@ document.addEventListener('DOMContentLoaded', () => {
         instagram: { hosts: ['instagram.com'],                        icon: 'photo_library', label: 'Instagram', placeholder: 'Pega el enlace del Reel o Video...' },
         redes:     { hosts: ['tiktok.com', 'vm.tiktok.com', 'twitter.com', 'x.com', 't.co', 'facebook.com', 'fb.watch', 'fb.com'], icon: 'share', label: 'Redes (TikTok/X/FB)', placeholder: 'Pega enlace de TikTok, X o Facebook...' },
         whatsapp:  { hosts: [],                                       icon: 'mic',           label: 'WhatsApp',  placeholder: 'Sube un audio de WhatsApp (.ogg/.mp3)' },
+        video:     { hosts: [],                                       icon: 'video_file',    label: 'Video',     placeholder: 'Subí un video local (.mp4/.mov)' },
         history:   { hosts: [],                                       icon: 'settings',      label: 'Configuracion', placeholder: '' },
     };
 
@@ -192,7 +201,7 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     };
 
-    // ─── TAB SWITCHING ───────────────────────────────────────────────────────────
+    // TAB SWITCHING
     function switchTab(tab) {
         currentTab = tab;
         navItems.forEach(i => { i.classList.remove('active', 'text-primary'); i.classList.add('text-slate-500'); });
@@ -202,16 +211,44 @@ document.addEventListener('DOMContentLoaded', () => {
         const cfg         = PLATFORMS[tab];
         const mainSection = document.getElementById('main-input-section');
         const waSection   = document.getElementById('whatsapp-section');
+        const vidSection  = document.getElementById('video-section');
         const histSection = document.getElementById('history-section');
 
-        mainSection?.classList.toggle('hidden', tab === 'whatsapp' || tab === 'history');
+        mainSection?.classList.toggle('hidden', tab === 'whatsapp' || tab === 'video' || tab === 'history');
         waSection?.classList.toggle('hidden', tab !== 'whatsapp');
+        vidSection?.classList.toggle('hidden', tab !== 'video');
         histSection?.classList.toggle('hidden', tab !== 'history');
+
+        // Limpiar toda la interfaz al cambiar (o re-clicar) una pestana
         videoInfoCard?.classList.add('hidden');
+        transcriptSection?.classList.add('hidden');
+        showTranscriptBtn?.classList.add('hidden');
+        downloadTxtBtn?.classList.add('hidden');
+        qualityWarning?.classList.add('hidden');
+        downloadProgress?.classList.add('hidden');
+        clearUrlBtn?.classList.add('hidden');
+
+        // Limpiar secciones de upload (WA y Video)
+        document.getElementById('wa-result')?.classList.add('hidden');
+        document.getElementById('vid-result')?.classList.add('hidden');
+        document.getElementById('vid-progress')?.classList.add('hidden');
+
+        // Herramientas periodisticas y chat
+        const toolsWrapper = document.getElementById('journalist-tools-wrapper');
+        if (toolsWrapper) { toolsWrapper.innerHTML = ''; toolsWrapper.classList.add('hidden'); }
+        document.getElementById('ai-chat-section')?.classList.add('hidden');
+        const chatHistory = document.getElementById('chat-history');
+        if (chatHistory) chatHistory.innerHTML = '';
+        const chatInput = document.getElementById('chat-input');
+        if (chatInput) chatInput.value = '';
+
+        // Estado interno
+        currentTranscript = '';
+        currentMaxResThumbnail = '';
 
         if (cfg) {
-            if (tabTitle)    tabTitle.textContent    = tab === 'history' ? 'Configuración y Guardados' : `${cfg.label} Transcriptor`;
-            if (appSubtitle) appSubtitle.textContent = tab === 'history' ? 'Ajustes, claves de API y transcripciones locales.' : `Transcribí contenido de ${cfg.label} con IA.`;
+            if (tabTitle)    tabTitle.textContent    = tab === 'history' ? 'Configuracion y Guardados' : `${cfg.label} Transcriptor`;
+            if (appSubtitle) appSubtitle.textContent = tab === 'history' ? 'Ajustes, claves de API y transcripciones locales.' : `Transcribi contenido de ${cfg.label} con IA.`;
             if (inputIcon)   inputIcon.textContent   = cfg.icon;
             if (videoUrlInput && tab !== 'history') videoUrlInput.placeholder = cfg.placeholder;
         }
@@ -219,6 +256,7 @@ document.addEventListener('DOMContentLoaded', () => {
         if (tab === 'history') renderHistory();
         if (videoUrlInput) videoUrlInput.value = '';
     }
+
 
     navItems.forEach(item => {
         item.addEventListener('click', () => {
@@ -535,7 +573,10 @@ document.addEventListener('DOMContentLoaded', () => {
             toolsContainer.classList.remove('hidden');
         }
 
-        // 2. Texto de transcripción con etiqueta de método
+        // 2. Mostrar la sección de transcripción si está oculta
+        transcriptSection?.classList.remove('hidden');
+
+        // 3. Texto de transcripción con etiqueta de método
         transcriptContent.innerHTML = `
             <div class="flex items-center gap-2 text-[10px] font-bold text-slate-500 uppercase tracking-widest bg-white/5 py-1 px-3 rounded-full w-fit mb-4">
                 <span class="material-symbols-outlined text-xs">auto_awesome</span>
@@ -543,7 +584,7 @@ document.addEventListener('DOMContentLoaded', () => {
             </div>
             <div class="text-slate-300 text-sm leading-relaxed">${formatAIResponse(text)}</div>`;
 
-        // 3. Mostrar sección de chat
+        // 4. Mostrar sección de chat
         document.getElementById('ai-chat-section')?.classList.remove('hidden');
         // Limpiar historial de chat al cargar nueva transcripción
         const chatHistory = document.getElementById('chat-history');
@@ -590,30 +631,20 @@ document.addEventListener('DOMContentLoaded', () => {
             if (!r.ok) throw new Error(data.detail || 'Error en la transcripcion');
 
             currentTranscript = data.transcript;
+            
+            // Usar la columna derecha (como YouTube)
+            renderTranscript(data.transcript, 'groq_whisper_v3_file');
+            downloadTxtBtn?.classList.remove('hidden');
 
-            if (waResult) {
-                waResult.classList.remove('hidden'); waResult.classList.add('fade-in');
-                waResult.innerHTML = `
-                    <div class="space-y-4">
-                        <div class="flex items-center justify-between">
-                            <div class="flex items-center gap-2">
-                                <span class="bg-emerald-500/20 text-emerald-400 p-1.5 rounded-lg flex items-center"><span class="material-symbols-outlined text-sm">check_circle</span></span>
-                                <span class="text-white font-bold text-sm">Transcripcion lista</span>
-                            </div>
-                            <span class="text-slate-500 text-xs">${data.size_mb} MB</span>
-                        </div>
-                        <p class="text-slate-300 text-sm leading-relaxed border border-white/5 rounded-xl p-4 bg-black/20">${data.transcript}</p>
-                        <div class="flex gap-2 flex-wrap">
-                            <button onclick="window._wa.copy()" class="text-[10px] font-bold uppercase tracking-widest bg-accent/20 text-accent px-3 py-2 rounded-full hover:bg-accent/30 transition-all flex items-center gap-1">
-                                <span class="material-symbols-outlined text-xs">content_copy</span> Copiar
-                            </button>
-                            <button onclick="window._wa.download('${file.name}')" class="text-[10px] font-bold uppercase tracking-widest bg-white/5 text-slate-300 px-3 py-2 rounded-full hover:bg-white/10 transition-all flex items-center gap-1">
-                                <span class="material-symbols-outlined text-xs">download</span> .txt
-                            </button>
-                        </div>
-                        ${buildJournalistToolsHtml('wa')}
-                    </div>`;
-            }
+            saveToHistory({ url: `whatsapp:${file.name}`, platform: 'whatsapp', title: file.name, transcript: data.transcript });
+
+            if (waDropZone) waDropZone.innerHTML = `
+                <div class="flex flex-col items-center gap-2">
+                    <span class="material-symbols-outlined text-emerald-400 text-4xl mb-1">check_circle</span>
+                    <p class="font-bold text-white text-sm">¡Audio listo!</p>
+                    <p class="text-slate-500 text-xs">${file.name}</p>
+                    <button onclick="document.getElementById('wa-file-input').click()" class="mt-2 text-[10px] font-bold text-primary uppercase border border-primary/20 px-3 py-1 rounded-full hover:bg-primary/10 transition-all">Subir otro</button>
+                </div>`;
 
             saveToHistory({ url: `whatsapp:${file.name}`, platform: 'whatsapp', title: file.name, transcript: data.transcript });
 
@@ -632,6 +663,95 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     window._wa = {
+        copy:     ()      => { if (currentTranscript) { navigator.clipboard.writeText(currentTranscript); showToast('Copiado', 'success'); } },
+        download: (name) => {
+            if (!currentTranscript) return;
+            const a = document.createElement('a');
+            a.href = URL.createObjectURL(new Blob([currentTranscript], { type: 'text/plain' }));
+            a.download = name.replace(/\.[^.]+$/, '') + '_transcripcion.txt';
+            a.click();
+        }
+    };
+
+    // ─── VIDEO LOCAL UPLOAD ──────────────────────────────────────────────────────
+    const vidFileInput = document.getElementById('vid-file-input');
+    const vidDropZone  = document.getElementById('vid-dropzone');
+    const vidResult    = document.getElementById('vid-result');
+    const vidProgress  = document.getElementById('vid-progress');
+    const vidProgBar   = document.getElementById('vid-progress-bar');
+    const vidProgText  = document.getElementById('vid-progress-text');
+
+    document.getElementById('vid-upload-btn')?.addEventListener('click', () => vidFileInput?.click());
+    vidFileInput?.addEventListener('change', () => { if (vidFileInput.files[0]) processVideoFile(vidFileInput.files[0]); });
+
+    vidDropZone?.addEventListener('dragover', e => { e.preventDefault(); vidDropZone.classList.add('border-emerald-400', 'scale-[1.01]'); });
+    vidDropZone?.addEventListener('dragleave', () => vidDropZone.classList.remove('border-emerald-400', 'scale-[1.01]'));
+    vidDropZone?.addEventListener('drop', e => {
+        e.preventDefault(); vidDropZone.classList.remove('border-emerald-400', 'scale-[1.01]');
+        const file = e.dataTransfer.files[0]; if (file) processVideoFile(file);
+    });
+
+    async function processVideoFile(file) {
+        const ALLOWED = ['.mp4', '.mov', '.avi', '.mkv', '.webm'];
+        const ext = '.' + file.name.split('.').pop().toLowerCase();
+        if (!ALLOWED.includes(ext)) { showToast(`Formato de video no soportado: ${ext}`, 'error'); return; }
+
+        // UI Reset
+        vidProgress?.classList.remove('hidden');
+        vidResult?.classList.add('hidden');
+        vidProgBar.style.width = '0%';
+        vidProgText.textContent = 'Subiendo video...';
+
+        const formData = new FormData();
+        formData.append('file', file);
+        formData.append('target_lang', selectedTargetLang);
+        formData.append('uid', uid);
+        formData.append('groq_api_key', localStorage.getItem(GROQ_KEY_STORE) || '');
+
+        try {
+            const xhr = new XMLHttpRequest();
+            xhr.open('POST', `${API_BASE}/transcript-file`, true);
+
+            xhr.upload.onprogress = (e) => {
+                if (e.lengthComputable) {
+                    const pct = Math.round((e.loaded / e.total) * 100);
+                    vidProgBar.style.width = `${pct}%`;
+                    if (pct < 100) vidProgText.textContent = `Cargando video: ${pct}%`;
+                    else vidProgText.textContent = 'Procesando en el servidor...';
+                }
+            };
+
+            const response = await new Promise((resolve, reject) => {
+                xhr.onload = () => xhr.status >= 200 && xhr.status < 300 ? resolve(JSON.parse(xhr.responseText)) : reject(new Error(xhr.responseText));
+                xhr.onerror = () => reject(new Error('Fallo de red'));
+                xhr.send(formData);
+            });
+
+            currentTranscript = response.transcript;
+
+            // Usar la columna derecha (como YouTube)
+            renderTranscript(response.transcript, 'groq_whisper_v3_file');
+            downloadTxtBtn?.classList.remove('hidden');
+
+            saveToHistory({ url: `video:${file.name}`, platform: 'video', title: file.name, transcript: response.transcript });
+            
+            vidProgress?.classList.add('hidden');
+            if (vidDropZone) vidDropZone.innerHTML = `
+                <div class="flex flex-col items-center gap-2">
+                    <span class="material-symbols-outlined text-emerald-400 text-4xl mb-1">check_circle</span>
+                    <p class="font-bold text-white text-sm">¡Video listo!</p>
+                    <p class="text-slate-500 text-xs">${file.name}</p>
+                    <button onclick="document.getElementById('vid-file-input').click()" class="mt-2 text-[10px] font-bold text-primary uppercase border border-primary/20 px-3 py-1 rounded-full hover:bg-primary/10 transition-all">Subir otro</button>
+                </div>`;
+
+        } catch (err) {
+            showToast(`Error: ${err.message}`, 'error');
+            vidProgText.textContent = 'Fallo al procesar el video';
+            vidProgBar.classList.add('bg-red-500');
+        }
+    }
+
+    window._vid = {
         copy:     ()      => { if (currentTranscript) { navigator.clipboard.writeText(currentTranscript); showToast('Copiado', 'success'); } },
         download: (name) => {
             if (!currentTranscript) return;

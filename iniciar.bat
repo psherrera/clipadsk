@@ -2,6 +2,9 @@
 cd /d "%~dp0"
 title Clipadsk
 
+:: Matar procesos previos para evitar conflictos de puerto 5000
+taskkill /f /im python.exe /t >nul 2>&1
+echo [+] Limpiando procesos previos...
 echo ==========================================
 echo   Clipadsk - Descargador Local
 echo ==========================================
@@ -98,39 +101,25 @@ if exist "cookies.txt" (
     copy "cookies.txt" "backend\cookies.txt" >nul
 )
 
-:: ── Arrancar backend en segundo plano ────────────────────────
-echo [+] Iniciando backend en http://127.0.0.1:5000 ...
-start "Clipadsk Backend" /min "backend\venv\Scripts\python.exe" "backend\main.py"
+:: ── Arrancar backend SIN ventana visible ─────────────────────
+echo [+] Iniciando backend...
+powershell -NoProfile -WindowStyle Hidden -Command "Start-Process '%~dp0backend\venv\Scripts\python.exe' -ArgumentList '%~dp0backend\main.py' -WorkingDirectory '%~dp0backend' -WindowStyle Hidden"
 
 :: ── Esperar a que levante ────────────────────────────────────
-echo [+] Esperando al servidor...
-timeout /t 6 >nul
+echo [+] Iniciando servidor... esto puede tardar unos segundos.
+timeout /t 10 >nul
 
-:: ── Verificar si el backend está activo ──────────────────────
-curl -s http://127.0.0.1:5000/api/video-info >nul
+:: ── Verificar si el backend está activo (silencioso) ─────────
+curl -s http://127.0.0.1:5000/api/health/cookies >nul 2>&1
 if %errorlevel% neq 0 (
-    echo [ERROR] El servidor no parece haber arrancado. 
-    echo Revisa la ventana "Clipadsk Backend" para ver errores.
-    pause
-    exit /b 1
+    timeout /t 4 >nul
 )
 
-:: ── Abrir frontend directamente (sin nginx) ──────────────────
-echo [+] Abriendo interfaz...
-if "%FIRST_RUN%"=="1" (
-    start http://127.0.0.1:5000/setup.html
-) else (
-    start http://127.0.0.1:5000
-)
+:: ── Minimizar esta ventana antes de abrir el navegador ────────
+powershell -NoProfile -Command "Add-Type -MemberDefinition '[DllImport(\"user32.dll\")] public static extern bool ShowWindow(IntPtr h,int n);' -Name W -Namespace W; [W.W]::ShowWindow((Get-Process -Id $PID).MainWindowHandle,6)" >nul 2>&1
 
-echo.
-echo ==========================================
-echo   ¡Todo listo! 
-echo   Backend : http://127.0.0.1:5000
-echo   Frontend: http://127.0.0.1:5000
-echo.
-echo   Cierra la ventana "Clipadsk Backend"
-echo   para apagar el servidor.
-echo ==========================================
-echo.
-pause
+:: ── Abrir frontend ────────────────────────────────────────────
+start http://127.0.0.1:5000/setup.html
+
+:: La ventana se cierra sola, el backend sigue corriendo en segundo plano
+exit

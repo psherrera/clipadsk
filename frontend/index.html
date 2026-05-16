@@ -87,6 +87,10 @@
                     <span class="material-symbols-outlined text-[24px] lg:text-[20px]">mic</span>
                     <span class="text-[11px] lg:text-xs font-extrabold uppercase tracking-wider">WhatsApp</span>
                 </button>
+                <button class="nav-item flex flex-col lg:flex-row items-center gap-1.5 focus:outline-none text-slate-500 hover:text-slate-300 min-w-[60px] lg:min-w-0" data-tab="video">
+                    <span class="material-symbols-outlined text-[24px] lg:text-[20px]">video_file</span>
+                    <span class="text-[11px] lg:text-xs font-extrabold uppercase tracking-wider">Video</span>
+                </button>
                 <button class="nav-item flex flex-col lg:flex-row items-center gap-1.5 focus:outline-none text-slate-500 hover:text-slate-300 min-w-[60px] lg:min-w-0" data-tab="history">
                     <span class="material-symbols-outlined text-[24px] lg:text-[20px]">settings</span>
                     <span class="text-[11px] lg:text-xs font-extrabold uppercase tracking-wider">Config</span>
@@ -155,6 +159,44 @@
 
                 <!-- WhatsApp result -->
                 <div id="wa-result" class="hidden glass rounded-2xl p-6 fade-in"></div>
+            </section>
+
+            <!-- ═══ VIDEO LOCAL SECTION ═══ -->
+            <section id="video-section" class="hidden space-y-4">
+                <!-- Info badge -->
+                <div class="flex items-center gap-3 p-4 rounded-2xl bg-primary/5 border border-primary/15">
+                    <span class="material-symbols-outlined text-primary text-xl flex-shrink-0">info</span>
+                    <p class="text-xs text-slate-400 leading-relaxed">
+                        Subi una grabación de video propia (.mp4, .mov, .avi, .mkv) y Clipadsk extraerá el audio y lo transcribirá con IA.
+                    </p>
+                </div>
+
+                <!-- Dropzone -->
+                <div id="vid-dropzone" class="border-2 border-dashed border-white/10 rounded-2xl p-10 flex flex-col items-center justify-center text-center cursor-pointer hover:border-primary/40 transition-all group">
+                    <span class="material-symbols-outlined text-emerald-400 text-5xl mb-3 group-hover:scale-110 transition-transform">video_file</span>
+                    <p class="font-bold text-white text-lg">Arrastrá tu video aquí</p>
+                    <p class="text-slate-400 text-sm mt-1">O hacé clic para seleccionar</p>
+                    <p class="text-slate-500 text-xs mt-3">.mp4 · .mov · .avi · .mkv · .webm</p>
+                    <p class="text-slate-600 text-xs mt-1">Hasta 200 MB</p>
+                </div>
+                <button id="vid-upload-btn" class="w-full py-4 rounded-xl font-bold flex items-center justify-center gap-3 transition-all border border-emerald-500/30 bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-300">
+                    <span class="material-symbols-outlined">video_call</span> Seleccionar video
+                </button>
+                <input type="file" id="vid-file-input" accept=".mp4,.mov,.avi,.mkv,.webm" class="hidden">
+
+                <!-- Upload progress -->
+                <div id="vid-progress" class="hidden glass rounded-2xl p-5 space-y-3">
+                    <div class="flex items-center gap-3">
+                        <div class="w-5 h-5 border-2 border-slate-700 border-t-emerald-400 rounded-full animate-spin flex-shrink-0"></div>
+                        <p id="vid-progress-text" class="text-sm text-slate-300 animate-pulse">Subiendo video...</p>
+                    </div>
+                    <div class="w-full bg-slate-900 rounded-full h-1.5 overflow-hidden">
+                        <div id="vid-progress-bar" class="h-full bg-emerald-400 transition-all duration-300" style="width:0%"></div>
+                    </div>
+                </div>
+
+                <!-- Video result -->
+                <div id="vid-result" class="hidden glass rounded-2xl p-6 fade-in"></div>
             </section>
 
             <!-- ═══ HISTORY SECTION ═══ -->

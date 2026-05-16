@@ -9,4 +9,6 @@ deep-translator
 python-dotenv
 pydub
 instaloader
+# faster-whisper is optional: instalar si querés transcripción local con modelo small
+# faster-whisper
 bgutil-ytdlp-pot-provider

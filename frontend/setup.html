@@ -12,76 +12,319 @@
     <style>
         body { background-color: #0a0812; font-family: 'Outfit', sans-serif; color: #f1f5f9; }
         .glass { background: rgba(255, 255, 255, 0.03); backdrop-filter: blur(10px); border: 1px solid rgba(255, 255, 255, 0.05); }
+        .glass-hover { transition: all 0.2s ease; }
+        .glass-hover:hover { background: rgba(255, 255, 255, 0.06); border-color: rgba(137, 90, 246, 0.25); }
         .accent-gradient { background: linear-gradient(135deg, #895af6, #06b6d4); }
-        .step-number { width: 32px; height: 32px; border-radius: 50%; display: flex; items-center; justify-center; background: rgba(137, 90, 246, 0.2); color: #895af6; font-weight: 800; }
+        .step-number { width: 36px; height: 36px; border-radius: 50%; display: flex; align-items: center; justify-content: center; background: rgba(137, 90, 246, 0.2); color: #895af6; font-weight: 800; font-size: 0.9rem; flex-shrink: 0; }
+        .step-number.cyan { background: rgba(6, 182, 212, 0.15); color: #06b6d4; }
+        .step-number.orange { background: rgba(249, 115, 22, 0.15); color: #f97316; }
+        .step-number.green { background: rgba(16, 185, 129, 0.15); color: #10b981; }
+        .badge { display: inline-flex; align-items: center; gap: 4px; padding: 3px 10px; border-radius: 99px; font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.08em; }
+        .code-tag { background: rgba(137,90,246,0.15); border: 1px solid rgba(137,90,246,0.3); color: #a78bfa; border-radius: 6px; padding: 2px 8px; font-size: 0.78em; font-family: monospace; }
+        /* Step tabs */
+        .setup-step { display: none; }
+        .setup-step.active { display: block; }
+        /* Progress */
+        .progress-dot { width: 10px; height: 10px; border-radius: 50%; background: rgba(255,255,255,0.1); transition: all 0.3s ease; }
+        .progress-dot.done { background: #895af6; box-shadow: 0 0 8px rgba(137,90,246,0.5); }
+        .progress-dot.active { background: #895af6; box-shadow: 0 0 12px rgba(137,90,246,0.7); transform: scale(1.3); }
+        /* Animation */
+        .fade-in { animation: fadeIn 0.4s ease; }
+        @keyframes fadeIn { from { opacity:0; transform:translateY(10px); } to { opacity:1; transform:none; } }
+        /* Screenshot style demo */
+        .demo-browser { background: #1a1a2e; border-radius: 12px; border: 1px solid rgba(255,255,255,0.08); overflow: hidden; }
+        .demo-browser-bar { background: #0f0f1a; padding: 8px 14px; display: flex; align-items: center; gap: 8px; border-bottom: 1px solid rgba(255,255,255,0.06); }
+        .demo-dot { width: 10px; height: 10px; border-radius: 50%; }
+        .demo-url { background: rgba(255,255,255,0.05); border-radius: 6px; padding: 3px 10px; font-size: 11px; color: #64748b; flex: 1; max-width: 280px; font-family: monospace; }
+        .cookie-step { display: flex; gap: 12px; padding: 14px; border-radius: 12px; background: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.05); }
+        .cookie-step-num { width: 28px; height: 28px; border-radius: 50%; background: rgba(6,182,212,0.15); color: #06b6d4; font-weight: 800; font-size: 13px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
     </style>
 </head>
-<body class="min-h-screen flex items-center justify-center p-6">
-    <div class="max-w-3xl w-full glass rounded-3xl p-8 md:p-12 shadow-2xl space-y-8">
-        <div class="text-center space-y-4">
-            <div class="w-20 h-20 bg-primary/10 rounded-2xl flex items-center justify-center mx-auto mb-4">
-                <img src="logo.png" alt="Logo" class="w-12 h-12 object-contain">
+<body class="min-h-screen flex items-center justify-center p-4 md:p-6">
+
+    <div class="max-w-2xl w-full space-y-6">
+
+        <!-- Header -->
+        <div class="text-center space-y-3 fade-in">
+            <div class="w-16 h-16 accent-gradient rounded-2xl flex items-center justify-center mx-auto shadow-lg shadow-purple-500/20">
+                <img src="logo.png" alt="Logo" class="w-10 h-10 object-contain" onerror="this.style.display='none'; this.parentElement.innerHTML='<span class=\'text-white text-2xl font-black\'>C</span>'">
             </div>
-            <h1 class="text-4xl font-extrabold tracking-tight">Bienvenido a Clipadsk</h1>
-            <p class="text-slate-400">Guía rápida para poner en marcha el transcriptor en una PC nueva.</p>
+            <h1 class="text-3xl md:text-4xl font-extrabold tracking-tight">Bienvenido a <span class="text-transparent bg-clip-text accent-gradient">Clipadsk</span></h1>
+            <p class="text-slate-400 text-sm">Configurá todo en 3 pasos antes de empezar.</p>
         </div>
 
-        <div class="grid md:grid-cols-2 gap-6">
-            <!-- Step 1: Groq Key -->
-            <div class="glass p-6 rounded-2xl space-y-4 hover:border-primary/30 transition-all">
+        <!-- Progress indicator -->
+        <div class="flex items-center justify-center gap-3" id="progress-dots">
+            <div class="progress-dot active" data-step="0"></div>
+            <div class="w-8 h-px bg-white/10"></div>
+            <div class="progress-dot" data-step="1"></div>
+            <div class="w-8 h-px bg-white/10"></div>
+            <div class="progress-dot" data-step="2"></div>
+        </div>
+
+        <!-- ═══════════════════════════════════════════ PASO 1 ═══════ -->
+        <div class="setup-step active fade-in" id="step-0">
+            <div class="glass rounded-3xl p-6 md:p-8 space-y-6">
                 <div class="flex items-center gap-3">
                     <div class="step-number">1</div>
-                    <h2 class="text-xl font-bold">Llave de IA (Gratis)</h2>
+                    <div>
+                        <h2 class="text-xl font-bold">Llave de IA (Groq)</h2>
+                        <p class="text-xs text-slate-500">Gratis · Sin tarjeta de crédito</p>
+                    </div>
+                    <span class="badge ml-auto" style="background:rgba(16,185,129,0.1);color:#10b981;border:1px solid rgba(16,185,129,0.2)">✓ Gratis</span>
                 </div>
-                <p class="text-sm text-slate-400">Clipadsk usa <b>Groq</b> para transcribir audios en segundos. Es gratis y muy rápido.</p>
-                <div class="space-y-2">
-                    <a href="https://console.groq.com/keys" target="_blank" class="flex items-center justify-between p-3 bg-white/5 rounded-xl hover:bg-white/10 transition-all text-sm group">
-                        <span>Obtener API Key</span>
-                        <span class="material-symbols-outlined text-sm group-hover:translate-x-1 transition-transform">open_in_new</span>
-                    </a>
-                </div>
-                <p class="text-[10px] text-slate-500 italic">Crea una cuenta, ve a "API Keys" y genera una nueva llave.</p>
-            </div>
+                <p class="text-sm text-slate-400 leading-relaxed">
+                    Clipadsk usa <b class="text-white">Groq</b> para transcribir audios con IA en segundos. Es necesaria para transcribir — sin ella la herramienta no funciona.
+                </p>
 
-            <!-- Step 2: Dependencias -->
-            <div class="glass p-6 rounded-2xl space-y-4 hover:border-accent/30 transition-all">
+                <div class="space-y-3">
+                    <div class="cookie-step">
+                        <div class="cookie-step-num">1</div>
+                        <div class="text-sm text-slate-300">
+                            Creá una cuenta gratuita en <a href="https://console.groq.com" target="_blank" class="text-cyan-400 hover:underline font-semibold">console.groq.com</a>
+                        </div>
+                    </div>
+                    <div class="cookie-step">
+                        <div class="cookie-step-num">2</div>
+                        <div class="text-sm text-slate-300">En el panel, hacé clic en <span class="code-tag">API Keys</span> en el menú izquierdo.</div>
+                    </div>
+                    <div class="cookie-step">
+                        <div class="cookie-step-num">3</div>
+                        <div class="text-sm text-slate-300">Clic en <span class="code-tag">Create API key</span>, ponele un nombre y copiá la llave generada.</div>
+                    </div>
+                    <div class="cookie-step">
+                        <div class="cookie-step-num">4</div>
+                        <div class="text-sm text-slate-300">Una vez dentro de la app, pegala en <b>Configuración ⚙️</b> y guardá.</div>
+                    </div>
+                </div>
+
+                <a href="https://console.groq.com/keys" target="_blank"
+                   class="flex items-center justify-between p-4 bg-white/5 rounded-2xl hover:bg-white/10 transition-all group border border-white/5 hover:border-purple-500/30">
+                    <div class="flex items-center gap-3">
+                        <span class="material-symbols-outlined text-purple-400">vpn_key</span>
+                        <div>
+                            <p class="text-sm font-bold">Ir a console.groq.com</p>
+                            <p class="text-[10px] text-slate-500">Crear cuenta y generar API key</p>
+                        </div>
+                    </div>
+                    <span class="material-symbols-outlined text-slate-500 group-hover:translate-x-1 transition-transform">open_in_new</span>
+                </a>
+            </div>
+        </div>
+
+        <!-- ═══════════════════════════════════════════ PASO 2 ═══════ -->
+        <div class="setup-step fade-in" id="step-1">
+            <div class="glass rounded-3xl p-6 md:p-8 space-y-6">
                 <div class="flex items-center gap-3">
-                    <div class="step-number">2</div>
-                    <h2 class="text-xl font-bold">Dependencias</h2>
+                    <div class="step-number cyan">2</div>
+                    <div>
+                        <h2 class="text-xl font-bold">Cookies de YouTube</h2>
+                        <p class="text-xs text-slate-500">Para acceder a videos con restricción de edad o privados</p>
+                    </div>
+                    <span class="badge ml-auto" style="background:rgba(251,191,36,0.1);color:#fbbf24;border:1px solid rgba(251,191,36,0.2)">⚡ Recomendado</span>
                 </div>
-                <p class="text-sm text-slate-400">El archivo <b>iniciar.bat</b> intenta descargar todo automáticamente, pero si algo falla:</p>
-                <div class="space-y-2">
-                    <a href="https://www.python.org/downloads/" target="_blank" class="flex items-center justify-between p-3 bg-white/5 rounded-xl hover:bg-white/10 transition-all text-sm">
-                        <span>Descargar Python</span>
-                        <span class="material-symbols-outlined text-sm">download</span>
+
+                <div class="p-4 rounded-2xl border border-amber-500/20 bg-amber-500/5 flex gap-3">
+                    <span class="material-symbols-outlined text-amber-400 flex-shrink-0">info</span>
+                    <p class="text-sm text-amber-200/80 leading-relaxed">
+                        YouTube bloquea descargas sin autenticación. Las cookies le dicen a YouTube que sos un usuario real, evitando bloqueos.
+                    </p>
+                </div>
+
+                <div class="space-y-3">
+                    <div class="cookie-step">
+                        <div class="cookie-step-num">1</div>
+                        <div class="text-sm text-slate-300">
+                            Instalá la extensión <b class="text-white">Get cookies.txt LOCALLY</b> en tu navegador:
+                            <div class="flex flex-wrap gap-2 mt-2">
+                                <a href="https://chromewebstore.google.com/detail/get-cookiestxt-locally/cclelndahbckbenkjhflpdbgdldlbecc" target="_blank"
+                                   class="text-[11px] bg-white/5 hover:bg-white/10 border border-white/10 px-3 py-1.5 rounded-full flex items-center gap-1.5 transition-all">
+                                    <svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2z" fill="#4285F4"/><path d="M12 2a10 10 0 0 1 8.66 5H12V2z" fill="#EA4335"/><path d="M12 2v5H3.34A10 10 0 0 1 12 2z" fill="#FBBC05"/><path d="M2 12a10 10 0 0 1 1.34-5H12v5H2z" fill="#34A853"/></svg>
+                                    Chrome / Edge
+                                </a>
+                                <a href="https://addons.mozilla.org/firefox/addon/get-cookies-txt-locally/" target="_blank"
+                                   class="text-[11px] bg-white/5 hover:bg-white/10 border border-white/10 px-3 py-1.5 rounded-full flex items-center gap-1.5 transition-all">
+                                    <span class="text-orange-400">🦊</span> Firefox
+                                </a>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="cookie-step">
+                        <div class="cookie-step-num">2</div>
+                        <div class="text-sm text-slate-300">
+                            Andá a <a href="https://www.youtube.com" target="_blank" class="text-cyan-400 hover:underline font-semibold">youtube.com</a> e <b class="text-white">iniciá sesión</b> con tu cuenta de Google.
+                        </div>
+                    </div>
+                    <div class="cookie-step">
+                        <div class="cookie-step-num">3</div>
+                        <div class="text-sm text-slate-300">
+                            Con YouTube abierto, hacé clic en el ícono de la extensión en la barra del navegador.
+                        </div>
+                    </div>
+                    <div class="cookie-step">
+                        <div class="cookie-step-num">4</div>
+                        <div class="text-sm text-slate-300">
+                            Clic en <span class="code-tag">Export current site cookies</span>. Se descargará un archivo <span class="code-tag">youtube.com_cookies.txt</span>.
+                        </div>
+                    </div>
+                    <div class="cookie-step" style="border-color:rgba(137,90,246,0.2);background:rgba(137,90,246,0.04)">
+                        <div class="cookie-step-num" style="background:rgba(137,90,246,0.2);color:#a78bfa">5</div>
+                        <div class="text-sm text-slate-300">
+                            Renombrá el archivo a <span class="code-tag">cookies.txt</span> y colocalo en la <b class="text-white">carpeta raíz de Clipadsk</b> (donde está el <span class="code-tag">iniciar.bat</span>).
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Visual demo -->
+                <div class="demo-browser">
+                    <div class="demo-browser-bar">
+                        <div class="demo-dot" style="background:#ff5f57"></div>
+                        <div class="demo-dot" style="background:#febc2e"></div>
+                        <div class="demo-dot" style="background:#28c840"></div>
+                        <div class="demo-url">youtube.com</div>
+                    </div>
+                    <div class="p-4 text-xs text-slate-500 space-y-1">
+                        <p class="text-slate-300 font-bold text-[11px] mb-2">📁 Estructura de carpetas esperada:</p>
+                        <p class="font-mono">📂 Clipadsk/</p>
+                        <p class="font-mono ml-4">📄 iniciar.bat</p>
+                        <p class="font-mono ml-4 text-emerald-400 font-bold">📄 cookies.txt ← acá</p>
+                        <p class="font-mono ml-4">📂 backend/</p>
+                        <p class="font-mono ml-4">📂 frontend/</p>
+                    </div>
+                </div>
+
+                <p class="text-[10px] text-slate-600 italic">
+                    Las cookies se renuevan periódicamente. Si YouTube vuelve a bloquear descargas, repetí este proceso.
+                </p>
+            </div>
+        </div>
+
+        <!-- ═══════════════════════════════════════════ PASO 3 ═══════ -->
+        <div class="setup-step fade-in" id="step-2">
+            <div class="glass rounded-3xl p-6 md:p-8 space-y-6">
+                <div class="flex items-center gap-3">
+                    <div class="step-number orange">3</div>
+                    <div>
+                        <h2 class="text-xl font-bold">Dependencias del sistema</h2>
+                        <p class="text-xs text-slate-500">Instalá los requisitos antes de ejecutar la app</p>
+                    </div>
+                </div>
+
+                <div class="p-4 rounded-2xl border border-amber-500/20 bg-amber-500/5 flex gap-3">
+                    <span class="material-symbols-outlined text-amber-400 flex-shrink-0">warning</span>
+                    <p class="text-sm text-amber-200/80 leading-relaxed">
+                        Instalá <b>Python</b> y <b>FFmpeg</b> manualmente antes de ejecutar <code>iniciar.bat</code>. Sin ellos la app no funciona.
+                    </p>
+                </div>
+
+                <p class="text-sm text-slate-400">Descargá e instalá los dos programas:</p>
+
+                <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <a href="https://www.python.org/downloads/" target="_blank"
+                       class="flex items-center justify-between p-4 bg-white/5 rounded-2xl hover:bg-white/10 transition-all border border-white/5 hover:border-yellow-500/30 group">
+                        <div class="flex items-center gap-3">
+                            <span class="text-2xl">🐍</span>
+                            <div>
+                                <p class="text-sm font-bold">Python 3.11+</p>
+                                <p class="text-[10px] text-slate-500">python.org/downloads</p>
+                            </div>
+                        </div>
+                        <span class="material-symbols-outlined text-slate-600 group-hover:text-yellow-400 transition-colors">download</span>
                     </a>
-                    <a href="https://ffmpeg.org/download.html" target="_blank" class="flex items-center justify-between p-3 bg-white/5 rounded-xl hover:bg-white/10 transition-all text-sm">
-                        <span>Descargar FFmpeg</span>
-                        <span class="material-symbols-outlined text-sm">download</span>
+                    <a href="https://ffmpeg.org/download.html" target="_blank"
+                       class="flex items-center justify-between p-4 bg-white/5 rounded-2xl hover:bg-white/10 transition-all border border-white/5 hover:border-cyan-500/30 group">
+                        <div class="flex items-center gap-3">
+                            <span class="text-2xl">🎬</span>
+                            <div>
+                                <p class="text-sm font-bold">FFmpeg</p>
+                                <p class="text-[10px] text-slate-500">ffmpeg.org/download.html</p>
+                            </div>
+                        </div>
+                        <span class="material-symbols-outlined text-slate-600 group-hover:text-cyan-400 transition-colors">download</span>
                     </a>
+                </div>
+
+                <div class="glass p-5 rounded-2xl border-l-4 border-purple-500 space-y-3">
+                    <h3 class="font-bold text-sm flex items-center gap-2">
+                        <span class="material-symbols-outlined text-purple-400">checklist</span>
+                        Orden de instalación
+                    </h3>
+                    <ol class="text-sm text-slate-400 space-y-2 list-decimal ml-5">
+                        <li>Instalá <b class="text-white">Python 3.11+</b> desde el link de arriba. Marcá <b class="text-white">"Add to PATH"</b> durante la instalación.</li>
+                        <li>Instalá <b class="text-white">FFmpeg</b> y asegurate de que esté en el PATH del sistema.</li>
+                        <li>Ejecutá <b class="text-white">iniciar.bat</b> — va a instalar el resto de las librerías de Python.</li>
+                        <li>Pegá tu <b class="text-white">API Key de Groq</b> en Configuración ⚙️ y guardá.</li>
+                        <li>Colocá el archivo <b class="text-white">cookies.txt</b> en la carpeta raíz (junto al <code>iniciar.bat</code>).</li>
+                        <li>¡Listo! Pegá un link de YouTube, TikTok, Instagram o subí un audio.</li>
+                    </ol>
                 </div>
             </div>
         </div>
 
-        <!-- Instructions -->
-        <div class="glass p-6 rounded-2xl border-l-4 border-primary">
-            <h3 class="font-bold mb-2 flex items-center gap-2">
-                <span class="material-symbols-outlined text-primary">info</span>
-                ¿Cómo empezar?
-            </h3>
-            <ol class="text-sm text-slate-400 space-y-2 list-decimal ml-5">
-                <li>Ejecuta <b>iniciar.bat</b> y espera a que instale las librerías.</li>
-                <li>Cuando abra la ventana del transcriptor, ve a <b>Configuración</b> (icono de engranaje).</li>
-                <li>Pega tu <b>API Key de Groq</b> y dale a guardar.</li>
-                <li>¡Listo! Ya puedes pegar links de YouTube o subir audios.</li>
-            </ol>
-        </div>
-
-        <div class="text-center pt-4">
-            <button onclick="window.location.href='index.html'" class="accent-gradient px-8 py-4 rounded-2xl font-bold shadow-lg shadow-primary/20 hover:scale-105 active:scale-95 transition-all">
-                Ir al Transcriptor
+        <!-- Navigation Buttons -->
+        <div class="flex items-center justify-between gap-4" id="nav-buttons">
+            <button id="btn-prev" onclick="changeStep(-1)"
+                class="hidden px-6 py-3 rounded-2xl font-bold text-sm border border-white/10 bg-white/5 hover:bg-white/10 transition-all flex items-center gap-2">
+                <span class="material-symbols-outlined text-sm">arrow_back</span>
+                Anterior
+            </button>
+            <div class="flex-1"></div>
+            <button id="btn-next" onclick="changeStep(1)"
+                class="accent-gradient px-8 py-3.5 rounded-2xl font-bold text-sm shadow-lg shadow-purple-500/20 hover:scale-105 active:scale-95 transition-all flex items-center gap-2">
+                Siguiente
+                <span class="material-symbols-outlined text-sm">arrow_forward</span>
+            </button>
+            <button id="btn-finish" onclick="finishSetup()"
+                class="hidden accent-gradient px-8 py-3.5 rounded-2xl font-bold text-sm shadow-lg shadow-purple-500/20 hover:scale-105 active:scale-95 transition-all flex items-center gap-2">
+                <span class="material-symbols-outlined text-sm">rocket_launch</span>
+                ¡Empezar!
             </button>
         </div>
+
+        <!-- Skip -->
+        <p class="text-center text-xs text-slate-600">
+            ¿Ya lo configuraste antes?
+            <a href="index.html" class="text-slate-500 hover:text-white transition-colors underline ml-1">Ir directo al transcriptor →</a>
+        </p>
+
     </div>
+
+    <script>
+        const SETUP_KEY = 'clipadsk_setup_done';
+        const STEPS = 3;
+        let currentStep = 0;
+
+        function changeStep(dir) {
+            const steps = document.querySelectorAll('.setup-step');
+            const dots  = document.querySelectorAll('.progress-dot');
+
+            steps[currentStep].classList.remove('active');
+            dots[currentStep].classList.remove('active');
+            dots[currentStep].classList.add('done');
+
+            currentStep = Math.max(0, Math.min(STEPS - 1, currentStep + dir));
+
+            steps[currentStep].classList.add('active');
+            // Rebind fade-in
+            steps[currentStep].classList.remove('fade-in');
+            void steps[currentStep].offsetWidth; // reflow
+            steps[currentStep].classList.add('fade-in');
+
+            dots[currentStep].classList.remove('done');
+            dots[currentStep].classList.add('active');
+
+            // Update buttons
+            document.getElementById('btn-prev').classList.toggle('hidden', currentStep === 0);
+            document.getElementById('btn-next').classList.toggle('hidden', currentStep === STEPS - 1);
+            document.getElementById('btn-finish').classList.toggle('hidden', currentStep !== STEPS - 1);
+
+            window.scrollTo({ top: 0, behavior: 'smooth' });
+        }
+
+        function finishSetup() {
+            localStorage.setItem(SETUP_KEY, 'true');
+            window.location.href = 'index.html';
+        }
+    </script>
 </body>
 </html>

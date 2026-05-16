@@ -7,15 +7,18 @@ Features:
 - Robust Bot-Evasion strategy using mobile client emulation.
 - Automated cleanup of downloaded files.
 """
+# --- CONFIGURACION DE RUTAS ---
 import os
+import sys
+import subprocess
+
 import uuid
 import json
 import gc
-import re
 import tempfile
 import yt_dlp
 import requests
-from typing import Optional, List
+from typing import Optional, List, Any
 from fastapi import FastAPI, Request, HTTPException, BackgroundTasks, UploadFile, File, Form
 from fastapi.responses import JSONResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -28,6 +31,10 @@ import base64
 import random
 import time
 import sqlite3
+import logging
+from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor
+import functools
 try:
     from pydub import AudioSegment
 except ImportError:
@@ -38,12 +45,42 @@ try:
 except ImportError:
     instaloader = None
 
+try:
+    from faster_whisper import WhisperModel
+    WHISPER_MODEL_AVAILABLE = True
+except ImportError:
+    WhisperModel = None
+    WHISPER_MODEL_AVAILABLE = False
+
 from dotenv import load_dotenv
 
+# --- LOGGING (configured early so other modules can use logger) ---
+LOG_LEVEL = os.environ.get('LOG_LEVEL', 'INFO').upper()
+import logging
+logging.basicConfig(level=LOG_LEVEL, format='[%(asctime)s] %(levelname)s %(name)s: %(message)s')
+logger = logging.getLogger('clipadsk')
+
+# --- AÑADIR RAÍZ AL PATH PARA ENCONTRAR FFMPEG SI ESTÁ AHÍ ---
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+ROOT_DIR = os.path.dirname(BASE_DIR)
+FFMPEG_BIN = None
+
+# Buscar en raiz, luego en backend, luego en sistema
+for d in [ROOT_DIR, BASE_DIR]:
+    if os.path.exists(os.path.join(d, "ffmpeg.exe")):
+        FFMPEG_BIN = os.path.join(d, "ffmpeg.exe")
+        os.environ["PATH"] += os.pathsep + d
+        if AudioSegment:
+            AudioSegment.converter = FFMPEG_BIN
+            logger.debug(f"Pydub configurado con FFmpeg en {FFMPEG_BIN}")
+        break
+# -----------------------------------------------------------
 # --- CONFIGURACIÓN DE ENTORNO ---
 load_dotenv() # Cargar variables desde .env
 IS_RENDER = os.environ.get('RENDER') is not None
 GROQ_API_KEY = os.environ.get('GROQ_API_KEY')
+WHISPER_MODEL_SIZE = os.environ.get('WHISPER_MODEL', 'small')
+WHISPER_MODEL = None
 
 try:
     from groq import Groq
@@ -53,10 +90,43 @@ except ImportError:
 
 app = FastAPI(title="YT Downloader Pro API")
 
+# --- BACKGROUND EXECUTOR ---
+MAX_WORKERS = int(os.environ.get('MAX_WORKERS', '3'))
+MAX_CONCURRENT_JOBS = int(os.environ.get('MAX_CONCURRENT_JOBS', '2'))
+EXECUTOR = ThreadPoolExecutor(max_workers=MAX_WORKERS)
+SEMAPHORE = asyncio.Semaphore(MAX_CONCURRENT_JOBS)
+
+
+async def run_blocking(fn: Any, *args, **kwargs):
+    """Run a blocking function in a controlled threadpool with semaphore."""
+    async with SEMAPHORE:
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(EXECUTOR, functools.partial(fn, *args, **kwargs))
+
+
+def extract_info_sync(opts, url):
+    with yt_dlp.YoutubeDL(opts) as ydl:
+        return ydl.extract_info(url, download=False)
+
+
+def ydl_download_sync(opts, url):
+    with yt_dlp.YoutubeDL(opts) as ydl:
+        ydl.download([url])
+
+
+def requests_get_sync(url, **kwargs):
+    return requests.get(url, **kwargs)
+
 # Configuración de CORS
+allowed = os.environ.get('FRONTEND_ALLOWED_ORIGINS')
+if allowed:
+    allow_list = [o.strip() for o in allowed.split(',') if o.strip()]
+else:
+    allow_list = ["*"]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=allow_list,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -66,11 +136,9 @@ app.add_middleware(
 async def log_requests(request: Request, call_next):
     # Logeamos solo peticiones a la API para no saturar con estáticos
     if request.url.path.startswith("/api/"):
-        print(f"DEBUG API: {request.method} {request.url.path}")
+        logger.debug(f"API request: {request.method} {request.url.path}")
     response = await call_next(request)
     return response
-
-# --- CONFIGURACIÓN DE RUTAS ---
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 # Si se provee FRONTEND_DIR por env (Docker/Render), la usamos prioritariamente
 FRONTEND_DIR = os.environ.get('FRONTEND_DIR')
@@ -112,7 +180,7 @@ def init_db():
     
     # Migración desde JSON antiguo si existe
     if os.path.exists(CACHE_FILE):
-        print("DEBUG DB: Migrando historial de JSON a SQLite...")
+        logger.info("Migrando historial de JSON a SQLite...")
         try:
             with open(CACHE_FILE, 'r', encoding='utf-8') as f:
                 old_data = json.load(f)
@@ -121,9 +189,9 @@ def init_db():
             conn.commit()
             # Renombrar archivo viejo para evitar re-migración
             os.rename(CACHE_FILE, CACHE_FILE + ".migrated")
-            print("DEBUG DB: Migración completada con éxito.")
+            logger.info("Migración completada con éxito.")
         except Exception as e:
-            print(f"DEBUG DB: Error en migración: {e}")
+            logger.exception("Error en migración de cache JSON a SQLite")
     conn.close()
 
 # Inicializar DB al arrancar
@@ -139,7 +207,7 @@ def load_cache():
         conn.close()
         return {row[0]: row[1] for row in rows}
     except Exception as e:
-        print(f"DEBUG DB: Error leyendo cache: {e}")
+        logger.exception("Error leyendo cache desde SQLite")
         return {}
 
 def save_cache_entry(url, transcript):
@@ -151,7 +219,7 @@ def save_cache_entry(url, transcript):
         conn.commit()
         conn.close()
     except Exception as e:
-        print(f"DEBUG DB: Error guardando en db: {e}")
+        logger.exception("Error guardando entrada en SQLite")
 
 def save_cache(cache):
     """Mantiene compatibilidad (aunque es menos eficiente que save_cache_entry)."""
@@ -172,7 +240,7 @@ def translate_to_spanish(text):
             return " ".join(translated)
         return translator.translate(text)
     except Exception as e:
-        print(f"Error traducción: {e}")
+        logger.exception("Error en traducción")
         return text
 
 def get_local_groq(api_key: str = None):
@@ -183,6 +251,38 @@ def get_local_groq(api_key: str = None):
         except Exception:
             return groq_client
     return groq_client
+
+
+def get_whisper_model():
+    global WHISPER_MODEL
+    if not WHISPER_MODEL_AVAILABLE:
+        return None
+    if WHISPER_MODEL is None:
+        try:
+            logger.info(f"Cargando modelo Whisper local: {WHISPER_MODEL_SIZE}")
+            WHISPER_MODEL = WhisperModel(WHISPER_MODEL_SIZE, device="cpu", compute_type="int8")
+        except Exception as e:
+            logger.exception(f"No se pudo cargar el modelo Whisper local: {e}")
+            WHISPER_MODEL = None
+    return WHISPER_MODEL
+
+
+def transcribe_with_local_whisper(audio_file_path: str, target_lang: str = "es") -> str:
+    model = get_whisper_model()
+    if not model:
+        raise RuntimeError("No hay modelo Whisper local disponible. Instala faster-whisper para usar este modo.")
+
+    logger.info(f"Transcribiendo audio local con Whisper ({target_lang})...")
+    segments, info = model.transcribe(
+        audio_file_path,
+        beam_size=5,
+        vad_filter=True,
+        language=target_lang if target_lang in ["es", "en"] else None
+    )
+    transcription = " ".join(segment.text.strip() for segment in segments if segment.text.strip())
+    logger.info(f"Transcripción local completada. Duración aprox: {getattr(info, 'duration', 'desconocida')}s")
+    return transcription
+
 
 def remove_repetitions(text: str) -> str:
     """
@@ -223,7 +323,7 @@ def remove_repetitions(text: str) -> str:
             i += 1
 
     cleaned = ' '.join(result)
-    print(f"DEBUG remove_repetitions: {len(words)} palabras → {len(result)} palabras")
+    logger.debug(f"remove_repetitions: {len(words)} palabras → {len(result)} palabras")
     return cleaned
 
 
@@ -274,7 +374,7 @@ def cleanup_transcript_with_ai(text: str, client=None, target_lang="es") -> str:
             )
             return completion.choices[0].message.content.strip()
     except Exception as e:
-        print(f"Error limpiando transcripción: {e}")
+        logger.exception("Error limpiando transcripción con IA")
         return text
 
 
@@ -294,7 +394,7 @@ def add_log(uid: str, message: str):
     if uid not in log_store: log_store[uid] = []
     timestamp = time.strftime("%H:%M:%S")
     log_store[uid].append(f"[{timestamp}] {message}")
-    print(f"DEBUG LOG [{uid}]: {message}")
+    logger.debug(f"LOG [{uid}]: {message}")
 
 def get_session_logs(uid: str) -> str:
     return "\n".join(log_store.get(uid, ["No hay logs disponibles para esta sesion."]))
@@ -354,9 +454,9 @@ def sanitize_url(url: str) -> str:
             new_query = urlencode({k: v[0] for k, v in clean_params.items()})
             url = urlunparse(parsed._replace(query=new_query))
     except Exception as e:
-        print(f"DEBUG: sanitize_url error (usando original): {e}")
+        logger.debug(f"sanitize_url error, usando original: {e}")
 
-    print(f"DEBUG: URL sanitizada → {url}")
+    logger.debug(f"URL sanitizada → {url}")
     return url
 
 
@@ -407,15 +507,15 @@ def get_robust_opts(target_url, extra={}):
             temp_cookie.close()
             opts['cookiefile'] = temp_cookie.name
             platform = 'Instagram' if is_instagram else 'YouTube'
-            print(f"DEBUG: Cargando cookies [{platform}] desde variable de entorno (Temp: {temp_cookie.name})")
+            logger.debug(f"Cargando cookies [{platform}] desde variable de entorno (Temp: {temp_cookie.name})")
         except Exception as e:
-            print(f"DEBUG: Error cargando cookies: {e}")
+            logger.exception("Error cargando cookies desde variable de entorno")
 
     # Fallback a archivo local
     if 'cookiefile' not in opts:
         for path_candidate in local_paths:
             if os.path.exists(path_candidate):
-                print(f"DEBUG: Cargando cookies desde archivo {path_candidate}")
+                logger.debug(f"Cargando cookies desde archivo {path_candidate}")
                 opts['cookiefile'] = path_candidate
                 break
 
@@ -423,7 +523,7 @@ def get_robust_opts(target_url, extra={}):
     if is_youtube:
         # Dejamos que yt-dlp use sus clientes por defecto (web, tv, etc.) para que encuentre todas las calidades (1080p, 720p)
         opts['user_agent'] = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_4_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4.1 Mobile/15E148 Safari/604.1'
-        print(f"DEBUG: Estrategia YouTube optimizada (Cookies: {'Si' if 'cookiefile' in opts else 'No'})")
+        logger.debug(f"Estrategia YouTube optimizada (Cookies: {'Si' if 'cookiefile' in opts else 'No'})")
 
     elif is_tiktok:
         # TikTok requiere user-agent móvil y headers específicos
@@ -466,16 +566,16 @@ def get_instagram_info(url):
     if ig_user and ig_pass:
         try:
             L.login(ig_user, ig_pass)
-            print(f"DEBUG: Instaloader login OK como {ig_user}")
+            logger.debug(f"Instaloader login OK como {ig_user}")
         except Exception as e:
-            print(f"DEBUG: Instaloader login falló: {e}")
+            logger.debug(f"Instaloader login falló: {e}")
 
     match = re.search(r'/(reel|p|tv)/([A-Za-z0-9_-]+)', url)
     if not match:
         raise Exception("No se pudo extraer el shortcode del URL de Instagram")
 
     shortcode = match.group(2)
-    print(f"DEBUG: Instaloader extrayendo shortcode: {shortcode}")
+    logger.debug(f"Instaloader extrayendo shortcode: {shortcode}")
 
     post = instaloader.Post.from_shortcode(L.context, shortcode)
 
@@ -529,7 +629,7 @@ async def get_video_info(req: VideoRequest, request: Request):
                 'has_subtitles': False,
             }
         except Exception as e:
-            print(f"DEBUG: Instaloader falló, intentando con yt-dlp: {e}")
+            logger.debug(f"Instaloader falló, intentando con yt-dlp: {e}")
 
     is_youtube = 'youtube.com' in url or 'youtu.be' in url
 
@@ -538,42 +638,39 @@ async def get_video_info(req: VideoRequest, request: Request):
     
     # --- INTENTO 1: Estrategia Optimizada (Basada en get_robust_opts) ---
     try:
-        print("DEBUG: Intento 1 - Estrategia optimizada...")
+        logger.debug("Intento 1 - Estrategia optimizada...")
         opts = get_robust_opts(url)
-        with yt_dlp.YoutubeDL(opts) as ydl:
-            info = ydl.extract_info(url, download=False)
+        info = await run_blocking(extract_info_sync, opts, url)
     except Exception as e:
         last_error = str(e)
-        print(f"DEBUG: Intento 1 falló: {last_error[:100]}")
+        logger.debug(f"Intento 1 falló: {last_error[:100]}")
 
     # --- INTENTO 2: Forzar Móvil SIN COOKIES (Para saltar n-challenge) ---
     if not info and is_youtube:
         try:
-            print("DEBUG: Intento 2 - Forzando móvil SIN cookies...")
+            logger.debug("Intento 2 - Forzando móvil SIN cookies...")
             opts = get_robust_opts(url)
             opts.pop('cookiefile', None) # Quitamos cookies para que no las ignore
             opts['extractor_args'] = {'youtube': {'player_client': ['android', 'ios']}}
-            with yt_dlp.YoutubeDL(opts) as ydl:
-                info = ydl.extract_info(url, download=False)
+            info = await run_blocking(extract_info_sync, opts, url)
         except Exception as e:
             last_error += f" | Intento 2: {str(e)[:100]}"
-            print(f"DEBUG: Intento 2 falló: {str(e)[:100]}")
+            logger.debug(f"Intento 2 falló: {str(e)[:100]}")
 
     # --- INTENTO 3: Forzar iOS (Último recurso) ---
     if not info and is_youtube:
         try:
-            print("DEBUG: Intento 3 - Forzando solo iOS...")
+            logger.debug("Intento 3 - Forzando solo iOS...")
             opts = get_robust_opts(url)
             opts.pop('cookiefile', None)
             opts['extractor_args'] = {'youtube': {'player_client': ['ios']}}
-            with yt_dlp.YoutubeDL(opts) as ydl:
-                info = ydl.extract_info(url, download=False)
+            info = await run_blocking(extract_info_sync, opts, url)
         except Exception as e:
             last_error += f" | Intento 3: {str(e)[:100]}"
-            print(f"DEBUG: Intento 3 falló: {str(e)[:100]}")
+            logger.debug(f"Intento 3 falló: {str(e)[:100]}")
 
     if not info:
-        print(f"DEBUG: EXTRACT_INFO FAILED for {url}.")
+        logger.error(f"EXTRACT_INFO FAILED for {url}.")
         raise HTTPException(
             status_code=400, 
             detail=f"No pudimos procesar este video. Puede ser privado o YouTube bloqueó la conexión. Errores: {last_error[:200]}"
@@ -619,7 +716,7 @@ async def get_video_info(req: VideoRequest, request: Request):
     if 'instagram.com' in url and thumbnail:
         from urllib.parse import quote
         thumbnail = f"/api/proxy-thumbnail?url={quote(thumbnail, safe='')}"
-        print(f"DEBUG: Instagram Thumbnail proxied (with encoding): {thumbnail}")
+        logger.debug(f"Instagram Thumbnail proxied (with encoding): {thumbnail}")
 
     return {
         'title': info.get('title'),
@@ -665,9 +762,8 @@ async def get_transcript(req: VideoRequest):
                     opts = get_robust_opts(url, {'skip_download': True, 'writesubtitles': True, 'writeautomaticsub': True, 'subtitleslangs': ['es.*', 'en.*'], 'outtmpl': os.path.join(tmpdir, 'sub.%(ext)s')})
                     opts.pop('cookiefile', None)
                     opts['extractor_args'] = {'youtube': {'player_client': ['android', 'ios']}}
-                    with yt_dlp.YoutubeDL(opts) as ydl:
-                        ydl.download([url])
-                        sub_extracted = True
+                    await run_blocking(ydl_download_sync, opts, url)
+                    sub_extracted = True
                 except: pass
 
                 # 2. Con cookies
@@ -675,9 +771,8 @@ async def get_transcript(req: VideoRequest):
                     try:
                         update_progress(req.uid, 20, "Buscando subtítulos (2/2)...")
                         opts = get_robust_opts(url, {'skip_download': True, 'writesubtitles': True, 'writeautomaticsub': True, 'subtitleslangs': ['es.*', 'en.*'], 'outtmpl': os.path.join(tmpdir, 'sub.%(ext)s')})
-                        with yt_dlp.YoutubeDL(opts) as ydl:
-                            ydl.download([url])
-                            sub_extracted = True
+                        await run_blocking(ydl_download_sync, opts, url)
+                        sub_extracted = True
                     except: pass
 
                 sub_file = None
@@ -735,26 +830,24 @@ async def get_transcript(req: VideoRequest):
                 audio_opts = get_robust_opts(url, {'format': 'bestaudio/best', 'outtmpl': os.path.join(tmpdir, 'audio.%(ext)s'), 'postprocessors': [{'key': 'FFmpegExtractAudio','preferredcodec': 'mp3','preferredquality': '64'}]})
                 audio_opts.pop('cookiefile', None)
                 audio_opts['extractor_args'] = {'youtube': {'player_client': ['android', 'ios']}}
-                with yt_dlp.YoutubeDL(audio_opts) as ydl:
-                    ydl.download([url])
-                    for f in os.listdir(tmpdir):
-                        if f.startswith('audio.'):
-                            audio_file = os.path.join(tmpdir, f)
-                            audio_downloaded = True
-                            break
+                await run_blocking(ydl_download_sync, audio_opts, url)
+                for f in os.listdir(tmpdir):
+                    if f.startswith('audio.'):
+                        audio_file = os.path.join(tmpdir, f)
+                        audio_downloaded = True
+                        break
             except: pass
 
             # Estrategia 2: Con cookies
             if not audio_downloaded:
                 try:
                     audio_opts = get_robust_opts(url, {'format': 'bestaudio/best', 'outtmpl': os.path.join(tmpdir, 'audio.%(ext)s'), 'postprocessors': [{'key': 'FFmpegExtractAudio','preferredcodec': 'mp3','preferredquality': '64'}]})
-                    with yt_dlp.YoutubeDL(audio_opts) as ydl:
-                        ydl.download([url])
-                        for f in os.listdir(tmpdir):
-                            if f.startswith('audio.'):
-                                audio_file = os.path.join(tmpdir, f)
-                                audio_downloaded = True
-                                break
+                    await run_blocking(ydl_download_sync, audio_opts, url)
+                    for f in os.listdir(tmpdir):
+                        if f.startswith('audio.'):
+                            audio_file = os.path.join(tmpdir, f)
+                            audio_downloaded = True
+                            break
                 except: pass
 
             if audio_downloaded and audio_file:
@@ -847,7 +940,7 @@ async def chat_with_transcript(req: ChatRequest):
     # 20,000 caracteres son aprox 5,000 tokens, lo que deja margen para la respuesta.
     transcript_safe = req.transcript
     if len(transcript_safe) > 12000:
-        print(f"Aviso: Transcripcion muy larga ({len(transcript_safe)} chars). Recortando para evitar error 413.")
+        logger.warning(f"Transcripcion muy larga ({len(transcript_safe)} chars). Recortando para evitar error 413.")
         transcript_safe = transcript_safe[:6000] + "\n\n[...] [Parte omitida por longitud] [...] \n\n" + transcript_safe[-6000:]
 
     try:
@@ -881,7 +974,7 @@ async def chat_with_transcript(req: ChatRequest):
         
         return {"answer": completion.choices[0].message.content}
     except Exception as e:
-        print(f"Error en Chat: {e}")
+        logger.exception("Error en Chat")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/download")
@@ -899,7 +992,7 @@ async def download_video(req: VideoRequest, background_tasks: BackgroundTasks):
 
             video_url = ig_info['video_url']
             headers = {'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_3_1 like Mac OS X) AppleWebKit/605.1.15'}
-            r = requests.get(video_url, headers=headers, stream=True, timeout=60)
+            r = await run_blocking(requests_get_sync, video_url, headers=headers, stream=True, timeout=60)
             r.raise_for_status()
 
             file_path = os.path.join(DOWNLOAD_FOLDER, f'instagram_{uid}.mp4')
@@ -919,7 +1012,7 @@ async def download_video(req: VideoRequest, background_tasks: BackgroundTasks):
         except HTTPException:
             raise
         except Exception as e:
-            print(f"DEBUG: Instaloader download falló, intentando con yt-dlp: {e}")
+            logger.debug(f"Instaloader download falló, intentando con yt-dlp: {e}")
 
     output_template = os.path.join(DOWNLOAD_FOLDER, f'%(title)s_{uid}.%(ext)s')
     
@@ -961,45 +1054,42 @@ async def download_video(req: VideoRequest, background_tasks: BackgroundTasks):
 
     # --- ESTRATEGIA 1: Celular sin cookies (La que funcionó para info) ---
     try:
-        print("DEBUG: Descarga Intento 1 - Celular sin cookies...")
+        logger.debug("Descarga Intento 1 - Celular sin cookies...")
         update_progress(req.uid, 10, "Conectando al servidor (1/3)...")
         opts = get_robust_opts(url, extra_opts)
         opts.pop('cookiefile', None)
         opts['extractor_args'] = {'youtube': {'player_client': ['android', 'ios']}}
-        with yt_dlp.YoutubeDL(opts) as ydl:
-            ydl.download([url])
-            downloaded = True
+        await run_blocking(ydl_download_sync, opts, url)
+        downloaded = True
     except Exception as e:
         last_err = str(e)
-        print(f"DEBUG: Descarga Intento 1 falló: {last_err[:100]}")
+        logger.debug(f"Descarga Intento 1 falló: {last_err[:100]}")
 
     # --- ESTRATEGIA 2: Navegador con Cookies ---
     if not downloaded:
         try:
-            print("DEBUG: Descarga Intento 2 - Con cookies...")
+            logger.debug("Descarga Intento 2 - Con cookies...")
             update_progress(req.uid, 15, "Reintentando con cookies (2/3)...")
             opts = get_robust_opts(url, extra_opts)
-            with yt_dlp.YoutubeDL(opts) as ydl:
-                ydl.download([url])
-                downloaded = True
+            await run_blocking(ydl_download_sync, opts, url)
+            downloaded = True
         except Exception as e:
             last_err += f" | Intento 2: {str(e)[:100]}"
-            print(f"DEBUG: Descarga Intento 2 falló: {str(e)[:100]}")
+            logger.debug(f"Descarga Intento 2 falló: {str(e)[:100]}")
 
     # --- ESTRATEGIA 3: Forzar iOS ---
     if not downloaded:
         try:
-            print("DEBUG: Descarga Intento 3 - Forzando iOS...")
+            logger.debug("Descarga Intento 3 - Forzando iOS...")
             update_progress(req.uid, 20, "Forzando modo iOS (3/3)...")
             opts = get_robust_opts(url, extra_opts)
             opts.pop('cookiefile', None)
             opts['extractor_args'] = {'youtube': {'player_client': ['ios']}}
-            with yt_dlp.YoutubeDL(opts) as ydl:
-                ydl.download([url])
-                downloaded = True
+            await run_blocking(ydl_download_sync, opts, url)
+            downloaded = True
         except Exception as e:
             last_err += f" | Intento 3: {str(e)[:100]}"
-            print(f"DEBUG: Descarga Intento 3 falló: {str(e)[:100]}")
+            logger.debug(f"Descarga Intento 3 falló: {str(e)[:100]}")
 
     if downloaded:
         update_progress(req.uid, 100, "¡Archivo listo!")
@@ -1011,9 +1101,9 @@ async def download_video(req: VideoRequest, background_tasks: BackgroundTasks):
                     try:
                         if os.path.exists(path):
                             os.remove(path)
-                            print(f"DEBUG: Archivo borrado: {file_path}")
+                            logger.debug(f"Archivo borrado: {file_path}")
                     except Exception as e:
-                        print(f"Error borrando archivo: {e}")
+                        logger.exception("Error borrando archivo")
                 
                 background_tasks.add_task(remove_file, file_path)
                 return FileResponse(file_path, filename=f)
@@ -1023,18 +1113,18 @@ async def download_video(req: VideoRequest, background_tasks: BackgroundTasks):
 
 @app.get("/api/proxy-thumbnail")
 async def proxy_thumbnail(url: str):
-    print(f"DEBUG: Proxy request for: {url}")
+    logger.debug(f"Proxy request for: {url}")
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
         'Referer': 'https://www.instagram.com/'
     }
     try:
-        resp = requests.get(url, headers=headers, timeout=10, allow_redirects=True)
+        resp = await run_blocking(requests_get_sync, url, headers=headers, timeout=10, allow_redirects=True)
         resp.raise_for_status()
-        print(f"DEBUG: Proxy success, Content-Type: {resp.headers.get('Content-Type')}")
+        logger.debug(f"Proxy success, Content-Type: {resp.headers.get('Content-Type')}")
         return Response(content=resp.content, media_type=resp.headers.get('Content-Type', 'image/jpeg'))
     except Exception as e:
-        print(f"DEBUG: Proxy FAILED: {e}")
+        logger.exception("Proxy FAILED")
         return Response(status_code=500)
 
 # --- HEALTHCHECKS ---
@@ -1043,13 +1133,8 @@ async def check_cookies():
     """Verifica si las cookies actuales siguen siendo válidas con un video de prueba."""
     test_url = "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
     try:
-        def get_info():
-            opts = get_robust_opts(test_url)
-            with yt_dlp.YoutubeDL(opts) as ydl:
-                return ydl.extract_info(test_url, download=False)
-        
-        # Ejecutamos en un thread pool para no bloquear el loop de FastAPI
-        info = await asyncio.to_thread(get_info)
+        opts = get_robust_opts(test_url)
+        info = await run_blocking(extract_info_sync, opts, test_url)
         return {
             "status": "ok", 
             "cookie_valid": True, 
@@ -1066,8 +1151,8 @@ async def check_cookies():
 
 # --- TRANSCRIPCIÓN DE ARCHIVO DE AUDIO (WhatsApp, grabaciones, etc.) ---
 
-ALLOWED_AUDIO_EXTENSIONS = {'.ogg', '.opus', '.mp3', '.m4a', '.wav', '.mp4', '.aac', '.weba', '.webm'}
-MAX_AUDIO_SIZE_MB = 50
+ALLOWED_AUDIO_EXTENSIONS = {'.ogg', '.opus', '.mp3', '.m4a', '.wav', '.mp4', '.aac', '.weba', '.webm', '.mov', '.avi', '.mkv'}
+MAX_AUDIO_SIZE_MB = 200
 
 @app.post("/api/transcript-file")
 async def transcript_audio_file(
@@ -1082,8 +1167,13 @@ async def transcript_audio_file(
     Soporta WhatsApp (.ogg/.opus), grabaciones de voz (.m4a/.mp3), y más.
     """
     local_groq = get_local_groq(groq_api_key)
+    if not local_groq and not WHISPER_MODEL_AVAILABLE:
+        raise HTTPException(
+            status_code=503,
+            detail="Groq API no configurada. Configura tu API Key en la interfaz o instala faster-whisper para transcribir localmente."
+        )
     if not local_groq:
-        raise HTTPException(status_code=503, detail="Groq API no configurada. Configura tu API Key en la interfaz.")
+        add_log(uid, "Groq API no configurada. Usando transcripción local si está disponible.")
 
     # Validar extensión
     ext = os.path.splitext(file.filename or '')[1].lower()
@@ -1109,72 +1199,108 @@ async def transcript_audio_file(
         add_log(uid, f"Archivo recibido para transcribir: {file.filename} ({size_mb:.2f} MB)")
 
 
-        # Convertir a MP3 si es necesario usando pydub
+        # Convertir a MP3 si es necesario usando pydub (audio y video)
         audio_path = input_path
-        if ext in {'.ogg', '.opus', '.m4a', '.wav', '.aac', '.weba', '.webm'}:
+        conversion_done = False
+        VIDEO_EXTS = {'.mp4', '.mov', '.avi', '.mkv', '.webm', '.weba'}
+        AUDIO_EXTS = {'.ogg', '.opus', '.m4a', '.wav', '.aac'}
+        
+        if ext in AUDIO_EXTS | VIDEO_EXTS:
             converted_path = os.path.join(tmpdir, "converted.mp3")
             try:
                 if AudioSegment:
+                    logger.debug("Intentando conversion con pydub...")
                     audio = AudioSegment.from_file(input_path)
-                    # Convertimos a mp3 a 64k mono para que sea liviano
                     audio = audio.set_frame_rate(16000).set_channels(1)
-                    audio.export(converted_path, format="mp3", bitrate="64k")
-                    audio_path = converted_path
-                    print("DEBUG: Convertido a MP3 exitosamente usando pydub")
-                else:
+                    audio.export(converted_path, format="mp3", bitrate="32k")
+                    if os.path.exists(converted_path) and os.path.getsize(converted_path) > 0:
+                        audio_path = converted_path
+                        conversion_done = True
+                        logger.debug(f"Pydub exitoso. Tamaño: {os.path.getsize(audio_path)/1024/1024:.2f} MB")
+                
+                if not conversion_done:
+                    logger.debug("Pydub no disponible o fallo, intentando ffmpeg directo...")
                     import subprocess
-                    converted_path = os.path.join(tmpdir, "converted.wav")
+                    # Usar el binario encontrado o solo 'ffmpeg' si no hay binario local
+                    exe = FFMPEG_BIN if FFMPEG_BIN else 'ffmpeg'
                     subprocess.run(
-                        ['ffmpeg', '-y', '-i', input_path, '-ar', '16000', '-ac', '1', converted_path],
+                        [exe, '-y', '-i', input_path, '-vn', '-ar', '16000', '-ac', '1', '-ab', '32k', '-f', 'mp3', converted_path],
                         capture_output=True, check=True
                     )
-                    audio_path = converted_path
-                    print("DEBUG: Convertido a WAV exitosamente usando ffmpeg nativo")
+                    if os.path.exists(converted_path) and os.path.getsize(converted_path) > 0:
+                        audio_path = converted_path
+                        conversion_done = True
+                        logger.debug(f"FFmpeg directo exitoso. Tamaño: {os.path.getsize(audio_path)/1024/1024:.2f} MB")
             except Exception as e:
-                print(f"DEBUG: Error en conversion a MP3: {e}")
-                # Intentar con el archivo original si la conversión falla
-                audio_path = input_path
+                logger.exception(f"Error en conversion: {e}")
 
         try:
             file_size_mb = os.path.getsize(audio_path) / (1024 * 1024)
+            
+            # VALIDACION CRITICA: Límite de Groq (25MB)
+            if file_size_mb > 25 and not WHISPER_MODEL_AVAILABLE:
+                if not conversion_done:
+                    raise HTTPException(status_code=400, detail="El archivo es demasiado grande (o es un video) y no se pudo convertir porque FFmpeg no está instalado en el sistema. Por favor, instala FFmpeg o sube un archivo de audio comprimido.")
+                else:
+                    raise HTTPException(status_code=400, detail=f"El archivo es demasiado largo ({file_size_mb:.1f}MB) incluso tras comprimirlo. El limite de Groq es 25MB, pero puedes instalar faster-whisper para transcribir localmente.")
+
             transcription = ""
+            method = "groq_whisper_v3_file" if local_groq else "local_whisper"
 
-            if AudioSegment and file_size_mb >= 20:
-                # Archivos grandes: trocear en partes de 20 minutos
-                print(f"Dividiendo audio de {file_size_mb:.1f}MB en partes...")
-                audio = AudioSegment.from_file(audio_path)
-                chunk_length_ms = 20 * 60 * 1000
-                chunks = [audio[i:i + chunk_length_ms] for i in range(0, len(audio), chunk_length_ms)]
+            if local_groq:
+                try:
+                    if AudioSegment and file_size_mb >= 20:
+                        # Archivos grandes: trocear en partes de 20 minutos
+                        add_log(uid, f"Dividiendo audio de {file_size_mb:.1f}MB en partes...")
+                        audio = AudioSegment.from_file(audio_path)
+                        chunk_length_ms = 20 * 60 * 1000
+                        chunks = [audio[i:i + chunk_length_ms] for i in range(0, len(audio), chunk_length_ms)]
 
-                for idx, chunk in enumerate(chunks):
-                    with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as c_file:
-                        chunk.export(c_file.name, format="mp3", bitrate="64k")
-                        print(f"Transcribiendo parte {idx+1}/{len(chunks)}...")
-                        with open(c_file.name, "rb") as cf:
-                            part_text = local_groq.audio.transcriptions.create(
-                                file=(c_file.name, cf.read(), "audio/mpeg"),
+                        for idx, chunk in enumerate(chunks):
+                            with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as c_file:
+                                chunk.export(c_file.name, format="mp3", bitrate="64k")
+                                add_log(uid, f"Transcribiendo parte {idx+1}/{len(chunks)}...")
+                                with open(c_file.name, "rb") as cf:
+                                    part_text = local_groq.audio.transcriptions.create(
+                                        file=(c_file.name, cf.read(), "audio/mpeg"),
+                                        model="whisper-large-v3",
+                                        response_format="text",
+                                        language=target_lang if target_lang in ["es", "en"] else None
+                                    )
+                                    transcription += str(part_text) + " "
+
+                                os.remove(c_file.name)
+                    else:
+                        if audio_path.endswith('.mp3'):
+                            mime_type = "audio/mpeg"
+                        elif audio_path.endswith('.wav'):
+                            mime_type = "audio/wav"
+                        elif audio_path.endswith('.mp4'):
+                            mime_type = "video/mp4"
+                        elif audio_path.endswith('.m4a'):
+                            mime_type = "audio/mp4"
+                        elif audio_path.endswith('.webm'):
+                            mime_type = "audio/webm"
+                        else:
+                            mime_type = "audio/ogg"
+
+                        with open(audio_path, "rb") as f:
+                            transcription = local_groq.audio.transcriptions.create(
+                                file=(os.path.basename(audio_path), f.read(), mime_type),
                                 model="whisper-large-v3",
                                 response_format="text",
-                                 language=target_lang if target_lang in ["es", "en"] else None
-                             )
-                             transcription += str(part_text) + " "
-
-                        os.remove(c_file.name)
+                                language=target_lang if target_lang in ["es", "en"] else None
+                            )
+                    transcription = str(transcription)
+                except Exception as ge:
+                    add_log(uid, f"Error critico en Groq Whisper: {str(ge)}")
+                    if not WHISPER_MODEL_AVAILABLE:
+                        raise Exception(f"Error en Groq API: {str(ge)}")
+                    add_log(uid, "Groq falló o la API Key es inválida. Intentando transcripción local con Whisper...")
+                    transcription = transcribe_with_local_whisper(audio_path, target_lang)
+                    method = "local_whisper"
             else:
-                if audio_path.endswith('.mp3'):
-                    mime_type = "audio/mpeg"
-                elif audio_path.endswith('.wav'):
-                    mime_type = "audio/wav"
-                else:
-                    mime_type = "audio/ogg"
-
-                with open(audio_path, "rb") as f:
-                    transcription = local_groq.audio.transcriptions.create(
-                        file=(os.path.basename(audio_path), f.read(), mime_type),
-                        model="whisper-large-v3",
-                        response_format="text",
-                        language=target_lang if target_lang in ["es", "en"] else None
-                    )
+                transcription = transcribe_with_local_whisper(audio_path, target_lang)
 
             transcript_text = str(transcription).strip()
             # Limpieza con IA
@@ -1184,7 +1310,7 @@ async def transcript_audio_file(
             add_log(uid, "Transcripcion de archivo completada con exito.")
             return {
                 "transcript": transcript_text,
-                "method": "groq_whisper_v3_file",
+                "method": method,
                 "filename": file.filename,
                 "size_mb": round(size_mb, 2)
             }
@@ -1303,12 +1429,12 @@ async def analyze_transcript(req: AnalyzeRequest):
 
         except Exception as e:
             err_str = str(e)
-            print(f"Error con modelo {model}: {e}")
+            logger.exception(f"Error con modelo {model}: {err_str}")
 
             # Rate limit (429): intentar con el siguiente modelo
             if "rate_limit_exceeded" in err_str or "429" in err_str:
                 last_error = e
-                print(f"Rate limit en {model}, intentando con el siguiente modelo...")
+                logger.info(f"Rate limit en {model}, intentando con el siguiente modelo...")
                 continue
             else:
                 # Error distinto al rate limit: falla inmediata con mensaje claro
@@ -1329,13 +1455,20 @@ if os.path.exists(FRONTEND_DIR):
         # Si la ruta está vacía, servimos index.html
         if not path:
             return FileResponse(os.path.join(FRONTEND_DIR, 'index.html'))
-        
-        # Intentamos buscar el archivo en la carpeta frontend
-        file_path = os.path.join(FRONTEND_DIR, path)
-        if os.path.exists(file_path) and os.path.isfile(file_path):
-            return FileResponse(file_path)
-        
-        # Si no existe (para rutas de SPA o errores), servimos index.html como fallback
+
+        # Intentamos buscar el archivo en la carpeta frontend de forma segura
+        requested = Path(FRONTEND_DIR) / path
+        try:
+            resolved = requested.resolve()
+            frontend_root = Path(FRONTEND_DIR).resolve()
+            # Asegurar que la ruta resuelta está dentro de la carpeta frontend
+            if frontend_root in resolved.parents or resolved == frontend_root:
+                if resolved.exists() and resolved.is_file():
+                    return FileResponse(str(resolved))
+        except Exception as e:
+            logger.debug(f"Error resolviendo ruta estática: {e}")
+
+        # Fallback a index.html para rutas SPA
         return FileResponse(os.path.join(FRONTEND_DIR, 'index.html'))
 
     # Soporte explícito para HEAD / (Render HealthCheck)
@@ -1346,14 +1479,20 @@ if os.path.exists(FRONTEND_DIR):
             return FileResponse(os.path.join(FRONTEND_DIR, 'index.html'))
         return Response(content="StreamVault API Root", media_type="text/plain")
 else:
-    print(f"ADVERTENCIA: No se encontró la carpeta frontend en {FRONTEND_DIR}")
+    logger.warning(f"No se encontró la carpeta frontend en {FRONTEND_DIR}")
 
 
 # --- FUNCIONES DE MANTENIMIENTO DEL SISTEMA ---
 
 @app.post("/api/system/update-app")
-async def update_app():
+async def update_app(request: Request):
     """Ejecuta git pull para traer los últimos cambios del código."""
+    # Protección simple: si ADMIN_TOKEN está configurado, requerir header X-ADMIN-TOKEN
+    admin_token = os.environ.get('ADMIN_TOKEN')
+    if admin_token:
+        provided = request.headers.get('X-ADMIN-TOKEN') or request.query_params.get('admin_token')
+        if not provided or provided != admin_token:
+            raise HTTPException(status_code=403, detail="Se requiere token de administrador para esta operación.")
     try:
         import subprocess
         # Intentar git pull
@@ -1363,8 +1502,13 @@ async def update_app():
         return JSONResponse(status_code=500, content={"error": f"Error al actualizar Git: {str(e)}"})
 
 @app.post("/api/system/update-engine")
-async def update_engine():
+async def update_engine(request: Request):
     """Actualiza el ejecutable yt-dlp.exe."""
+    admin_token = os.environ.get('ADMIN_TOKEN')
+    if admin_token:
+        provided = request.headers.get('X-ADMIN-TOKEN') or request.query_params.get('admin_token')
+        if not provided or provided != admin_token:
+            raise HTTPException(status_code=403, detail="Se requiere token de administrador para esta operación.")
     try:
         import subprocess
         ytdlp_path = os.path.join(ROOT_DIR, "yt-dlp.exe")
@@ -1377,8 +1521,13 @@ async def update_engine():
         return JSONResponse(status_code=500, content={"error": f"Error al actualizar motor: {str(e)}"})
 
 @app.post("/api/system/reset")
-async def reset_system():
+async def reset_system(request: Request):
     """Limpia descargas y base de datos (mantenimiento extremo)."""
+    admin_token = os.environ.get('ADMIN_TOKEN')
+    if admin_token:
+        provided = request.headers.get('X-ADMIN-TOKEN') or request.query_params.get('admin_token')
+        if not provided or provided != admin_token:
+            raise HTTPException(status_code=403, detail="Se requiere token de administrador para esta operación.")
     try:
         import shutil
         # 1. Limpiar descargas

@@ -3,6 +3,27 @@
 Descargador y transcriptor de video 100% local.  
 Soporta YouTube e Instagram. Sin login, sin nube, sin telemetría.
 
+## CI and pinned dependencies
+
+This repository includes a GitHub Actions workflow at `.github/workflows/ci.yml` that runs linting, tests and `pip-audit`, and generates a pinned `backend/requirements-pinned.txt` as an artifact.
+
+To produce a pinned `requirements` file locally (recommended before committing), run one of the scripts:
+
+On Unix/macOS:
+
+```bash
+./scripts/pin_requirements.sh
+```
+
+On Windows PowerShell:
+
+```powershell
+.\scripts\pin_requirements.ps1
+```
+
+After running the script, commit `backend/requirements-pinned.txt` if you want the pinned versions in the repo.
+
+
 ---
 
 ## Requisitos
@@ -11,7 +32,8 @@ Soporta YouTube e Instagram. Sin login, sin nube, sin telemetría.
 |---|---|---|
 | Python | 3.10+ | |
 | FFmpeg | cualquiera | necesario para audio/transcripción |
-| GROQ_API_KEY | — | opcional; acelera la transcripción |
+| GROQ_API_KEY | — | opcional; acelera la transcripción via Groq |
+| faster-whisper | opcional | instalar para transcribir localmente con el modelo `small` |
 
 ---
 
@@ -72,7 +94,8 @@ El sistema usa tres métodos en cascada:
 
 1. **Subtítulos directos** – si YouTube tiene subtítulos en español o inglés, los extrae sin descargar audio (más rápido, sin IA).
 2. **Groq Whisper v3** – si `GROQ_API_KEY` está configurado y el audio es < 25 MB, lo transcribe en la nube de Groq (rápido).
-3. **Whisper local** – descarga el audio y lo transcribe en tu PC con el modelo `base` (sin conexión, más lento).
+3. **Whisper local (opcional)** – si instalas `faster-whisper`, el backend puede transcribir archivos locales sin Groq usando un modelo local (`small` por defecto).
+4. **Whisper local con Groq inválido** – si tu llave Groq no funciona, la app ahora intentará usar `faster-whisper` si está disponible.
 
 ---
 

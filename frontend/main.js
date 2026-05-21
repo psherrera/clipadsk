@@ -707,6 +707,7 @@ document.addEventListener('DOMContentLoaded', () => {
         formData.append('target_lang', selectedTargetLang);
         formData.append('uid', uid);
         formData.append('groq_api_key', localStorage.getItem(GROQ_KEY_STORE) || '');
+        formData.append('is_local_video', 'true');
 
         try {
             const xhr = new XMLHttpRequest();

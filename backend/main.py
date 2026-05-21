@@ -11,6 +11,7 @@ Features:
 import os
 import sys
 import subprocess
+import re
 
 import uuid
 import json
@@ -327,10 +328,14 @@ def remove_repetitions(text: str) -> str:
     return cleaned
 
 
-def cleanup_transcript_with_ai(text: str, client=None, target_lang="es") -> str:
+def cleanup_transcript_with_ai(text: str, client=None, target_lang="es", is_local_video=False) -> str:
     """Usa la IA para limpiar repeticiones, corregir puntuación y añadir párrafos en el idioma elegido."""
     actual_client = client or groq_client
     if not actual_client or len(text) < 50:
+        return text
+
+    if len(text) > 40000:
+        logger.info(f"Transcripción muy larga ({len(text)} caracteres). Omitiendo limpieza IA para evitar límites de API.")
         return text
     
     lang_name = "Español" if target_lang == "es" else ("Inglés" if target_lang == "en" else "el idioma original del video")
@@ -341,14 +346,34 @@ def cleanup_transcript_with_ai(text: str, client=None, target_lang="es") -> str:
             chunks = [text[i:i+max_chunk_length] for i in range(0, len(text), max_chunk_length)]
             cleaned_chunks = []
             for chunk in chunks:
-                prompt = f"""Sos un editor experto. Tu tarea es LIMPIAR y FORMATEAR esta parte de una transcripción.
-                1. ELIMINÁ repeticiones de frases.
-                2. AGREGÁ puntuación (comas, puntos).
-                3. DIVIDÍ en párrafos con doble salto de línea.
-                4. EL IDIOMA DE SALIDA DEBE SER: {lang_name}.
-                5. NO RESUMAS, mantené el contenido original.
-                TEXTO:
-                {chunk}"""
+                if is_local_video:
+                    prompt = f"""Actúa como un corrector de estilo estricto. Tu único objetivo es tomar esta transcripción cruda y aplicar correcciones ortotipográficas para facilitar su lectura, manteniendo el 100% del contenido original hablado.
+
+Instrucciones de edición:
+
+Preservación absoluta: NO resumas, NO unifiques temas, NO omitas redundancias ni cambies las palabras del entrevistado o entrevistador. Los periodistas necesitan la desgrabación exacta para extraer sus propias citas.
+
+Corrección de formato: Limítate a corregir puntuación (comas, puntos, signos de interrogación), uso de mayúsculas y separar correctamente los párrafos para que el bloque de texto sea legible.
+
+Limpieza mínima: Solo puedes limpiar tartamudeos o muletillas extremas (ej. "eh...", "este...") si interrumpen gravemente la lectura, pero no debes eliminar ninguna anécdotas, dato repetido o interacción de la mesa.
+
+Regla estricta de formato (Cero Artefactos):
+Tu respuesta debe contener ÚNICAMENTE la desgrabación procesada. Está estrictamente prohibido incluir saludos, introducciones (como "Aquí tienes la desgrabación" o "Texto corregido:"), viñetas explicativas o conclusiones al final. Empieza directamente con la primera palabra de la entrevista y termina con el último punto.
+
+Procesa el texto que se encuentra a continuación entre las etiquetas [INICIO DEL TEXTO] y [FIN DEL TEXTO]:
+
+[INICIO DEL TEXTO]
+{chunk}
+[FIN DEL TEXTO]"""
+                else:
+                    prompt = f"""Sos un editor experto. Tu tarea es LIMPIAR y FORMATEAR esta parte de una transcripción.
+                    1. ELIMINÁ repeticiones de frases.
+                    2. AGREGÁ puntuación (comas, puntos).
+                    3. DIVIDÍ en párrafos con doble salto de línea.
+                    4. EL IDIOMA DE SALIDA DEBE SER: {lang_name}.
+                    5. NO RESUMAS, mantené el contenido original.
+                    TEXTO:
+                    {chunk}"""
                 completion = actual_client.chat.completions.create(
                     model="llama-3.3-70b-versatile",
                     messages=[{"role": "user", "content": prompt}],
@@ -358,14 +383,34 @@ def cleanup_transcript_with_ai(text: str, client=None, target_lang="es") -> str:
                 cleaned_chunks.append(completion.choices[0].message.content.strip())
             return "\n\n".join(cleaned_chunks)
         else:
-            prompt = f"""Sos un editor experto. Tu tarea es LIMPIAR y FORMATEAR la siguiente transcripción de un video.
-            1. ELIMINÁ repeticiones de frases.
-            2. AGREGÁ puntuación correcta (comas, puntos).
-            3. DIVIDÍ el texto en párrafos lógicos con doble salto de línea.
-            4. EL IDIOMA DE SALIDA DEBE SER: {lang_name}.
-            5. NO RESUMAS, mantené el contenido original.
-            TRANSCRIPCIÓN:
-            {text}"""
+            if is_local_video:
+                prompt = f"""Actúa como un corrector de estilo estricto. Tu único objetivo es tomar esta transcripción cruda y aplicar correcciones ortotipográficas para facilitar su lectura, manteniendo el 100% del contenido original hablado.
+
+Instrucciones de edición:
+
+Preservación absoluta: NO resumas, NO unifiques temas, NO omitas redundancias ni cambies las palabras del entrevistado o entrevistador. Los periodistas necesitan la desgrabación exacta para extraer sus propias citas.
+
+Corrección de formato: Limítate a corregir puntuación (comas, puntos, signos de interrogación), uso de mayúsculas y separar correctamente los párrafos para que el bloque de texto sea legible.
+
+Limpieza mínima: Solo puedes limpiar tartamudeos o muletillas extremas (ej. "eh...", "este...") si interrumpen gravemente la lectura, pero no debes eliminar ninguna anécdotas, dato repetido o interacción de la mesa.
+
+Regla estricta de formato (Cero Artefactos):
+Tu respuesta debe contener ÚNICAMENTE la desgrabación procesada. Está estrictamente prohibido incluir saludos, introducciones (como "Aquí tienes la desgrabación" o "Texto corregido:"), viñetas explicativas o conclusiones al final. Empieza directamente con la primera palabra de la entrevista y termina con el último punto.
+
+Procesa el texto que se encuentra a continuación entre las etiquetas [INICIO DEL TEXTO] y [FIN DEL TEXTO]:
+
+[INICIO DEL TEXTO]
+{text}
+[FIN DEL TEXTO]"""
+            else:
+                prompt = f"""Sos un editor experto. Tu tarea es LIMPIAR y FORMATEAR la siguiente transcripción de un video.
+                1. ELIMINÁ repeticiones de frases.
+                2. AGREGÁ puntuación correcta (comas, puntos).
+                3. DIVIDÍ el texto en párrafos lógicos con doble salto de línea.
+                4. EL IDIOMA DE SALIDA DEBE SER: {lang_name}.
+                5. NO RESUMAS, mantené el contenido original.
+                TRANSCRIPCIÓN:
+                {text}"""
             completion = actual_client.chat.completions.create(
                 model="llama-3.3-70b-versatile",
                 messages=[{"role": "user", "content": prompt}],
@@ -759,7 +804,7 @@ async def get_transcript(req: VideoRequest):
                 # 1. Celular sin cookies
                 try:
                     update_progress(req.uid, 10, "Buscando subtítulos (1/2)...")
-                    opts = get_robust_opts(url, {'skip_download': True, 'writesubtitles': True, 'writeautomaticsub': True, 'subtitleslangs': ['es.*', 'en.*'], 'outtmpl': os.path.join(tmpdir, 'sub.%(ext)s')})
+                    opts = get_robust_opts(url, {'skip_download': True, 'writesubtitles': True, 'writeautomaticsub': True, 'subtitleslangs': ['es.*', 'en.*'], 'outtmpl': os.path.join(tmpdir, 'sub.%(ext)s'), 'ignoreerrors': True})
                     opts.pop('cookiefile', None)
                     opts['extractor_args'] = {'youtube': {'player_client': ['android', 'ios']}}
                     await run_blocking(ydl_download_sync, opts, url)
@@ -770,7 +815,7 @@ async def get_transcript(req: VideoRequest):
                 if not sub_extracted:
                     try:
                         update_progress(req.uid, 20, "Buscando subtítulos (2/2)...")
-                        opts = get_robust_opts(url, {'skip_download': True, 'writesubtitles': True, 'writeautomaticsub': True, 'subtitleslangs': ['es.*', 'en.*'], 'outtmpl': os.path.join(tmpdir, 'sub.%(ext)s')})
+                        opts = get_robust_opts(url, {'skip_download': True, 'writesubtitles': True, 'writeautomaticsub': True, 'subtitleslangs': ['es.*', 'en.*'], 'outtmpl': os.path.join(tmpdir, 'sub.%(ext)s'), 'ignoreerrors': True})
                         await run_blocking(ydl_download_sync, opts, url)
                         sub_extracted = True
                     except: pass
@@ -1159,7 +1204,8 @@ async def transcript_audio_file(
     file: UploadFile = File(...),
     target_lang: str = Form(default="es"),
     uid: str = Form(default=None),
-    groq_api_key: str = Form(default=None)
+    groq_api_key: str = Form(default=None),
+    is_local_video: Optional[str] = Form(default=None)
 ):
 
     """
@@ -1182,6 +1228,14 @@ async def transcript_audio_file(
             status_code=400,
             detail=f"Formato no soportado: '{ext}'. Formatos válidos: {', '.join(ALLOWED_AUDIO_EXTENSIONS)}"
         )
+
+    is_video = False
+    if is_local_video == "true":
+        is_video = True
+    else:
+        VIDEO_EXTS = {'.mp4', '.mov', '.avi', '.mkv', '.webm', '.weba'}
+        if ext in VIDEO_EXTS:
+            is_video = True
 
     with tempfile.TemporaryDirectory() as tmpdir:
         # Guardar archivo subido
@@ -1305,7 +1359,7 @@ async def transcript_audio_file(
             transcript_text = str(transcription).strip()
             # Limpieza con IA
             add_log(uid, f"Aplicando limpieza y formato IA ({target_lang})...")
-            transcript_text = cleanup_transcript_with_ai(transcript_text, local_groq, target_lang)
+            transcript_text = cleanup_transcript_with_ai(transcript_text, local_groq, target_lang, is_local_video=is_video)
             
             add_log(uid, "Transcripcion de archivo completada con exito.")
             return {

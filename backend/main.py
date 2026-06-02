@@ -1763,7 +1763,7 @@ async def analyze_transcript(req: AnalyzeRequest):
         half = max_chars // 2
         transcript = transcript[:half] + "\n\n[...] [Parte omitida por longitud] [...] \n\n" + transcript[-half:]
 
-    prompt = JOURNALIST_PROMPTS[req.mode].format(transcript=transcript)
+    prompt = JOURNALIST_PROMPTS[req.mode].replace("{transcript}", transcript)
 
     # Modelos a intentar en orden: el grande primero, el liviano como fallback
     MODELS_TO_TRY = ["llama-3.3-70b-versatile", "llama-3.1-8b-instant"]
@@ -1818,7 +1818,7 @@ async def extract_quotes_with_times(req: QuotesRequest):
     if len(transcript) > 12000:
         transcript = transcript[:6000] + "\n\n[...]\n\n" + transcript[-6000:]
 
-    prompt = JOURNALIST_PROMPTS["quotes"].format(transcript=transcript)
+    prompt = JOURNALIST_PROMPTS["quotes"].replace("{transcript}", transcript)
 
     MODELS_TO_TRY = ["llama-3.3-70b-versatile", "llama-3.1-8b-instant"]
     raw_result = None

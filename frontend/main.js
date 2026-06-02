@@ -81,101 +81,6 @@ document.addEventListener('DOMContentLoaded', () => {
         return 'youtube';
     }
 
-    function getYouTubeId(url) {
-        if (!url) return null;
-        const regExp = /^.*(youtu.be\/|v\/|u\/\w\/|embed\/|watch\?v=|\&v=)([^#\&\?]*).*/;
-        const match = url.match(regExp);
-        return (match && match[2].length === 11) ? match[2] : null;
-    }
-
-    function seekPlayer(seconds) {
-        // Seek YouTube Player
-        const ytIframe = document.getElementById('youtube-player');
-        if (ytIframe && ytIframe.offsetParent !== null && ytIframe.contentWindow) {
-            ytIframe.contentWindow.postMessage(JSON.stringify({
-                event: 'command',
-                func: 'seekTo',
-                args: [seconds, true]
-            }), '*');
-            ytIframe.contentWindow.postMessage(JSON.stringify({
-                event: 'command',
-                func: 'playVideo',
-                args: []
-            }), '*');
-            return;
-        }
-
-        // Seek Local Player
-        const localPlayer = document.getElementById('local-media-player');
-        if (localPlayer && localPlayer.offsetParent !== null) {
-            localPlayer.currentTime = seconds;
-            localPlayer.play().catch(() => {});
-        }
-    }
-
-    function setupVideoPreview(url, thumbnailUrl) {
-        const ytId = getYouTubeId(url);
-        const playerWrapper = document.getElementById('youtube-player-wrapper');
-        const localPlayerWrapper = document.getElementById('local-player-wrapper');
-        const durationEl = document.getElementById('video-duration');
-        
-        // Stop and clear local player
-        const localPlayer = document.getElementById('local-media-player');
-        if (localPlayer) {
-            localPlayer.pause();
-            localPlayer.removeAttribute('src');
-            localPlayer.load();
-        }
-        if (localPlayerWrapper) localPlayerWrapper.classList.add('hidden');
-        
-        if (ytId) {
-            if (playerWrapper) {
-                playerWrapper.innerHTML = `<iframe id="youtube-player" class="w-full h-full" src="https://www.youtube.com/embed/${ytId}?enablejsapi=1&rel=0" frameborder="0" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" allowfullscreen></iframe>`;
-                playerWrapper.classList.remove('hidden');
-            }
-            if (thumbnailImg) thumbnailImg.style.display = 'none';
-            if (durationEl) durationEl.classList.add('hidden');
-        } else {
-            if (playerWrapper) {
-                playerWrapper.innerHTML = '';
-                playerWrapper.classList.add('hidden');
-            }
-            if (durationEl) durationEl.classList.remove('hidden');
-            if (thumbnailUrl) {
-                let t = thumbnailUrl;
-                if (t.startsWith('/api/')) t = window.location.origin + t;
-                thumbnailImg.src = t; thumbnailImg.style.display = '';
-            } else {
-                thumbnailImg.style.display = 'none';
-            }
-        }
-    }
-
-    function setupLocalPlayer(url) {
-        const playerWrapper = document.getElementById('youtube-player-wrapper');
-        const localPlayerWrapper = document.getElementById('local-player-wrapper');
-        const localPlayer = document.getElementById('local-media-player');
-        const durationEl = document.getElementById('video-duration');
-        
-        if (playerWrapper) {
-            playerWrapper.innerHTML = '';
-            playerWrapper.classList.add('hidden');
-        }
-        if (thumbnailImg) thumbnailImg.style.display = 'none';
-        if (durationEl) durationEl.classList.add('hidden');
-        
-        if (localPlayer && localPlayerWrapper) {
-            localPlayer.src = url;
-            localPlayer.load();
-            localPlayerWrapper.classList.remove('hidden');
-            
-            // Show video info card if hidden
-            if (videoInfoCard) {
-                videoInfoCard.classList.remove('hidden');
-            }
-        }
-    }
-
     // ─── HISTORY ─────────────────────────────────────────────────────────────────
     const HISTORY_KEY = 'clipadsk_history';
     const GROQ_KEY_STORE = 'clipadsk_groq_api_key';
@@ -304,7 +209,6 @@ document.addEventListener('DOMContentLoaded', () => {
             if (titleEl) titleEl.textContent = item.title || 'Transcripción';
             if (videoInfoCard && !item.url.startsWith('whatsapp:') && !item.url.startsWith('video:')) {
                 videoInfoCard.classList.remove('hidden');
-                setupVideoPreview(item.url, item.thumbnail || null);
             }
             showToast('Transcripción cargada', 'success');
         },
@@ -480,19 +384,6 @@ document.addEventListener('DOMContentLoaded', () => {
         if (!url) { showToast('Pega una URL valida primero', 'error'); return; }
 
         videoInfoCard?.classList.add('hidden');
-        // Stop and hide players
-        const localPlayerEl = document.getElementById('local-media-player');
-        if (localPlayerEl) {
-            localPlayerEl.pause();
-            localPlayerEl.removeAttribute('src');
-            localPlayerEl.load();
-        }
-        document.getElementById('local-player-wrapper')?.classList.add('hidden');
-        const ytPlayerWrapperEl = document.getElementById('youtube-player-wrapper');
-        if (ytPlayerWrapperEl) {
-            ytPlayerWrapperEl.innerHTML = '';
-            ytPlayerWrapperEl.classList.add('hidden');
-        }
         qualityWarning?.classList.add('hidden');
         loadingSpinner?.classList.remove('hidden');
         transcriptSection?.classList.add('hidden');
@@ -529,7 +420,11 @@ document.addEventListener('DOMContentLoaded', () => {
             if (data.error) throw new Error(data.error.replace(/\u001b\[[0-9;]*m/g, ''));
             if (!data.formats?.length) throw new Error('No se encontraron formatos para este video.');
 
-            setupVideoPreview(url, data.thumbnail);
+            if (data.thumbnail) {
+                let t = data.thumbnail;
+                if (t.startsWith('/api/')) t = window.location.origin + t;
+                thumbnailImg.src = t; thumbnailImg.style.display = '';
+            } else { thumbnailImg.style.display = 'none'; }
 
             titleEl.textContent    = data.title;
             uploaderEl.textContent = data.uploader;
@@ -706,7 +601,7 @@ document.addEventListener('DOMContentLoaded', () => {
             renderTranscript(data.transcript, data.method, data.srt, data.segments);
             downloadTxtBtn?.classList.remove('hidden');
 
-            saveToHistory({ url, platform: detectPlatformFromUrl(url), title: titleEl.textContent || url, transcript: data.transcript, srt: data.srt, segments: data.segments, thumbnail: thumbnailImg.src || '' });
+            saveToHistory({ url, platform: detectPlatformFromUrl(url), title: titleEl.textContent || url, transcript: data.transcript, srt: data.srt, segments: data.segments });
 
         } catch (err) {
             clearInterval(pollInterval);
@@ -923,18 +818,12 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     }
 
+    // Segment actions menu listener
     transcriptContent?.addEventListener('click', (e) => {
         const segmentEl = e.target.closest('.interactive-segment');
         if (!segmentEl) return;
         
         const start = parseFloat(segmentEl.dataset.start);
-        
-        // If they click on the timestamp badge, play immediately and don't open the menu
-        if (e.target.closest('.interactive-segment-time')) {
-            seekPlayer(start);
-            return;
-        }
-        
         const end = parseFloat(segmentEl.dataset.end);
         
         // Remove existing menus
@@ -943,13 +832,6 @@ document.addEventListener('DOMContentLoaded', () => {
         // Create menu
         const menu = document.createElement('div');
         menu.className = 'segment-actions-menu';
-        
-        const playBtn = document.createElement('button');
-        playBtn.innerHTML = '<span class="material-symbols-outlined text-[14px]">play_circle</span> Reproducir';
-        playBtn.onclick = () => {
-            seekPlayer(start);
-            menu.remove();
-        };
         
         const startBtn = document.createElement('button');
         startBtn.innerHTML = '<span class="material-symbols-outlined text-[14px]">play_arrow</span> Iniciar corte';
@@ -996,7 +878,6 @@ document.addEventListener('DOMContentLoaded', () => {
             showToast('Frase copiada', 'success');
         };
         
-        menu.appendChild(playBtn);
         menu.appendChild(startBtn);
         menu.appendChild(endBtn);
         menu.appendChild(copyBtn);
@@ -1060,10 +941,6 @@ document.addEventListener('DOMContentLoaded', () => {
 
             currentTranscript = data.transcript;
             currentSrt = data.srt || '';
-            
-            // Setup local media player preview
-            const localUrl = URL.createObjectURL(file);
-            setupLocalPlayer(localUrl);
             
             // Usar la columna derecha (como YouTube)
             renderTranscript(data.transcript, 'groq_whisper_v3_file', data.srt, data.segments);
@@ -1161,10 +1038,6 @@ document.addEventListener('DOMContentLoaded', () => {
 
             currentTranscript = response.transcript;
             currentSrt = response.srt || '';
-
-            // Setup local media player preview
-            const localUrl = URL.createObjectURL(file);
-            setupLocalPlayer(localUrl);
 
             // Usar la columna derecha (como YouTube)
             renderTranscript(response.transcript, 'groq_whisper_v3_file', response.srt, response.segments);
@@ -1337,7 +1210,7 @@ document.addEventListener('DOMContentLoaded', () => {
             const startFmt = hasTime ? formatHHMMSS(q.start) : null;
             const endFmt   = hasTime ? formatHHMMSS(q.end)   : null;
             const timeBadge = hasTime
-                ? `<div class="quote-time-badge cursor-pointer hover:bg-accent/20 hover:text-white transition-all flex items-center gap-1" data-start="${q.start}" title="Hacer clic para reproducir este momento en el video">
+                ? `<div class="quote-time-badge">
                     <span class="material-symbols-outlined text-[13px]">schedule</span>
                     ${startFmt} → ${endFmt}
                    </div>`
@@ -1406,17 +1279,10 @@ document.addEventListener('DOMContentLoaded', () => {
                 // Show inline clip tool if hidden
                 document.getElementById('inline-clip-tool')?.classList.remove('hidden');
                 showToast(`Recorte fijado: ${startFmt} → ${endFmt}`, 'success');
-                    // Visual feedback on the button
+                // Visual feedback on the button
                 btn.innerHTML = '<span class="material-symbols-outlined text-[13px]">check</span> Fijado';
                 btn.classList.add('opacity-70');
                 setTimeout(() => { btn.innerHTML = '<span class="material-symbols-outlined text-[13px]">content_cut</span> Recortar'; btn.classList.remove('opacity-70'); }, 2500);
-            });
-        });
-        // Wire quote time badge clicks to seek player
-        outputEl.querySelectorAll('.quote-time-badge[data-start]').forEach(badge => {
-            badge.addEventListener('click', () => {
-                const start = parseFloat(badge.dataset.start);
-                seekPlayer(start);
             });
         });
 

@@ -286,9 +286,13 @@
             <!-- ═══ VIDEO RESULTS CARD ═══ -->
             <section id="video-info-card" class="glass rounded-3xl overflow-hidden hidden fade-in shadow-2xl">
                 <div class="flex flex-col divide-y divide-white/5">
-                    <!-- Thumbnail -->
-                    <div class="relative aspect-video bg-black/40 flex items-center justify-center">
+                    <!-- Thumbnail / Player Container -->
+                    <div class="relative aspect-video bg-black/40 flex items-center justify-center" id="video-preview-container">
                         <img id="video-thumbnail" src="" alt="Miniatura" class="w-full h-full object-contain drop-shadow-2xl" referrerpolicy="no-referrer">
+                        <div id="youtube-player-wrapper" class="absolute inset-0 hidden"></div>
+                        <div id="local-player-wrapper" class="absolute inset-0 hidden">
+                            <video id="local-media-player" controls class="w-full h-full object-contain"></video>
+                        </div>
                         <div id="video-duration" class="absolute bottom-4 right-4 bg-black/80 px-2 py-1 rounded-md text-xs font-bold text-white shadow-lg">0:00</div>
                     </div>
                     <!-- Info -->

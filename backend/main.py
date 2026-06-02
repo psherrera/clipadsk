@@ -268,7 +268,97 @@ def get_whisper_model():
     return WHISPER_MODEL
 
 
-def transcribe_with_local_whisper(audio_file_path: str, target_lang: str = "es") -> str:
+def parse_time_to_seconds(t_str: str) -> float:
+    t_str = t_str.replace(',', '.')
+    parts = t_str.split(':')
+    if len(parts) == 3:
+        h, m, s = parts
+        return float(h) * 3600 + float(m) * 60 + float(s)
+    elif len(parts) == 2:
+        m, s = parts
+        return float(m) * 60 + float(s)
+    return 0.0
+
+
+def parse_subtitles_to_segments(content: str) -> list:
+    segments = []
+    # Match standard timestamp line: HH:MM:SS.mmm --> HH:MM:SS.mmm or MM:SS.mmm --> MM:SS.mmm
+    pattern = re.compile(r'(\d+(?::\d+)*[\.,]\d{3})\s*-->\s*(\d+(?::\d+)*[\.,]\d{3})')
+    # Pattern to remove leftover inline VTT word-level timestamps (e.g. '02:14' stuck to words)
+    inline_ts = re.compile(r'\b\d{1,2}:\d{2}(?::\d{2})?(?:[.,]\d+)?\s*')
+    
+    lines = content.split('\n')
+    i = 0
+    while i < len(lines):
+        line = lines[i].strip()
+        match = pattern.search(line)
+        if match:
+            start_str, end_str = match.groups()
+            start = parse_time_to_seconds(start_str)
+            end = parse_time_to_seconds(end_str)
+            
+            # Read subsequent lines until we hit an empty line or another timestamp
+            text_lines = []
+            i += 1
+            while i < len(lines):
+                next_line = lines[i].strip()
+                # If we see another timestamp or start of next block, break
+                if pattern.search(next_line) or (next_line.isdigit() and i + 1 < len(lines) and pattern.search(lines[i+1])):
+                    i -= 1 # Step back so outer loop processes it
+                    break
+                if next_line == "" or next_line.startswith("WEBVTT") or next_line.startswith("Kind:") or next_line.startswith("Language:"):
+                    # skip empty or header lines
+                    pass
+                else:
+                    # Pass 1: Clean XML-like tags (e.g. <c.colorWhite>, <00:02:14.000>)
+                    cleaned_line = re.sub(r'<[^>]*>', '', next_line).strip()
+                    # Pass 2: Remove any leftover inline timestamps (e.g. '02:14' stuck to text)
+                    cleaned_line = inline_ts.sub('', cleaned_line).strip()
+                    if cleaned_line:
+                        text_lines.append(cleaned_line)
+                i += 1
+            
+            text = " ".join(text_lines).strip()
+            if text:
+                segments.append({"start": start, "end": end, "text": text})
+        i += 1
+    return segments
+
+
+def format_srt_timestamp(seconds: float) -> str:
+    milliseconds = int(round((seconds % 1) * 1000))
+    total_seconds = int(seconds)
+    if milliseconds >= 1000:
+        milliseconds -= 1000
+        total_seconds += 1
+    hours = total_seconds // 3600
+    minutes = (total_seconds % 3600) // 60
+    secs = total_seconds % 60
+    return f"{hours:02d}:{minutes:02d}:{secs:02d},{milliseconds:03d}"
+
+
+def generate_srt_from_segments(segments) -> str:
+    srt_lines = []
+    for i, segment in enumerate(segments, start=1):
+        if isinstance(segment, dict):
+            start = segment.get("start", 0)
+            end = segment.get("end", 0)
+            text = segment.get("text", "").strip()
+        else:
+            start = getattr(segment, "start", 0)
+            end = getattr(segment, "end", 0)
+            text = getattr(segment, "text", "").strip()
+        
+        start_str = format_srt_timestamp(start)
+        end_str = format_srt_timestamp(end)
+        srt_lines.append(f"{i}")
+        srt_lines.append(f"{start_str} --> {end_str}")
+        srt_lines.append(text)
+        srt_lines.append("")
+    return "\n".join(srt_lines)
+
+
+def transcribe_with_local_whisper(audio_file_path: str, target_lang: str = "es"):
     model = get_whisper_model()
     if not model:
         raise RuntimeError("No hay modelo Whisper local disponible. Instala faster-whisper para usar este modo.")
@@ -280,9 +370,12 @@ def transcribe_with_local_whisper(audio_file_path: str, target_lang: str = "es")
         vad_filter=True,
         language=target_lang if target_lang in ["es", "en"] else None
     )
+    segments = list(segments)
     transcription = " ".join(segment.text.strip() for segment in segments if segment.text.strip())
+    srt_content = generate_srt_from_segments(segments)
     logger.info(f"Transcripción local completada. Duración aprox: {getattr(info, 'duration', 'desconocida')}s")
-    return transcription
+    return transcription, srt_content
+
 
 
 def remove_repetitions(text: str) -> str:
@@ -790,7 +883,19 @@ async def get_transcript(req: VideoRequest):
     cache = load_cache()
     if cache_key in cache:
         add_log(uid, "Resultado recuperado de cache local.")
-        return {"transcript": cache[cache_key], "method": "cache"}
+        cached_val = cache[cache_key]
+        try:
+            parsed = json.loads(cached_val)
+            if isinstance(parsed, dict) and "transcript" in parsed:
+                return {
+                    "transcript": parsed.get("transcript", ""),
+                    "srt": parsed.get("srt", ""),
+                    "segments": parsed.get("segments", []),
+                    "method": "cache"
+                }
+        except Exception:
+            pass
+        return {"transcript": cached_val, "method": "cache"}
 
     with tempfile.TemporaryDirectory() as tmpdir:
         try:
@@ -800,7 +905,6 @@ async def get_transcript(req: VideoRequest):
                 # --- INTENTO DE SUBS CON 3 ESTRATEGIAS ---
                 sub_extracted = False
 
-                
                 # 1. Celular sin cookies
                 try:
                     update_progress(req.uid, 10, "Buscando subtítulos (1/2)...")
@@ -835,29 +939,38 @@ async def get_transcript(req: VideoRequest):
                 
                 if sub_file:
                     with open(sub_file, 'r', encoding='utf-8') as f:
-                        content = f.read()
-                    content = re.sub(r'WEBVTT.*?\n\n', '', content, flags=re.DOTALL)
-                    content = re.sub(r'\d{2}:\d{2}:\d{2}\.\d{3} --> \d{2}:\d{2}:\d{2}\.\d{3}.*?\n', '', content)
-                    content = re.sub(r'^\d+\n', '', content, flags=re.MULTILINE)
-                    content = re.sub(r'<[^>]*>', '', content)
-                    final_text = ' '.join([line.strip() for line in content.split('\n') if line.strip()])
+                        raw_content = f.read()
                     
-                    if is_english and lang == "es":
-                        add_log(uid, "Traduciendo subtitulos de ingles a español...")
-                        final_text = translate_to_spanish(final_text)
+                    segments = parse_subtitles_to_segments(raw_content)
                     
-                    # Paso 1: deduplicar sin IA (rápido)
-                    final_text = remove_repetitions(final_text)
+                    # Traducir y limpiar cada segmento
+                    for seg in segments:
+                        if is_english and lang == "es":
+                            seg["text"] = translate_to_spanish(seg["text"])
+                        seg["text"] = remove_repetitions(seg["text"])
+                    
+                    # Generar texto plano completo y SRT
+                    raw_full_text = ' '.join([seg["text"] for seg in segments])
+                    srt_content = generate_srt_from_segments(segments)
                     
                     # Paso 2: Limpieza con IA para puntuación y párrafos
                     update_progress(req.uid, 80, f"Aplicando limpieza con IA ({lang})...")
-                    final_text = cleanup_transcript_with_ai(final_text, local_groq, lang)
+                    final_text = cleanup_transcript_with_ai(raw_full_text, local_groq, lang)
                     
-                    save_cache_entry(cache_key, final_text)
+                    cache_data = {
+                        "transcript": final_text,
+                        "srt": srt_content,
+                        "segments": segments
+                    }
+                    save_cache_entry(cache_key, json.dumps(cache_data))
                     add_log(uid, "Transcripcion via subtitulos completada.")
                     update_progress(req.uid, 100, "¡Transcripción lista!")
-                    return {"transcript": final_text, "method": "subtitles"}
-
+                    return {
+                        "transcript": final_text,
+                        "srt": srt_content,
+                        "segments": segments,
+                        "method": "subtitles"
+                    }
 
             raise Exception("No direct subtitles")
 
@@ -869,7 +982,6 @@ async def get_transcript(req: VideoRequest):
             
             add_log(uid, "Iniciando descarga de audio para Whisper...")
 
-            
             # Estrategia 1: Móvil sin cookies
             try:
                 audio_opts = get_robust_opts(url, {'format': 'bestaudio/best', 'outtmpl': os.path.join(tmpdir, 'audio.%(ext)s'), 'postprocessors': [{'key': 'FFmpegExtractAudio','preferredcodec': 'mp3','preferredquality': '64'}]})
@@ -897,10 +1009,14 @@ async def get_transcript(req: VideoRequest):
 
             if audio_downloaded and audio_file:
                 # 2.1 Intentar con Groq API (Más rápido y ligero)
+                transcription = ""
+                srt_content = ""
+                all_segments = []
+                method = "groq_whisper_v3_file"
+
                 if local_groq:
                     try:
                         file_size_mb = os.path.getsize(audio_file) / (1024 * 1024)
-                        transcription = ""
                         if AudioSegment:
                             # Lógica de troceado si es necesario
                             if file_size_mb >= 20:
@@ -916,53 +1032,137 @@ async def get_transcript(req: VideoRequest):
                                          chunk.export(c_file.name, format="mp3", bitrate="64k")
                                          add_log(uid, f"Transcribiendo parte {idx+1}/{len(chunks)}...")
                                          with open(c_file.name, "rb") as f:
-                                             part_text = local_groq.audio.transcriptions.create(
-                                                 file=(c_file.name, f.read()),
+                                             part_res = local_groq.audio.transcriptions.create(
+                                                 file=(c_file.name, f.read(), "audio/mpeg"),
                                                  model="whisper-large-v3",
-                                                 response_format="text",
+                                                 response_format="verbose_json",
                                                  language=lang if lang in ["es", "en"] else None
                                              )
-                                             transcription += part_text + " "
+                                             transcription += getattr(part_res, "text", "") + " "
+                                             
+                                             # Adjust segments timestamps for chunk index
+                                             offset = idx * 20 * 60
+                                             part_segments = getattr(part_res, "segments", []) or []
+                                             for segment in part_segments:
+                                                 if isinstance(segment, dict):
+                                                     s_start = segment.get("start", 0) + offset
+                                                     s_end = segment.get("end", 0) + offset
+                                                     s_text = segment.get("text", "").strip()
+                                                 else:
+                                                     s_start = getattr(segment, "start", 0) + offset
+                                                     s_end = getattr(segment, "end", 0) + offset
+                                                     s_text = getattr(segment, "text", "").strip()
+                                                 all_segments.append({"start": s_start, "end": s_end, "text": s_text})
                                          os.remove(c_file.name)
+                                 srt_content = generate_srt_from_segments(all_segments)
 
                             else:
                                 update_progress(req.uid, 40, "Enviando a Whisper (IA)...")
                                 with open(audio_file, "rb") as f:
                                     trans_res = local_groq.audio.transcriptions.create(
-                                        file=(audio_file, f.read()),
+                                        file=(audio_file, f.read(), "audio/mpeg"),
                                         model="whisper-large-v3",
-                                        response_format="text",
+                                        response_format="verbose_json",
                                         language=lang if lang in ["es", "en"] else None
                                     )
-                                transcription = str(trans_res)
+                                transcription = getattr(trans_res, "text", "")
+                                part_segments = getattr(trans_res, "segments", []) or []
+                                for segment in part_segments:
+                                    if isinstance(segment, dict):
+                                         s_start = segment.get("start", 0)
+                                         s_end = segment.get("end", 0)
+                                         s_text = segment.get("text", "").strip()
+                                    else:
+                                         s_start = getattr(segment, "start", 0)
+                                         s_end = getattr(segment, "end", 0)
+                                         s_text = getattr(segment, "text", "").strip()
+                                    all_segments.append({"start": s_start, "end": s_end, "text": s_text})
+                                srt_content = generate_srt_from_segments(all_segments)
                         else:
                             add_log(uid, "Enviando audio completo a Whisper (IA)...")
                             with open(audio_file, "rb") as f:
-                                transcription = local_groq.audio.transcriptions.create(
-                                    file=(audio_file, f.read()),
+                                trans_res = local_groq.audio.transcriptions.create(
+                                    file=(audio_file, f.read(), "audio/mpeg"),
                                     model="whisper-large-v3",
-                                    response_format="text",
+                                    response_format="verbose_json",
                                     language=lang if lang in ["es", "en"] else None
                                 )
+                            transcription = getattr(trans_res, "text", "")
+                            part_segments = getattr(trans_res, "segments", []) or []
+                            for segment in part_segments:
+                                if isinstance(segment, dict):
+                                     s_start = segment.get("start", 0)
+                                     s_end = segment.get("end", 0)
+                                     s_text = segment.get("text", "").strip()
+                                else:
+                                     s_start = getattr(segment, "start", 0)
+                                     s_end = getattr(segment, "end", 0)
+                                     s_text = getattr(segment, "text", "").strip()
+                                all_segments.append({"start": s_start, "end": s_end, "text": s_text})
+                            srt_content = generate_srt_from_segments(all_segments)
                         
                         add_log(uid, "Procesando texto crudo de Whisper...")
-                        # Paso 1: Deduplicar repeticiones de Whisper (sin IA, rápido)
-                        transcription = remove_repetitions(transcription.strip())
+                        transcription = remove_repetitions(str(transcription).strip())
                         
                         # Paso 2: Limpieza con IA para puntuación y párrafos
                         add_log(uid, f"Aplicando limpieza y formato IA ({lang})...")
                         transcription = cleanup_transcript_with_ai(transcription, local_groq, lang)
                         
-                        save_cache_entry(cache_key, transcription)
+                        cache_data = {
+                            "transcript": transcription,
+                            "srt": srt_content,
+                            "segments": all_segments
+                        }
+                        save_cache_entry(cache_key, json.dumps(cache_data))
                         add_log(uid, "Transcripcion de archivo completada.")
                         update_progress(req.uid, 100, "¡Transcripción lista!")
-                        return {"transcript": transcription, "method": "groq_whisper_v3_file"}
+                        return {
+                            "transcript": transcription,
+                            "srt": srt_content,
+                            "segments": all_segments,
+                            "method": "groq_whisper_v3_file"
+                        }
                     except Exception as ge:
-                        add_log(uid, f"Error critico en Groq Whisper: {str(ge)}")
-                        raise Exception(f"Error en Groq API: {str(ge)}")
-
-
-                raise Exception("Groq API no configurada y no se encontraron subtítulos.")
+                        add_log(uid, f"Error en Groq Whisper, intentando local: {str(ge)}")
+                        if not WHISPER_MODEL_AVAILABLE:
+                            raise Exception(f"Error en Groq API: {str(ge)}")
+                
+                # 2.2 Intentar con local whisper (Fallback o si no hay Groq)
+                if WHISPER_MODEL_AVAILABLE:
+                    try:
+                        add_log(uid, "Iniciando transcripcion local con faster-whisper...")
+                        update_progress(req.uid, 40, "Transcribiendo en local (Whisper)...")
+                        transcription, srt_content = transcribe_with_local_whisper(audio_file, lang)
+                        all_segments = parse_subtitles_to_segments(srt_content)
+                        method = "local_whisper"
+                        
+                        add_log(uid, "Procesando texto crudo...")
+                        transcription = remove_repetitions(transcription.strip())
+                        
+                        # Limpieza IA si está configurada
+                        if local_groq:
+                            add_log(uid, f"Aplicando limpieza IA...")
+                            transcription = cleanup_transcript_with_ai(transcription, local_groq, lang)
+                        
+                        cache_data = {
+                            "transcript": transcription,
+                            "srt": srt_content,
+                            "segments": all_segments
+                        }
+                        save_cache_entry(cache_key, json.dumps(cache_data))
+                        add_log(uid, "Transcripcion local completada.")
+                        update_progress(req.uid, 100, "¡Transcripción lista!")
+                        return {
+                            "transcript": transcription,
+                            "srt": srt_content,
+                            "segments": all_segments,
+                            "method": "local_whisper"
+                        }
+                    except Exception as le:
+                        add_log(uid, f"Error en transcripcion local: {str(le)}")
+                        raise le
+                else:
+                    raise Exception("Groq API no configurada o falló, y no hay modelo Whisper local disponible.")
 
             raise Exception("No se pudo descargar el audio para la transcripción por ningún medio.")
         except Exception as final_e:
@@ -1299,10 +1499,12 @@ async def transcript_audio_file(
                     raise HTTPException(status_code=400, detail=f"El archivo es demasiado largo ({file_size_mb:.1f}MB) incluso tras comprimirlo. El limite de Groq es 25MB, pero puedes instalar faster-whisper para transcribir localmente.")
 
             transcription = ""
+            srt_content = ""
             method = "groq_whisper_v3_file" if local_groq else "local_whisper"
 
             if local_groq:
                 try:
+                    all_segments = []
                     if AudioSegment and file_size_mb >= 20:
                         # Archivos grandes: trocear en partes de 20 minutos
                         add_log(uid, f"Dividiendo audio de {file_size_mb:.1f}MB en partes...")
@@ -1315,15 +1517,30 @@ async def transcript_audio_file(
                                 chunk.export(c_file.name, format="mp3", bitrate="64k")
                                 add_log(uid, f"Transcribiendo parte {idx+1}/{len(chunks)}...")
                                 with open(c_file.name, "rb") as cf:
-                                    part_text = local_groq.audio.transcriptions.create(
+                                    part_res = local_groq.audio.transcriptions.create(
                                         file=(c_file.name, cf.read(), "audio/mpeg"),
                                         model="whisper-large-v3",
-                                        response_format="text",
+                                        response_format="verbose_json",
                                         language=target_lang if target_lang in ["es", "en"] else None
                                     )
-                                    transcription += str(part_text) + " "
+                                    transcription += getattr(part_res, "text", "") + " "
+                                    
+                                    # Adjust segments timestamps for chunk index
+                                    offset = idx * 20 * 60
+                                    part_segments = getattr(part_res, "segments", []) or []
+                                    for segment in part_segments:
+                                        if isinstance(segment, dict):
+                                            s_start = segment.get("start", 0) + offset
+                                            s_end = segment.get("end", 0) + offset
+                                            s_text = segment.get("text", "").strip()
+                                        else:
+                                            s_start = getattr(segment, "start", 0) + offset
+                                            s_end = getattr(segment, "end", 0) + offset
+                                            s_text = getattr(segment, "text", "").strip()
+                                        all_segments.append({"start": s_start, "end": s_end, "text": s_text})
 
                                 os.remove(c_file.name)
+                        srt_content = generate_srt_from_segments(all_segments)
                     else:
                         if audio_path.endswith('.mp3'):
                             mime_type = "audio/mpeg"
@@ -1339,22 +1556,43 @@ async def transcript_audio_file(
                             mime_type = "audio/ogg"
 
                         with open(audio_path, "rb") as f:
-                            transcription = local_groq.audio.transcriptions.create(
+                            trans_res = local_groq.audio.transcriptions.create(
                                 file=(os.path.basename(audio_path), f.read(), mime_type),
                                 model="whisper-large-v3",
-                                response_format="text",
+                                response_format="verbose_json",
                                 language=target_lang if target_lang in ["es", "en"] else None
                             )
+                        transcription = getattr(trans_res, "text", "")
+                        segments = getattr(trans_res, "segments", []) or []
+                        srt_content = generate_srt_from_segments(segments)
+                    
                     transcription = str(transcription)
                 except Exception as ge:
                     add_log(uid, f"Error critico en Groq Whisper: {str(ge)}")
                     if not WHISPER_MODEL_AVAILABLE:
                         raise Exception(f"Error en Groq API: {str(ge)}")
                     add_log(uid, "Groq falló o la API Key es inválida. Intentando transcripción local con Whisper...")
-                    transcription = transcribe_with_local_whisper(audio_path, target_lang)
+                    transcription, srt_content = transcribe_with_local_whisper(audio_path, target_lang)
                     method = "local_whisper"
+            # Unificar segmentos para retornar
+            if method == "local_whisper":
+                segments_to_return = parse_subtitles_to_segments(srt_content)
             else:
-                transcription = transcribe_with_local_whisper(audio_path, target_lang)
+                # Groq
+                if 'segments' in locals() and segments:
+                    segments_to_return = []
+                    for s in segments:
+                        if isinstance(s, dict):
+                            s_start = s.get("start", 0)
+                            s_end = s.get("end", 0)
+                            s_text = s.get("text", "").strip()
+                        else:
+                            s_start = getattr(s, "start", 0)
+                            s_end = getattr(s, "end", 0)
+                            s_text = getattr(s, "text", "").strip()
+                        segments_to_return.append({"start": s_start, "end": s_end, "text": s_text})
+                else:
+                    segments_to_return = all_segments
 
             transcript_text = str(transcription).strip()
             # Limpieza con IA
@@ -1364,6 +1602,8 @@ async def transcript_audio_file(
             add_log(uid, "Transcripcion de archivo completada con exito.")
             return {
                 "transcript": transcript_text,
+                "srt": srt_content,
+                "segments": segments_to_return,
                 "method": method,
                 "filename": file.filename,
                 "size_mb": round(size_mb, 2)
@@ -1390,8 +1630,45 @@ async def clear_downloads():
 
 class AnalyzeRequest(BaseModel):
     transcript: str
-    mode: str  # "summary" | "quotes" | "data" | "angle"
+    mode: str  # "summary" | "quotes" | "data" | "angle" | "diarization"
     groq_api_key: Optional[str] = None
+
+class QuotesRequest(BaseModel):
+    transcript: str
+    segments: list = []   # lista de {start, end, text} para ubicar tiempos
+    groq_api_key: Optional[str] = None
+
+def find_segment_times_for_quote(search_phrase: str, segments: list) -> dict:
+    """Busca la frase en los segmentos y devuelve el start/end del segmento más cercano."""
+    if not segments or not search_phrase:
+        return {}
+    
+    search_lower = search_phrase.lower().strip()
+    search_words = set(search_lower.split())
+    
+    best_score = 0
+    best_seg = None
+    best_idx = -1
+    
+    for i, seg in enumerate(segments):
+        seg_text = seg.get('text', '').lower()
+        # Exact substring match — perfect
+        if search_lower in seg_text:
+            return {"start": seg["start"], "end": seg["end"], "seg_idx": i}
+        # Word overlap score
+        seg_words = set(seg_text.split())
+        overlap = len(search_words & seg_words)
+        if overlap > best_score:
+            best_score = overlap
+            best_seg = seg
+            best_idx = i
+    
+    if best_seg and best_score >= max(2, len(search_words) // 2):
+        # Expand the window: take from this segment to 2 segments later for context
+        end_idx = min(best_idx + 2, len(segments) - 1)
+        return {"start": best_seg["start"], "end": segments[end_idx]["end"], "seg_idx": best_idx}
+    
+    return {}
 
 JOURNALIST_PROMPTS = {
     "summary": """Sos un asistente para periodistas especializados en comunicación política e imagen pública.
@@ -1402,15 +1679,19 @@ Respondé solo con el resumen, sin encabezados ni explicaciones.
 TRANSCRIPCIÓN:
 {transcript}""",
 
-    "quotes": """Sos un asistente para periodistas especializados en comunicación política e imagen pública.
-Dado el siguiente texto transcripto, extraé las CITAS TEXTUALES más relevantes para una nota periodística.
-Para cada cita, indicá en formato:
+    "quotes": """¡IMPORTANTE! Respondé EXCLUSIVAMENTE con un array JSON válido, sin ningún texto antes ni después.
 
-• **[cita textual]** — [contexto breve de por qué es relevante]
+Sos un asistente para periodistas. Dado el siguiente texto transcripto, extraé las 5 CITAS TEXTUALES más noticiosas, llamativas o reveladoras.
 
-Separá cada cita con un DOBLE SALTO DE LÍNEA para que el texto sea legible.
-Seleccioná máximo 5 citas. Si no hay citas claras, indicalo.
-Respondé solo con las citas, sin introducción.
+Para cada cita devolvé un objeto JSON con estos campos exactos:
+- "quote": la cita textual exacta del hablante (sin comillas dobles internas, usa simples si es necesario)
+- "note": una o dos oraciones sobre por qué es relevante para una nota periodística
+- "search": una frase corta única de 4-8 palabras que esté dentro de la cita, para poder ubicarla en el texto
+
+Formato de respuesta (solo el JSON, nada más):
+[
+  {"quote": "...", "note": "...", "search": "..."}
+]
 
 TRANSCRIPCIÓN:
 {transcript}""",
@@ -1440,6 +1721,21 @@ Separá cada propuesta con un DOBLE SALTO DE LÍNEA.
 Respondé directamente con los 3 ángulos, sin introducción.
 
 TRANSCRIPCIÓN:
+{transcript}""",
+
+    "diarization": """Sos un asistente para periodistas experto en análisis de diálogos.
+Dado el siguiente texto transcripto, tu tarea es analizar la conversación y dividirla en un diálogo estructurado, identificando a los diferentes hablantes.
+
+Instrucciones críticas:
+1. DETERMINA LOS NOMBRES REALES: Analiza detenidamente el texto para deducir los nombres reales de los hablantes si se presentan, se saludan, se llaman por su nombre o se infiere por el contexto. Si los detectas, usa sus nombres reales como etiquetas (por ejemplo: **Juan**, **María**, **Entrevistador**, etc.) en lugar de "Hablante A" o "Hablante B".
+2. Identificá los cambios de turno de palabra basándote en la coherencia y las preguntas/respuestas.
+3. Formateá la salida como un diálogo claro, precediendo cada intervención con el nombre del hablante o su etiqueta en negrita, por ejemplo:
+**Nombre del Hablante**: [texto original hablado en este turno]
+
+4. Preservación absoluta: No resumas, no edites ni elimines contenido. Mantené el 100% de las palabras originales habladas.
+5. Respondé ÚNICAMENTE con el diálogo formateado. Está prohibido incluir saludos, introducciones, explicaciones o conclusiones.
+
+TRANSCRIPCIÓN:
 {transcript}"""
 }
 
@@ -1461,8 +1757,11 @@ async def analyze_transcript(req: AnalyzeRequest):
 
     # Truncar si es muy larga (Groq tiene límite de tokens)
     transcript = req.transcript
-    if len(transcript) > 12000:
-        transcript = transcript[:6000] + "\n\n[...] [Parte omitida por longitud] [...] \n\n" + transcript[-6000:]
+    # Diarization necesita más contexto para detectar nombres al principio y al final
+    max_chars = 16000 if req.mode == "diarization" else 12000
+    if len(transcript) > max_chars:
+        half = max_chars // 2
+        transcript = transcript[:half] + "\n\n[...] [Parte omitida por longitud] [...] \n\n" + transcript[-half:]
 
     prompt = JOURNALIST_PROMPTS[req.mode].format(transcript=transcript)
 
@@ -1475,7 +1774,7 @@ async def analyze_transcript(req: AnalyzeRequest):
             response = local_groq.chat.completions.create(
                 model=model,
                 messages=[{"role": "user", "content": prompt}],
-                max_tokens=1000,
+                max_tokens=6000 if req.mode == "diarization" else 1500,
                 temperature=0.3
             )
             result = response.choices[0].message.content.strip()
@@ -1499,6 +1798,90 @@ async def analyze_transcript(req: AnalyzeRequest):
         status_code=429,
         detail="⚠️ Límite de uso de Groq alcanzado por hoy. Podés:\n1. Esperá unos minutos e intentá de nuevo.\n2. Configurar tu propia API key de Groq en Configuración (gratis en console.groq.com)."
     )
+
+
+@app.post("/api/quotes")
+async def extract_quotes_with_times(req: QuotesRequest):
+    """
+    Extrae citas textuales de la transcripción con sus tiempos de entrada/salida,
+    buscándolas en los segmentos del video.
+    """
+    local_groq = get_local_groq(req.groq_api_key)
+    if not local_groq:
+        raise HTTPException(status_code=503, detail="Groq API no configurada.")
+
+    if len(req.transcript.strip()) < 50:
+        raise HTTPException(status_code=400, detail="La transcripción es demasiado corta.")
+
+    # Usar el prompt de citas (que ahora pide JSON)
+    transcript = req.transcript
+    if len(transcript) > 12000:
+        transcript = transcript[:6000] + "\n\n[...]\n\n" + transcript[-6000:]
+
+    prompt = JOURNALIST_PROMPTS["quotes"].format(transcript=transcript)
+
+    MODELS_TO_TRY = ["llama-3.3-70b-versatile", "llama-3.1-8b-instant"]
+    raw_result = None
+
+    for model in MODELS_TO_TRY:
+        try:
+            response = local_groq.chat.completions.create(
+                model=model,
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=2000,
+                temperature=0.3,
+                response_format={"type": "json_object"} if "70b" in model else None,
+            )
+            raw_result = response.choices[0].message.content.strip()
+            break
+        except Exception as e:
+            err_str = str(e)
+            if "rate_limit_exceeded" in err_str or "429" in err_str:
+                continue
+            raise HTTPException(status_code=500, detail=f"Error al analizar: {err_str}")
+
+    if not raw_result:
+        raise HTTPException(status_code=429, detail="Límite de Groq alcanzado. Esperá unos minutos.")
+
+    # Parsear el JSON de la IA (puede venir envuelto en ```json ... ```)
+    try:
+        clean = re.sub(r'^```(?:json)?\s*', '', raw_result.strip(), flags=re.MULTILINE)
+        clean = re.sub(r'```\s*$', '', clean.strip(), flags=re.MULTILINE).strip()
+        # La IA a veces devuelve {"quotes": [...]} en vez de [...]
+        parsed = json.loads(clean)
+        if isinstance(parsed, dict):
+            # Buscar la primera lista en los valores
+            for v in parsed.values():
+                if isinstance(v, list):
+                    parsed = v
+                    break
+        quotes_list = parsed if isinstance(parsed, list) else []
+    except Exception as parse_err:
+        logger.warning(f"No se pudo parsear JSON de citas: {parse_err}. Raw: {raw_result[:300]}")
+        # Fallback: devolver texto plano sin tiempos
+        return {"quotes": [], "raw": raw_result, "error": "No se pudo parsear el formato de citas."}
+
+    # Enriquecer cada cita con tiempos buscando en los segmentos
+    enriched = []
+    for item in quotes_list:
+        if not isinstance(item, dict):
+            continue
+        quote_text = item.get("quote", "").strip()
+        note_text  = item.get("note", "").strip()
+        search_kw  = item.get("search", quote_text[:40]).strip()
+
+        times = find_segment_times_for_quote(search_kw, req.segments)
+
+        enriched.append({
+            "quote":  quote_text,
+            "note":   note_text,
+            "search": search_kw,
+            "start":  times.get("start"),
+            "end":    times.get("end"),
+            "has_time": bool(times),
+        })
+
+    return {"quotes": enriched, "total": len(enriched)}
 
 
 # --- SERVIDO DE FRONTEND ---
@@ -1540,20 +1923,55 @@ else:
 
 @app.post("/api/system/update-app")
 async def update_app(request: Request):
-    """Ejecuta git pull para traer los últimos cambios del código."""
+    """Ejecuta git pull para traer los últimos cambios del código, protegiendo archivos de configuración locales."""
     # Protección simple: si ADMIN_TOKEN está configurado, requerir header X-ADMIN-TOKEN
     admin_token = os.environ.get('ADMIN_TOKEN')
     if admin_token:
         provided = request.headers.get('X-ADMIN-TOKEN') or request.query_params.get('admin_token')
         if not provided or provided != admin_token:
             raise HTTPException(status_code=403, detail="Se requiere token de administrador para esta operación.")
+    
+    # Respaldar archivos de configuración locales para evitar que git pull los borre o sobreescriba
+    config_backups = {}
+    files_to_backup = [
+        (ROOT_DIR, ".env"),
+        (ROOT_DIR, "cookies.txt"),
+        (BASE_DIR, "cookies.txt"),
+        (BASE_DIR, "cookies_ig.txt")
+    ]
+    for folder, fname in files_to_backup:
+        fpath = os.path.join(folder, fname)
+        if os.path.exists(fpath):
+            try:
+                with open(fpath, "rb") as f:
+                    config_backups[fpath] = f.read()
+                logger.info(f"Respaldo temporal creado para: {fpath}")
+            except Exception as ex:
+                logger.warning(f"No se pudo respaldar {fpath}: {ex}")
+
+    pull_error = None
+    pull_stdout = ""
     try:
         import subprocess
         # Intentar git pull
         result = subprocess.run(["git", "pull", "origin", "main"], capture_output=True, text=True, check=True)
-        return {"status": "ok", "message": "Aplicación actualizada con éxito.", "output": result.stdout}
+        pull_stdout = result.stdout
     except Exception as e:
-        return JSONResponse(status_code=500, content={"error": f"Error al actualizar Git: {str(e)}"})
+        pull_error = e
+
+    # Restaurar siempre los archivos de configuración respaldados
+    for fpath, content in config_backups.items():
+        try:
+            with open(fpath, "wb") as f:
+                f.write(content)
+            logger.info(f"Restaurado archivo de configuración/cookie en: {fpath}")
+        except Exception as ex:
+            logger.warning(f"No se pudo restaurar {fpath}: {ex}")
+
+    if pull_error:
+        return JSONResponse(status_code=500, content={"error": f"Error al actualizar Git: {str(pull_error)}"})
+
+    return {"status": "ok", "message": "Aplicación actualizada con éxito.", "output": pull_stdout}
 
 @app.post("/api/system/update-engine")
 async def update_engine(request: Request):
@@ -1588,7 +2006,18 @@ async def reset_system(request: Request):
         if os.path.exists(DOWNLOAD_FOLDER):
             shutil.rmtree(DOWNLOAD_FOLDER)
             os.makedirs(DOWNLOAD_FOLDER)
-        return {"status": "ok", "message": "Sistema reseteado (descargas limpias)."}
+        
+        # 2. Limpiar cache de la base de datos
+        try:
+            conn = sqlite3.connect(DB_FILE)
+            c = conn.cursor()
+            c.execute("DELETE FROM transcripts")
+            conn.commit()
+            conn.close()
+        except Exception as db_err:
+            logger.exception(f"Error al limpiar la base de datos en reset: {db_err}")
+
+        return {"status": "ok", "message": "Sistema reseteado (descargas y caché limpias)."}
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e)})
 

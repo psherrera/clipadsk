@@ -17,7 +17,7 @@
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
     <link rel="apple-touch-icon" href="icon.svg">
     
-    <link rel="stylesheet" href="style.css?v=3.3">
+    <link rel="stylesheet" href="style.css?v=3.7">
     <!-- JSZip: crear archivos .zip en el navegador sin backend -->
     <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
 
@@ -381,6 +381,9 @@
                         <h4 class="font-extrabold text-white text-lg">Transcripción con IA</h4>
                     </div>
                     <div class="flex gap-2">
+                        <button id="download-srt-btn" class="hidden bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-300 px-4 py-2 rounded-lg text-xs font-bold transition-all flex items-center gap-2">
+                            <span class="material-symbols-outlined text-sm">subtitles</span> DESCARGAR SRT
+                        </button>
                         <button id="copy-transcript-btn" class="bg-accent/20 hover:bg-accent/30 text-accent px-4 py-2 rounded-lg text-xs font-bold transition-all flex items-center gap-2">
                             <span class="material-symbols-outlined text-sm">content_copy</span> COPIAR
                         </button>
@@ -422,7 +425,7 @@
 
     <!-- Bottom Nav eliminado ya que se integró en el header -->
 
-    <script src="main.js?v=3.3" defer></script>
+    <script src="main.js?v=3.7" defer></script>
     <script>
         if ('serviceWorker' in navigator) {
             window.addEventListener('load', () => {

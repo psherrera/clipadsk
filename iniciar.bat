@@ -11,18 +11,21 @@ echo ==========================================
 echo.
 
 :: ── Verificar Actualizaciones (Git) ──────────────────────────
-if exist ".git" (
-    echo [+] Buscando actualizaciones en el repositorio...
-    git pull origin main
-    echo.
-)
+:: Desactivado en el inicio para no sobreescribir configuraciones locales ni API keys/cookies.
+:: La actualización ahora se puede realizar desde la interfaz web de la aplicación en ejecución.
+:: if exist ".git" (
+::     echo [+] Buscando actualizaciones en el repositorio...
+::     git pull origin main
+::     echo.
+:: )
 
 :: ── Actualizar yt-dlp ────────────────────────────────────────
-if exist "yt-dlp.exe" (
-    echo [+] Verificando version del motor de descarga...
-    yt-dlp.exe -U
-    echo.
-)
+:: Desactivado en el inicio para evitar lentitud y bloqueos. Se actualiza desde la interfaz.
+:: if exist "yt-dlp.exe" (
+::     echo [+] Verificando version del motor de descarga...
+::     yt-dlp.exe -U
+::     echo.
+:: )
 
 
 :: ── Verificar Python ─────────────────────────────────────────

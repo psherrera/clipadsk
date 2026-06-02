@@ -35,6 +35,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const transcriptContent    = document.getElementById('transcript-content');
     const copyTranscriptBtn    = document.getElementById('copy-transcript-btn');
     const downloadTxtBtn       = document.getElementById('download-txt-btn');
+    const downloadSrtBtn       = document.getElementById('download-srt-btn');
     const appSubtitle          = document.getElementById('app-subtitle');
     const tabTitle             = document.getElementById('tab-title');
     const inputIcon            = document.getElementById('input-icon');
@@ -59,7 +60,9 @@ document.addEventListener('DOMContentLoaded', () => {
     let currentTab             = 'youtube';
 
     let currentTranscript      = '';
+    let currentSrt             = '';
     let currentMaxResThumbnail = '';
+    let currentSegments        = [];
 
     // ─── PLATFORM DETECTION ─────────────────────────────────────────────────────
     const PLATFORMS = {
@@ -165,12 +168,20 @@ document.addEventListener('DOMContentLoaded', () => {
                 ${item.transcript ? `
                 <p class="text-slate-400 text-xs leading-relaxed line-clamp-2">${preview}</p>
                 <div class="flex gap-2 flex-wrap">
+                    <button onclick="window._hist.load(${i})" class="text-[10px] font-bold uppercase tracking-widest bg-primary/20 text-primary px-3 py-1.5 rounded-full hover:bg-primary/30 transition-all flex items-center gap-1">
+                        <span class="material-symbols-outlined text-xs">visibility</span> Ver
+                    </button>
                     <button onclick="window._hist.copy(${i})" class="text-[10px] font-bold uppercase tracking-widest bg-accent/20 text-accent px-3 py-1.5 rounded-full hover:bg-accent/30 transition-all flex items-center gap-1">
                         <span class="material-symbols-outlined text-xs">content_copy</span> Copiar
                     </button>
                     <button onclick="window._hist.download(${i})" class="text-[10px] font-bold uppercase tracking-widest bg-white/5 text-slate-300 px-3 py-1.5 rounded-full hover:bg-white/10 transition-all flex items-center gap-1">
                         <span class="material-symbols-outlined text-xs">download</span> .txt
                     </button>
+                    ${item.srt ? `
+                    <button onclick="window._hist.downloadSrt(${i})" class="text-[10px] font-bold uppercase tracking-widest bg-emerald-500/10 text-emerald-300 px-3 py-1.5 rounded-full hover:bg-emerald-500/25 transition-all flex items-center gap-1">
+                        <span class="material-symbols-outlined text-xs">subtitles</span> .srt
+                    </button>
+                    ` : ''}
                     <button onclick="window._hist.remove(${i})" class="text-[10px] font-bold uppercase tracking-widest bg-red-500/10 text-red-400 px-3 py-1.5 rounded-full hover:bg-red-500/20 transition-all flex items-center gap-1 ml-auto">
                         <span class="material-symbols-outlined text-xs">delete</span>
                     </button>
@@ -180,6 +191,27 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     window._hist = {
+        load: (i) => {
+            const item = getHistory()[i];
+            if (!item) return;
+            switchTab(item.platform || 'youtube');
+            if (videoUrlInput && !item.url.startsWith('whatsapp:') && !item.url.startsWith('video:')) {
+                videoUrlInput.value = item.url;
+                clearUrlBtn?.classList.remove('hidden');
+            }
+            currentTranscript = item.transcript;
+            currentSrt = item.srt || '';
+            currentSegments = item.segments || [];
+            
+            renderTranscript(item.transcript, 'cache', item.srt, item.segments);
+            downloadTxtBtn?.classList.remove('hidden');
+            
+            if (titleEl) titleEl.textContent = item.title || 'Transcripción';
+            if (videoInfoCard && !item.url.startsWith('whatsapp:') && !item.url.startsWith('video:')) {
+                videoInfoCard.classList.remove('hidden');
+            }
+            showToast('Transcripción cargada', 'success');
+        },
         copy: (i) => {
             const item = getHistory()[i];
             if (item?.transcript) { navigator.clipboard.writeText(item.transcript); showToast('Copiado', 'success'); }
@@ -192,6 +224,16 @@ document.addEventListener('DOMContentLoaded', () => {
             a.href = URL.createObjectURL(blob);
             a.download = `${(item.title || 'transcripcion').substring(0, 30)}.txt`;
             a.click();
+        },
+        downloadSrt: (i) => {
+            const item = getHistory()[i];
+            if (!item?.srt) return;
+            const blob = new Blob([item.srt], { type: 'text/srt;charset=utf-8' });
+            const a = document.createElement('a');
+            a.href = URL.createObjectURL(blob);
+            a.download = `${(item.title || 'subtitulos').substring(0, 30)}.srt`;
+            a.click();
+            URL.revokeObjectURL(a.href);
         },
         remove: (i) => {
             const history = getHistory();
@@ -242,9 +284,14 @@ document.addEventListener('DOMContentLoaded', () => {
         const chatInput = document.getElementById('chat-input');
         if (chatInput) chatInput.value = '';
 
+        // Eliminar el panel de recorte inline para que se recree en la próxima transcripción
+        document.getElementById('inline-clip-tool')?.remove();
+
         // Estado interno
         currentTranscript = '';
+        currentSrt = '';
         currentMaxResThumbnail = '';
+        downloadSrtBtn?.classList.add('hidden');
 
         if (cfg) {
             if (tabTitle)    tabTitle.textContent    = tab === 'history' ? 'Configuracion y Guardados' : `${cfg.label} Transcriptor`;
@@ -342,6 +389,8 @@ document.addEventListener('DOMContentLoaded', () => {
         transcriptSection?.classList.add('hidden');
         showTranscriptBtn?.classList.add('hidden');
         downloadTxtBtn?.classList.add('hidden');
+        downloadSrtBtn?.classList.add('hidden');
+        currentSrt = '';
         
         const chatInputBox = document.getElementById('chat-input');
         if (chatInputBox) chatInputBox.value = '';
@@ -549,10 +598,10 @@ document.addEventListener('DOMContentLoaded', () => {
 
 
             currentTranscript = data.transcript;
-            renderTranscript(data.transcript, data.method);
+            renderTranscript(data.transcript, data.method, data.srt, data.segments);
             downloadTxtBtn?.classList.remove('hidden');
 
-            saveToHistory({ url, platform: detectPlatformFromUrl(url), title: titleEl.textContent || url, transcript: data.transcript });
+            saveToHistory({ url, platform: detectPlatformFromUrl(url), title: titleEl.textContent || url, transcript: data.transcript, srt: data.srt, segments: data.segments });
 
         } catch (err) {
             clearInterval(pollInterval);
@@ -563,8 +612,68 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     });
 
-    function renderTranscript(text, method) {
-        const methodLabels = { subtitles: 'Subtítulos directos', groq_whisper_v3: 'IA Whisper v3 (Groq)', groq_whisper_v3_file: 'IA Whisper v3 - Archivo', cache: 'Caché local' };
+    downloadSrtBtn?.addEventListener('click', () => {
+        if (!currentSrt) return;
+        const title = (titleEl?.textContent || 'Subtitulos').trim().substring(0, 60);
+        const safeTitle = title.replace(/[/\\?%*:|"<>]/g, '-');
+        const blob = new Blob([currentSrt], { type: 'text/srt;charset=utf-8' });
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = `${safeTitle}.srt`;
+        a.click();
+        URL.revokeObjectURL(a.href);
+    });
+
+    function formatTimestamp(sec) {
+        const m = Math.floor(sec / 60);
+        const s = Math.floor(sec % 60);
+        return `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
+    }
+
+    function formatHHMMSS(sec) {
+        const h = Math.floor(sec / 3600);
+        const m = Math.floor((sec % 3600) / 60);
+        const s = Math.floor(sec % 60);
+        const mm = m.toString().padStart(2, '0');
+        const ss = s.toString().padStart(2, '0');
+        if (h > 0) {
+            return `${h.toString().padStart(2, '0')}:${mm}:${ss}`;
+        }
+        return `${mm}:${ss}`;
+    }
+
+    function deduplicateSegments(segs) {
+        if (!segs || segs.length === 0) return [];
+        const result = [];
+        let prevText = "";
+        for (const seg of segs) {
+            const cleanText = seg.text.trim();
+            if (!cleanText) continue;
+            // Only skip if the segment is an EXACT duplicate of the previous one
+            if (prevText && cleanText === prevText) continue;
+            // Skip only if it's a very short substring already contained in the previous (rolling subs artifact)
+            if (prevText && cleanText.length < 25 && prevText.includes(cleanText)) continue;
+            result.push(seg);
+            prevText = cleanText;
+        }
+        return result;
+    }
+
+    function renderTranscript(text, method, srt = '', segments = []) {
+        currentSrt = srt || '';
+        currentSegments = segments || [];
+        if (currentSrt) {
+            downloadSrtBtn?.classList.remove('hidden');
+        } else {
+            downloadSrtBtn?.classList.add('hidden');
+        }
+        const methodLabels = { 
+            subtitles: 'Subtítulos directos', 
+            groq_whisper_v3: 'IA Whisper v3 (Groq)', 
+            groq_whisper_v3_file: 'IA Whisper v3 - Archivo', 
+            local_whisper: 'IA Whisper Local', 
+            cache: 'Caché local' 
+        };
         
         // 1. Inyectar herramientas ARRIBA (antes del texto)
         const toolsContainer = document.getElementById('journalist-tools-wrapper');
@@ -576,13 +685,66 @@ document.addEventListener('DOMContentLoaded', () => {
         // 2. Mostrar la sección de transcripción si está oculta
         transcriptSection?.classList.remove('hidden');
 
-        // 3. Texto de transcripción con etiqueta de método
+        // 3. Crear cabecera con etiqueta de método y selectores de vista
+        const methodLabel = methodLabels[method] || method;
+        const showSelector = currentSegments && currentSegments.length > 0;
+        
         transcriptContent.innerHTML = `
-            <div class="flex items-center gap-2 text-[10px] font-bold text-slate-500 uppercase tracking-widest bg-white/5 py-1 px-3 rounded-full w-fit mb-4">
-                <span class="material-symbols-outlined text-xs">auto_awesome</span>
-                ${methodLabels[method] || method}
+            <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-4 border-b border-white/5 pb-4 shrink-0">
+                <div class="flex items-center gap-2 text-[10px] font-bold text-slate-500 uppercase tracking-widest bg-white/5 py-1.5 px-3 rounded-full w-fit">
+                    <span class="material-symbols-outlined text-xs">auto_awesome</span>
+                    ${methodLabel}
+                </div>
+                ${showSelector ? `
+                <div class="flex bg-slate-950/60 p-1 rounded-xl border border-white/5 w-fit">
+                    <button id="view-mode-clean" class="px-3 py-1.5 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 bg-primary text-white">
+                        <span class="material-symbols-outlined text-sm">notes</span> Texto Limpio
+                    </button>
+                    <button id="view-mode-interactive" class="px-3 py-1.5 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 text-slate-400 hover:text-slate-200">
+                        <span class="material-symbols-outlined text-sm">content_cut</span> Recortar por Texto
+                    </button>
+                </div>
+                ` : ''}
             </div>
-            <div class="text-slate-300 text-sm leading-relaxed">${formatAIResponse(text)}</div>`;
+            <div id="transcript-text-container" class="text-slate-300 text-sm leading-relaxed">
+                ${formatAIResponse(text)}
+            </div>`;
+
+        // Añadir manejadores de evento para el selector de vistas
+        if (showSelector) {
+            const btnClean = document.getElementById('view-mode-clean');
+            const btnInteractive = document.getElementById('view-mode-interactive');
+            const textContainer = document.getElementById('transcript-text-container');
+
+            // Inject inline clip tool inside transcript section (visible when in interactive mode)
+            renderInlineClipTool();
+            
+            btnClean?.addEventListener('click', () => {
+                btnClean.className = "px-3 py-1.5 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 bg-primary text-white";
+                btnInteractive.className = "px-3 py-1.5 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 text-slate-400 hover:text-slate-200";
+                textContainer.innerHTML = formatAIResponse(text);
+                document.getElementById('inline-clip-tool')?.classList.add('hidden');
+            });
+            
+            btnInteractive?.addEventListener('click', () => {
+                btnInteractive.className = "px-3 py-1.5 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 bg-primary text-white";
+                btnClean.className = "px-3 py-1.5 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 text-slate-400 hover:text-slate-200";
+                
+                // Deduplicar segmentos antes de renderizar
+                const cleanSegs = deduplicateSegments(currentSegments);
+                textContainer.innerHTML = `<div class="segment-list">${cleanSegs.map(seg => {
+                    const timeLabel = formatTimestamp(seg.start);
+                    const timeEnd   = formatTimestamp(seg.end);
+                    return `<div class="interactive-segment" data-start="${seg.start}" data-end="${seg.end}" title="Click: fijar inicio/fin del recorte">
+                        <span class="interactive-segment-time">${timeLabel}</span>
+                        <span class="interactive-segment-text">${seg.text}</span>
+                    </div>`;
+                }).join('')}</div>`;
+
+                // Show inline clip tool
+                document.getElementById('inline-clip-tool')?.classList.remove('hidden');
+            });
+        }
 
         // 4. Mostrar sección de chat
         document.getElementById('ai-chat-section')?.classList.remove('hidden');
@@ -590,6 +752,153 @@ document.addEventListener('DOMContentLoaded', () => {
         const chatHistory = document.getElementById('chat-history');
         if (chatHistory) chatHistory.innerHTML = '';
     }
+
+    /** Injects (or updates) the inline clip tool inside the transcript section */
+    function renderInlineClipTool() {
+        if (document.getElementById('inline-clip-tool')) return; // already exists
+        const clipHtml = `
+        <div id="inline-clip-tool" class="hidden mt-3 p-4 rounded-2xl border border-primary/20 bg-primary/5 space-y-3 shrink-0">
+            <div class="flex items-center gap-2 text-[10px] font-bold text-primary uppercase tracking-widest">
+                <span class="material-symbols-outlined text-sm">content_cut</span>
+                Selector de Recorte — haz clic en una frase para fijar los tiempos
+            </div>
+            <div class="grid grid-cols-2 gap-3">
+                <div class="relative">
+                    <span class="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500 text-[11px] font-bold">Desde:</span>
+                    <input type="text" id="inline-clip-start" placeholder="00:00" autocomplete="off"
+                        class="w-full bg-slate-900/60 border border-white/10 rounded-xl py-2.5 pl-14 pr-3 text-sm text-slate-200 focus:ring-2 focus:ring-primary outline-none font-mono">
+                </div>
+                <div class="relative">
+                    <span class="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500 text-[11px] font-bold">Hasta:</span>
+                    <input type="text" id="inline-clip-end" placeholder="00:00" autocomplete="off"
+                        class="w-full bg-slate-900/60 border border-white/10 rounded-xl py-2.5 pl-14 pr-3 text-sm text-slate-200 focus:ring-2 focus:ring-primary outline-none font-mono">
+                </div>
+            </div>
+            <div class="flex gap-2">
+                <button id="inline-clip-apply-btn" class="flex-1 bg-primary hover:bg-primary/80 text-white font-bold py-2.5 rounded-xl text-sm flex items-center justify-center gap-2 transition-all active:scale-95">
+                    <span class="material-symbols-outlined text-base">content_cut</span> Aplicar al descargador
+                </button>
+                <button id="inline-clip-clear-btn" class="bg-white/5 hover:bg-white/10 border border-white/10 text-slate-400 font-bold py-2.5 px-4 rounded-xl text-sm transition-all">
+                    Limpiar
+                </button>
+            </div>
+        </div>`;
+        // Inject after the transcript-content div, before the ai-chat-section
+        const aiChatSection = document.getElementById('ai-chat-section');
+        if (aiChatSection) {
+            aiChatSection.insertAdjacentHTML('beforebegin', clipHtml);
+        } else {
+            transcriptSection?.insertAdjacentHTML('beforeend', clipHtml);
+        }
+
+        // Wire buttons
+        document.getElementById('inline-clip-apply-btn')?.addEventListener('click', () => {
+            const startVal = document.getElementById('inline-clip-start')?.value.trim();
+            const endVal = document.getElementById('inline-clip-end')?.value.trim();
+            const clipStart = document.getElementById('clip-start');
+            const clipEnd = document.getElementById('clip-end');
+            if (clipStart && startVal) clipStart.value = startVal;
+            if (clipEnd && endVal) clipEnd.value = endVal;
+            if (startVal || endVal) {
+                showToast(`Recorte fijado: ${startVal || '—'} → ${endVal || '—'}`, 'success');
+            } else {
+                showToast('Primero hacé clic en segmentos para fijar tiempos', 'info');
+            }
+        });
+        document.getElementById('inline-clip-clear-btn')?.addEventListener('click', () => {
+            const si = document.getElementById('inline-clip-start');
+            const ei = document.getElementById('inline-clip-end');
+            if (si) si.value = '';
+            if (ei) ei.value = '';
+            const clipStart = document.getElementById('clip-start');
+            const clipEnd = document.getElementById('clip-end');
+            if (clipStart) clipStart.value = '';
+            if (clipEnd) clipEnd.value = '';
+            showToast('Recorte limpiado', 'info');
+        });
+    }
+
+    // Segment actions menu listener
+    transcriptContent?.addEventListener('click', (e) => {
+        const segmentEl = e.target.closest('.interactive-segment');
+        if (!segmentEl) return;
+        
+        const start = parseFloat(segmentEl.dataset.start);
+        const end = parseFloat(segmentEl.dataset.end);
+        
+        // Remove existing menus
+        document.querySelectorAll('.segment-actions-menu').forEach(el => el.remove());
+        
+        // Create menu
+        const menu = document.createElement('div');
+        menu.className = 'segment-actions-menu';
+        
+        const startBtn = document.createElement('button');
+        startBtn.innerHTML = '<span class="material-symbols-outlined text-[14px]">play_arrow</span> Iniciar corte';
+        startBtn.onclick = () => {
+            const formattedStart = formatHHMMSS(start);
+            // Fill old clip input (YouTube tab)
+            const startInput = document.getElementById('clip-start');
+            if (startInput) { startInput.value = formattedStart; startInput.dispatchEvent(new Event('input')); }
+            // Fill inline clip input (Transcript panel)
+            const inlineStartInput = document.getElementById('inline-clip-start');
+            if (inlineStartInput) inlineStartInput.value = formattedStart;
+            // Visual highlight on this segment
+            document.querySelectorAll('.interactive-segment.selected-start').forEach(el => el.classList.remove('selected-start'));
+            segmentEl.classList.add('selected-start');
+            menu.remove();
+            showToast('Inicio fijado: ' + formattedStart, 'success');
+        };
+        
+        const endBtn = document.createElement('button');
+        endBtn.innerHTML = '<span class="material-symbols-outlined text-[14px]">stop</span> Finalizar corte';
+        endBtn.onclick = () => {
+            const formattedEnd = formatHHMMSS(end);
+            // Fill old clip input (YouTube tab)
+            const endInput = document.getElementById('clip-end');
+            if (endInput) { endInput.value = formattedEnd; endInput.dispatchEvent(new Event('input')); }
+            // Fill inline clip input (Transcript panel)
+            const inlineEndInput = document.getElementById('inline-clip-end');
+            if (inlineEndInput) inlineEndInput.value = formattedEnd;
+            // Visual highlight on this segment
+            document.querySelectorAll('.interactive-segment.selected-end').forEach(el => el.classList.remove('selected-end'));
+            segmentEl.classList.add('selected-end');
+            menu.remove();
+            showToast('Fin fijado: ' + formattedEnd, 'success');
+        };
+        
+        const copyBtn = document.createElement('button');
+        copyBtn.innerHTML = '<span class="material-symbols-outlined text-[14px]">content_copy</span> Copiar frase';
+        copyBtn.onclick = () => {
+            // Get the text from the dedicated text span, not the whole element (which includes the timestamp)
+            const textSpan = segmentEl.querySelector('.interactive-segment-text');
+            const cleanText = textSpan ? textSpan.textContent.trim() : segmentEl.textContent.replace(/^\d{1,2}:\d{2}\s*/, '').trim();
+            navigator.clipboard.writeText(cleanText);
+            menu.remove();
+            showToast('Frase copiada', 'success');
+        };
+        
+        menu.appendChild(startBtn);
+        menu.appendChild(endBtn);
+        menu.appendChild(copyBtn);
+        
+        // Position menu near the segment element
+        document.body.appendChild(menu);
+        const rect = segmentEl.getBoundingClientRect();
+        menu.style.left = `${rect.left + window.scrollX}px`;
+        menu.style.top = `${rect.bottom + window.scrollY + 5}px`;
+        
+        // Close menu when clicking outside
+        setTimeout(() => {
+            const closeMenu = (event) => {
+                if (!menu.contains(event.target)) {
+                    menu.remove();
+                    document.removeEventListener('click', closeMenu);
+                }
+            };
+            document.addEventListener('click', closeMenu);
+        }, 100);
+    });
 
     // ─── WHATSAPP FILE UPLOAD ────────────────────────────────────────────────────
     const waFileInput = document.getElementById('wa-file-input');
@@ -631,12 +940,13 @@ document.addEventListener('DOMContentLoaded', () => {
             if (!r.ok) throw new Error(data.detail || 'Error en la transcripcion');
 
             currentTranscript = data.transcript;
+            currentSrt = data.srt || '';
             
             // Usar la columna derecha (como YouTube)
-            renderTranscript(data.transcript, 'groq_whisper_v3_file');
+            renderTranscript(data.transcript, 'groq_whisper_v3_file', data.srt, data.segments);
             downloadTxtBtn?.classList.remove('hidden');
 
-            saveToHistory({ url: `whatsapp:${file.name}`, platform: 'whatsapp', title: file.name, transcript: data.transcript });
+            saveToHistory({ url: `whatsapp:${file.name}`, platform: 'whatsapp', title: file.name, transcript: data.transcript, srt: data.srt, segments: data.segments });
 
             if (waDropZone) waDropZone.innerHTML = `
                 <div class="flex flex-col items-center gap-2">
@@ -645,8 +955,6 @@ document.addEventListener('DOMContentLoaded', () => {
                     <p class="text-slate-500 text-xs">${file.name}</p>
                     <button onclick="document.getElementById('wa-file-input').click()" class="mt-2 text-[10px] font-bold text-primary uppercase border border-primary/20 px-3 py-1 rounded-full hover:bg-primary/10 transition-all">Subir otro</button>
                 </div>`;
-
-            saveToHistory({ url: `whatsapp:${file.name}`, platform: 'whatsapp', title: file.name, transcript: data.transcript });
 
             if (waDropZone) waDropZone.innerHTML = `
                 <span class="material-symbols-outlined text-primary text-4xl mb-3">mic</span>
@@ -729,12 +1037,13 @@ document.addEventListener('DOMContentLoaded', () => {
             });
 
             currentTranscript = response.transcript;
+            currentSrt = response.srt || '';
 
             // Usar la columna derecha (como YouTube)
-            renderTranscript(response.transcript, 'groq_whisper_v3_file');
+            renderTranscript(response.transcript, 'groq_whisper_v3_file', response.srt, response.segments);
             downloadTxtBtn?.classList.remove('hidden');
 
-            saveToHistory({ url: `video:${file.name}`, platform: 'video', title: file.name, transcript: response.transcript });
+            saveToHistory({ url: `video:${file.name}`, platform: 'video', title: file.name, transcript: response.transcript, srt: response.srt, segments: response.segments });
             
             vidProgress?.classList.add('hidden');
             if (vidDropZone) vidDropZone.innerHTML = `
@@ -772,7 +1081,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 <h5 class="font-bold text-white text-sm">Herramientas periodísticas</h5>
                 <span class="ml-auto text-[10px] font-bold text-slate-600 uppercase tracking-widest">IA</span>
             </div>
-            <div class="grid grid-cols-2 sm:grid-cols-4 gap-2 mb-4">
+            <div class="grid grid-cols-2 sm:grid-cols-5 gap-2 mb-4">
                 <button data-tool="summary" data-prefix="${prefix}" class="j-tool-btn group bg-primary/10 hover:bg-primary/25 border border-primary/20 hover:border-primary/40 py-3.5 px-3 rounded-xl text-slate-200 text-sm font-bold flex flex-col items-center gap-1.5 transition-all active:scale-95">
                     <span class="material-symbols-outlined text-xl text-primary group-hover:scale-110 transition-transform">summarize</span>
                     <span>Resumen</span>
@@ -787,7 +1096,11 @@ document.addEventListener('DOMContentLoaded', () => {
                 </button>
                 <button data-tool="angle" data-prefix="${prefix}" class="j-tool-btn group bg-emerald-500/10 hover:bg-emerald-500/20 border border-emerald-500/20 hover:border-emerald-500/40 py-3.5 px-3 rounded-xl text-slate-200 text-sm font-bold flex flex-col items-center gap-1.5 transition-all active:scale-95">
                     <span class="material-symbols-outlined text-xl text-emerald-400 group-hover:scale-110 transition-transform">lightbulb</span>
-                    <span>Ángulos de nota</span>
+                    <span>Ángulos</span>
+                </button>
+                <button data-tool="diarization" data-prefix="${prefix}" class="j-tool-btn group bg-purple-500/10 hover:bg-purple-500/20 border border-purple-500/20 hover:border-purple-500/40 py-3.5 px-3 rounded-xl text-slate-200 text-sm font-bold flex flex-col items-center gap-1.5 transition-all active:scale-95">
+                    <span class="material-symbols-outlined text-xl text-purple-400 group-hover:scale-110 transition-transform">group</span>
+                    <span>Hablantes</span>
                 </button>
             </div>
             <div id="${prefix}-ai-output" class="hidden mt-2 bg-black/30 rounded-2xl p-5 border border-white/5 fade-in"></div>
@@ -810,12 +1123,20 @@ document.addEventListener('DOMContentLoaded', () => {
         const outputEl = document.getElementById(`${prefix}-ai-output`);
         if (!outputEl) return;
 
+        // ── Citas: endpoint especial con tiempos ──────────────────────────────
+        if (mode === 'quotes') {
+            await runQuotesWithTimes(outputEl, prefix);
+            return;
+        }
+
+        // ── Resto de herramientas: flujo genérico ─────────────────────────────
         const cfg = {
             summary : { label: 'Resumen ejecutivo',  icon: 'summarize',    color: 'text-primary' },
-            quotes  : { label: 'Citas textuales',    icon: 'format_quote', color: 'text-accent' },
             data    : { label: 'Datos duros',        icon: 'data_object',  color: 'text-orange-400' },
             angle   : { label: 'Ángulos de nota',    icon: 'lightbulb',    color: 'text-emerald-400' },
+            diarization: { label: 'Identificación de hablantes', icon: 'group', color: 'text-purple-400' },
         }[mode];
+        if (!cfg) return;
 
         outputEl.classList.remove('hidden');
         outputEl.innerHTML = `
@@ -845,27 +1166,157 @@ document.addEventListener('DOMContentLoaded', () => {
                 <div class="ai-result-text text-slate-300 text-sm leading-relaxed">${formatAIResponse(data.result)}</div>`;
 
         } catch (err) {
-            const isRateLimit = err.message.includes('429') || err.message.includes('Límite') || err.message.includes('rate_limit');
-            outputEl.innerHTML = isRateLimit
-                ? `<div class="flex flex-col gap-3">
-                    <div class="flex items-start gap-3">
-                        <span class="material-symbols-outlined text-amber-400 text-xl flex-shrink-0">warning</span>
-                        <div>
-                            <p class="font-bold text-amber-300 text-sm mb-1">Límite de Groq alcanzado</p>
-                            <p class="text-slate-400 text-xs leading-relaxed">Alcanzaste el límite de tokens gratuitos por hoy. Podés:</p>
-                        </div>
-                    </div>
-                    <ul class="text-xs text-slate-400 space-y-1 pl-4">
-                        <li>• Esperá unos minutos e intentá de nuevo</li>
-                        <li>• Configurá tu propia API key en <strong class="text-primary cursor-pointer" onclick="document.querySelector('[data-tab=history]')?.click()">Configuración →</strong></li>
-                    </ul>
-                   </div>`
-                : `<div class="flex items-start gap-2">
-                    <span class="material-symbols-outlined text-red-400 text-base flex-shrink-0">error</span>
-                    <p class="text-red-400 text-xs">${err.message}</p>
-                  </div>`;
+            renderAnalyzeError(outputEl, err);
         }
     });
+
+    /** Llama a /api/quotes y renderiza las cards con tiempos y botones de recorte */
+    async function runQuotesWithTimes(outputEl, prefix) {
+        outputEl.classList.remove('hidden');
+        outputEl.innerHTML = `
+            <div class="flex items-center gap-2 mb-3">
+                <span class="material-symbols-outlined text-base text-accent">format_quote</span>
+                <span class="font-bold text-white text-sm">Citas textuales</span>
+                <div class="ml-auto w-4 h-4 border-2 border-slate-700 border-t-accent rounded-full animate-spin"></div>
+            </div>
+            <p class="text-slate-500 text-xs animate-pulse">Buscando las mejores citas con IA...</p>`;
+
+        try {
+            const reqBody = {
+                transcript: currentTranscript,
+                segments: currentSegments || [],
+                groq_api_key: localStorage.getItem(GROQ_KEY_STORE) || undefined
+            };
+            const r    = await fetch(`${API_BASE}/quotes`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(reqBody) });
+            const data = await r.json();
+            if (!r.ok) throw new Error(data.detail || 'Error en citas');
+
+            renderQuoteCards(outputEl, data.quotes || [], prefix);
+
+        } catch (err) {
+            renderAnalyzeError(outputEl, err);
+        }
+    }
+
+    /** Renders quote cards inside outputEl */
+    function renderQuoteCards(outputEl, quotes, prefix) {
+        if (!quotes.length) {
+            outputEl.innerHTML = `<p class="text-slate-500 text-xs">No se encontraron citas destacables.</p>`;
+            return;
+        }
+
+        const cardsHtml = quotes.map((q, i) => {
+            const hasTime = q.has_time && q.start != null;
+            const startFmt = hasTime ? formatHHMMSS(q.start) : null;
+            const endFmt   = hasTime ? formatHHMMSS(q.end)   : null;
+            const timeBadge = hasTime
+                ? `<div class="quote-time-badge">
+                    <span class="material-symbols-outlined text-[13px]">schedule</span>
+                    ${startFmt} → ${endFmt}
+                   </div>`
+                : `<div class="quote-time-badge quote-time-unknown">
+                    <span class="material-symbols-outlined text-[13px]">schedule</span>
+                    Tiempo no localizado
+                   </div>`;
+
+            const clipBtn = hasTime
+                ? `<button class="quote-clip-btn" data-start="${q.start}" data-end="${q.end}" title="Fijar este recorte">
+                    <span class="material-symbols-outlined text-[13px]">content_cut</span> Recortar
+                   </button>`
+                : '';
+
+            return `
+            <div class="quote-card">
+                <div class="quote-index">Cita ${i + 1}</div>
+                <blockquote class="quote-text">&ldquo;${q.quote}&rdquo;</blockquote>
+                <p class="quote-note">${q.note}</p>
+                <div class="quote-actions">
+                    ${timeBadge}
+                    <div class="quote-buttons">
+                        ${clipBtn}
+                        <button class="quote-copy-btn" data-quote="${q.quote.replace(/"/g, '&quot;')}">
+                            <span class="material-symbols-outlined text-[13px]">content_copy</span> Copiar
+                        </button>
+                    </div>
+                </div>
+            </div>`;
+        }).join('');
+
+        outputEl.innerHTML = `
+            <div class="flex items-center justify-between mb-4">
+                <div class="flex items-center gap-2">
+                    <span class="material-symbols-outlined text-base text-accent">format_quote</span>
+                    <span class="font-bold text-white text-sm">Citas textuales</span>
+                    <span class="text-[10px] text-slate-500 font-bold bg-white/5 px-2 py-0.5 rounded-full">${quotes.length} citas</span>
+                </div>
+                <button class="quotes-refresh-btn" title="Generar nuevas citas">
+                    <span class="material-symbols-outlined text-[15px]">refresh</span> Nuevas citas
+                </button>
+            </div>
+            <div class="quote-cards-list">${cardsHtml}</div>`;
+
+        // Wire refresh button
+        outputEl.querySelector('.quotes-refresh-btn')?.addEventListener('click', () => {
+            runQuotesWithTimes(outputEl, prefix);
+        });
+
+        // Wire clip buttons
+        outputEl.querySelectorAll('.quote-clip-btn').forEach(btn => {
+            btn.addEventListener('click', () => {
+                const start = parseFloat(btn.dataset.start);
+                const end   = parseFloat(btn.dataset.end);
+                const startFmt = formatHHMMSS(start);
+                const endFmt   = formatHHMMSS(end);
+                // Fill both clip inputs
+                const cs = document.getElementById('clip-start');
+                const ce = document.getElementById('clip-end');
+                if (cs) cs.value = startFmt;
+                if (ce) ce.value = endFmt;
+                const ics = document.getElementById('inline-clip-start');
+                const ice = document.getElementById('inline-clip-end');
+                if (ics) ics.value = startFmt;
+                if (ice) ice.value = endFmt;
+                // Show inline clip tool if hidden
+                document.getElementById('inline-clip-tool')?.classList.remove('hidden');
+                showToast(`Recorte fijado: ${startFmt} → ${endFmt}`, 'success');
+                // Visual feedback on the button
+                btn.innerHTML = '<span class="material-symbols-outlined text-[13px]">check</span> Fijado';
+                btn.classList.add('opacity-70');
+                setTimeout(() => { btn.innerHTML = '<span class="material-symbols-outlined text-[13px]">content_cut</span> Recortar'; btn.classList.remove('opacity-70'); }, 2500);
+            });
+        });
+
+        // Wire copy buttons
+        outputEl.querySelectorAll('.quote-copy-btn').forEach(btn => {
+            btn.addEventListener('click', () => {
+                navigator.clipboard.writeText(btn.dataset.quote || '');
+                btn.innerHTML = '<span class="material-symbols-outlined text-[13px]">check</span> Copiada';
+                setTimeout(() => { btn.innerHTML = '<span class="material-symbols-outlined text-[13px]">content_copy</span> Copiar'; }, 2000);
+            });
+        });
+    }
+
+    function renderAnalyzeError(outputEl, err) {
+        const isRateLimit = err.message.includes('429') || err.message.includes('Límite') || err.message.includes('rate_limit');
+        outputEl.innerHTML = isRateLimit
+            ? `<div class="flex flex-col gap-3">
+                <div class="flex items-start gap-3">
+                    <span class="material-symbols-outlined text-amber-400 text-xl flex-shrink-0">warning</span>
+                    <div>
+                        <p class="font-bold text-amber-300 text-sm mb-1">Límite de Groq alcanzado</p>
+                        <p class="text-slate-400 text-xs leading-relaxed">Alcanzaste el límite de tokens gratuitos por hoy. Podés:</p>
+                    </div>
+                </div>
+                <ul class="text-xs text-slate-400 space-y-1 pl-4">
+                    <li>• Esperá unos minutos e intentá de nuevo</li>
+                    <li>• Configurá tu propia API key en <strong class="text-primary cursor-pointer" onclick="document.querySelector('[data-tab=history]')?.click()">Configuración →</strong></li>
+                </ul>
+               </div>`
+            : `<div class="flex items-start gap-2">
+                <span class="material-symbols-outlined text-red-400 text-base flex-shrink-0">error</span>
+                <p class="text-red-400 text-xs">${err.message}</p>
+              </div>`;
+    }
 
     // ─── COPY / DOWNLOAD (card de video) ────────────────────────────────────────
 
@@ -988,6 +1439,10 @@ document.addEventListener('DOMContentLoaded', () => {
     function formatAIResponse(text) {
         if (!text) return "";
 
+        // 0. Pre-limpiar timestamps incrustados del tipo "02:14" que pueden
+        //    filtrarse desde subtítulos VTT de YouTube
+        text = text.replace(/\b\d{1,2}:\d{2}(?::\d{2})?(?:[.,]\d+)?\s*/g, '');
+
         // 1. Escapar HTML básico por seguridad
         let t = text
             .replace(/&/g, '&amp;')
@@ -1009,8 +1464,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 .filter(p => p)
                 .map(p => {
                     const inner = p.replace(/\n/g, '<br>');
-                    // Si es lista, envolver en <ul>
-                    if (inner.includes('<li')) return `<ul class="space-y-1 mb-3">${inner}</ul>`;
+                    if (inner.includes('<li')) return `<ul class="space-y-1 mb-4">${inner}</ul>`;
                     return `<p class="transcript-paragraph">${inner}</p>`;
                 })
                 .join('');
@@ -1024,24 +1478,25 @@ document.addEventListener('DOMContentLoaded', () => {
                 .join('');
         }
 
-        // 4. Texto plano sin saltos — intentar dividir por oraciones (. ! ?)
+        // 4. Texto plano sin saltos — dividir por oraciones de a 3 (más respirable)
         const sentences = t.match(/[^.!?]+[.!?]+["']?\s*/g);
-        if (sentences && sentences.length > 3) {
+        if (sentences && sentences.length > 2) {
             const paragraphs = [];
-            for (let i = 0; i < sentences.length; i += 4) {
-                const chunk = sentences.slice(i, i + 4).join('').trim();
+            const groupSize = sentences.length > 20 ? 3 : 4; // grupos más chicos para transcripciones largas
+            for (let i = 0; i < sentences.length; i += groupSize) {
+                const chunk = sentences.slice(i, i + groupSize).join('').trim();
                 if (chunk) paragraphs.push(`<p class="transcript-paragraph">${chunk}</p>`);
             }
             return paragraphs.join('');
         }
 
-        // 5. Último recurso: texto sin signos de puntuación (letra de canción, stream).
-        // Dividir en párrafos cada 70 palabras para que sea legible.
+        // 5. Último recurso: texto sin signos de puntuación.
+        // Dividir en párrafos cada 55 palabras.
         const words = t.split(/\s+/).filter(w => w);
-        if (words.length > 70) {
+        if (words.length > 55) {
             const paragraphs = [];
-            for (let i = 0; i < words.length; i += 70) {
-                const chunk = words.slice(i, i + 70).join(' ').trim();
+            for (let i = 0; i < words.length; i += 55) {
+                const chunk = words.slice(i, i + 55).join(' ').trim();
                 if (chunk) paragraphs.push(`<p class="transcript-paragraph">${chunk}</p>`);
             }
             return paragraphs.join('');

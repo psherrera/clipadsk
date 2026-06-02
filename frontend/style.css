@@ -159,17 +159,71 @@ input::placeholder {
     opacity: 0.5;
 }
 
-/* Transcript Specific Styles */
+/* ─── TRANSCRIPT STYLES ──────────────────────────────────────────────────── */
+
+/* Transcript scroll container */
 .transcript-body {
-    max-height: 500px;
+    max-height: 65vh;
     overflow-y: auto;
-    padding-right: 10px;
+    padding-right: 8px;
 }
 
 @media (min-width: 1024px) {
     .transcript-body {
-        max-height: none; /* En desktop ocupa el espacio flex disponible */
+        max-height: none;
     }
+}
+
+/* Reading-mode wrapper for the clean text */
+#transcript-text-container {
+    background: rgba(0, 0, 0, 0.18);
+    border-radius: 14px;
+    padding: 1.4rem 1.6rem;
+    border: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+/* Paragraph typography — the core of readability */
+.transcript-paragraph {
+    color: #dde4f0;               /* near-white with a cool blue tint — easier on the eye */
+    font-size: 0.9375rem;         /* 15px: slightly above default */
+    line-height: 1.9;             /* generous leading */
+    margin-bottom: 1.25rem;
+    letter-spacing: 0.012em;
+    word-spacing: 0.05em;
+    text-align: left;
+}
+
+.transcript-paragraph:last-child {
+    margin-bottom: 0;
+}
+
+/* First-letter drop cap on first paragraph */
+.transcript-paragraph:first-of-type::first-letter {
+    font-size: 2.5em;
+    font-weight: 800;
+    float: left;
+    line-height: 0.82;
+    margin-right: 8px;
+    margin-top: 5px;
+    color: var(--primary);
+    font-family: 'Outfit', sans-serif;
+}
+
+/* Lists inside transcript (diarization output) */
+#transcript-text-container ul {
+    margin-bottom: 1rem;
+}
+#transcript-text-container li {
+    color: #dde4f0;
+    font-size: 0.9375rem;
+    line-height: 1.8;
+    margin-bottom: 0.4rem;
+}
+
+/* Bold speaker names in diarization (from **Name**: format) */
+#transcript-text-container strong {
+    color: #c4b5fd;   /* lavender-400 — distinct but not garish */
+    font-weight: 700;
 }
 
 /* ── Desktop: Layout de pantalla completa sin scroll de página ── */
@@ -185,7 +239,6 @@ input::placeholder {
         flex-shrink: 0;
     }
 
-    /* El main ocupa el espacio restante */
     main.app-main {
         flex: 1;
         min-height: 0;
@@ -194,14 +247,12 @@ input::placeholder {
         padding-bottom: 1.5rem !important;
     }
 
-    /* Cada columna scrollea por su cuenta */
     .app-col-left,
     .app-col-right {
         height: 100%;
         overflow-y: auto;
         overflow-x: hidden;
         padding-right: 4px;
-        /* scrollbar delgada para no ocupar espacio */
         scrollbar-width: thin;
         scrollbar-color: rgba(137,90,246,0.3) transparent;
     }
@@ -215,14 +266,7 @@ input::placeholder {
     }
 }
 
-/* Párrafos de transcripción */
-.transcript-paragraph {
-    margin-bottom: 0.85rem;
-    line-height: 1.75;
-}
-.transcript-paragraph:last-child { margin-bottom: 0; }
-
-/* Media preview specifically for results */
+/* ─── MEDIA THUMBNAIL ────────────────────────────────────────────────────── */
 .thumbnail-wrapper {
     position: relative;
     border-radius: 16px;
@@ -236,3 +280,288 @@ input::placeholder {
     inset: 0;
     background: linear-gradient(0deg, rgba(0,0,0,0.4) 0%, transparent 100%);
 }
+
+/* ─── INTERACTIVE TRANSCRIPT SEGMENTS ───────────────────────────────────── */
+
+/* Container list */
+.segment-list {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+/* Each segment row */
+.interactive-segment {
+    display: flex;
+    align-items: baseline;
+    gap: 12px;
+    padding: 9px 12px;
+    border-radius: 8px;
+    cursor: pointer;
+    transition: background 0.15s ease, border-color 0.15s ease;
+    border-left: 3px solid transparent;
+    background: transparent;
+}
+
+.interactive-segment:hover {
+    background: rgba(137, 90, 246, 0.1);
+    border-left-color: rgba(137, 90, 246, 0.5);
+}
+
+/* Timestamp badge — fixed width so text always starts at the same column */
+.interactive-segment-time {
+    flex-shrink: 0;
+    min-width: 44px;
+    text-align: right;
+    font-size: 11px;
+    font-family: 'JetBrains Mono', 'Fira Mono', ui-monospace, monospace;
+    font-weight: 700;
+    color: var(--accent);
+    background: rgba(6, 182, 212, 0.1);
+    border: 1px solid rgba(6, 182, 212, 0.2);
+    padding: 2px 6px;
+    border-radius: 5px;
+    user-select: none;
+    letter-spacing: 0.05em;
+    line-height: 1;
+}
+
+/* Phrase text */
+.interactive-segment-text {
+    flex: 1;
+    color: #d4dff0;
+    font-size: 0.9125rem;
+    line-height: 1.65;
+    word-break: break-word;
+}
+
+/* Selected start — purple left border + tint */
+.interactive-segment.selected-start {
+    background: rgba(137, 90, 246, 0.14);
+    border-left-color: var(--primary);
+    border-left-width: 3px;
+}
+.interactive-segment.selected-start .interactive-segment-time {
+    color: #ffffff;
+    background: rgba(137, 90, 246, 0.35);
+    border-color: rgba(137, 90, 246, 0.6);
+}
+.interactive-segment.selected-start .interactive-segment-text {
+    color: #ffffff;
+}
+
+/* Selected end — cyan left border + tint */
+.interactive-segment.selected-end {
+    background: rgba(6, 182, 212, 0.1);
+    border-left-color: var(--accent);
+    border-left-width: 3px;
+}
+.interactive-segment.selected-end .interactive-segment-time {
+    color: #ffffff;
+    background: rgba(6, 182, 212, 0.3);
+    border-color: rgba(6, 182, 212, 0.5);
+}
+.interactive-segment.selected-end .interactive-segment-text {
+    color: #ffffff;
+}
+
+/* ─── SEGMENT ACTIONS MENU ───────────────────────────────────────────────── */
+.segment-actions-menu {
+    position: fixed;
+    z-index: 9999;
+    background: #110e21;
+    border: 1px solid rgba(137, 90, 246, 0.35);
+    box-shadow: 0 12px 40px rgba(0, 0, 0, 0.7), 0 0 0 1px rgba(137,90,246,0.1);
+    border-radius: 14px;
+    padding: 6px;
+    display: flex;
+    gap: 4px;
+    animation: fadeIn 0.15s ease-out;
+}
+
+.segment-actions-menu button {
+    background: rgba(255, 255, 255, 0.05);
+    border: 1px solid rgba(255, 255, 255, 0.07);
+    color: #e2e8f0;
+    font-size: 11px;
+    font-weight: 600;
+    padding: 7px 11px;
+    border-radius: 9px;
+    cursor: pointer;
+    transition: all 0.18s;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    white-space: nowrap;
+}
+
+.segment-actions-menu button:hover {
+    background: var(--primary);
+    color: white;
+    transform: translateY(-1px);
+    box-shadow: 0 4px 12px rgba(137,90,246,0.4);
+}
+
+/* ─── INLINE CLIP TOOL ───────────────────────────────────────────────────── */
+#inline-clip-tool:not(.hidden) {
+    animation: fadeIn 0.25s ease-out forwards;
+}
+
+/* ─── QUOTE CARDS ────────────────────────────────────────────────────────── */
+
+.quote-cards-list {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+.quote-card {
+    background: rgba(255, 255, 255, 0.03);
+    border: 1px solid rgba(6, 182, 212, 0.15);
+    border-left: 3px solid var(--accent);
+    border-radius: 12px;
+    padding: 14px 16px;
+    transition: border-color 0.2s, background 0.2s;
+}
+
+.quote-card:hover {
+    background: rgba(6, 182, 212, 0.04);
+    border-color: rgba(6, 182, 212, 0.35);
+}
+
+/* Small "Cita 1" index label */
+.quote-index {
+    font-size: 9.5px;
+    font-weight: 800;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--accent);
+    margin-bottom: 8px;
+    opacity: 0.7;
+}
+
+/* The actual quote text */
+.quote-text {
+    font-size: 0.9375rem;
+    font-style: italic;
+    line-height: 1.7;
+    color: #eef2ff;
+    margin-bottom: 8px;
+    position: relative;
+}
+
+/* Relevance note below the quote */
+.quote-note {
+    font-size: 0.78rem;
+    line-height: 1.55;
+    color: #94a3b8;
+    margin-bottom: 10px;
+    padding-top: 8px;
+    border-top: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+/* Bottom action row: time badge left, buttons right */
+.quote-actions {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+
+/* Time badge: shows start → end */
+.quote-time-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    font-size: 11px;
+    font-family: ui-monospace, monospace;
+    font-weight: 700;
+    color: var(--accent);
+    background: rgba(6, 182, 212, 0.1);
+    border: 1px solid rgba(6, 182, 212, 0.25);
+    padding: 3px 9px;
+    border-radius: 6px;
+    letter-spacing: 0.04em;
+}
+
+.quote-time-unknown {
+    color: #64748b;
+    background: rgba(255, 255, 255, 0.04);
+    border-color: rgba(255, 255, 255, 0.08);
+}
+
+/* Button group */
+.quote-buttons {
+    display: flex;
+    gap: 6px;
+}
+
+/* Clip & Copy base button */
+.quote-clip-btn,
+.quote-copy-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 11px;
+    font-weight: 700;
+    padding: 5px 10px;
+    border-radius: 7px;
+    border: 1px solid transparent;
+    cursor: pointer;
+    transition: all 0.18s;
+    white-space: nowrap;
+}
+
+/* Clip button — purple accent */
+.quote-clip-btn {
+    background: rgba(137, 90, 246, 0.15);
+    border-color: rgba(137, 90, 246, 0.3);
+    color: #c4b5fd;
+}
+.quote-clip-btn:hover {
+    background: var(--primary);
+    border-color: var(--primary);
+    color: white;
+    transform: translateY(-1px);
+    box-shadow: 0 4px 12px rgba(137, 90, 246, 0.4);
+}
+
+/* Copy button — subtle */
+.quote-copy-btn {
+    background: rgba(255, 255, 255, 0.05);
+    border-color: rgba(255, 255, 255, 0.08);
+    color: #94a3b8;
+}
+.quote-copy-btn:hover {
+    background: rgba(255, 255, 255, 0.1);
+    color: #e2e8f0;
+}
+
+/* Refresh quotes button */
+.quotes-refresh-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    font-size: 11px;
+    font-weight: 700;
+    color: #64748b;
+    background: rgba(255, 255, 255, 0.04);
+    border: 1px solid rgba(255, 255, 255, 0.07);
+    padding: 4px 10px;
+    border-radius: 8px;
+    cursor: pointer;
+    transition: all 0.18s;
+}
+.quotes-refresh-btn:hover {
+    color: #e2e8f0;
+    background: rgba(255, 255, 255, 0.09);
+    border-color: rgba(255, 255, 255, 0.15);
+}
+.quotes-refresh-btn .material-symbols-outlined {
+    transition: transform 0.4s;
+}
+.quotes-refresh-btn:active .material-symbols-outlined {
+    transform: rotate(180deg);
+}
+

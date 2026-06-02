@@ -197,17 +197,7 @@ input::placeholder {
     margin-bottom: 0;
 }
 
-/* First-letter drop cap on first paragraph */
-.transcript-paragraph:first-of-type::first-letter {
-    font-size: 2.5em;
-    font-weight: 800;
-    float: left;
-    line-height: 0.82;
-    margin-right: 8px;
-    margin-top: 5px;
-    color: var(--primary);
-    font-family: 'Outfit', sans-serif;
-}
+
 
 /* Lists inside transcript (diarization output) */
 #transcript-text-container ul {

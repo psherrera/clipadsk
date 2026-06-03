@@ -746,7 +746,10 @@ async def get_video_info(req: VideoRequest, request: Request):
         try:
             ig_info = await asyncio.to_thread(get_instagram_info, url)
             if ig_info['is_video']:
-                formats = [{'format_id': 'best', 'ext': 'mp4', 'resolution': 'Mejor calidad', 'filesize': None, 'label': 'Mejor calidad (.mp4)'}]
+                formats = [
+                    {'format_id': 'best', 'ext': 'mp4', 'resolution': 'Mejor calidad', 'filesize': None, 'label': 'Mejor calidad (.mp4)'},
+                    {'format_id': 'mp3',  'ext': 'mp3', 'resolution': 'Solo audio',    'filesize': None, 'label': 'Solo audio (.mp3)'},
+                ]
             else:
                 formats = [{'format_id': 'best', 'ext': 'jpg', 'resolution': 'Imagen original', 'filesize': None, 'label': 'Imagen original (.jpg)'}]
 
@@ -846,6 +849,16 @@ async def get_video_info(req: VideoRequest, request: Request):
             'resolution': 'Mejor calidad',
             'filesize': None,
             'label': 'Mejor calidad (.mp4)'
+        })
+
+    # Para Instagram, siempre agregar la opción de descarga como MP3
+    if is_instagram:
+        formats.append({
+            'format_id': 'mp3',
+            'ext': 'mp3',
+            'resolution': 'Solo audio',
+            'filesize': None,
+            'label': 'Solo audio (.mp3)'
         })
 
     # Proxy para miniaturas de Instagram
@@ -1235,6 +1248,39 @@ async def download_video(req: VideoRequest, background_tasks: BackgroundTasks):
             if not ig_info['is_video']:
                 raise HTTPException(status_code=400, detail="Este post de Instagram no tiene video.")
 
+            # --- Descarga como MP3 (extracción de audio) ---
+            if format_id == 'mp3':
+                video_url = ig_info['video_url']
+                headers_dl = {'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_3_1 like Mac OS X) AppleWebKit/605.1.15'}
+                r = await run_blocking(requests_get_sync, video_url, headers=headers_dl, stream=True, timeout=60)
+                r.raise_for_status()
+
+                tmp_mp4 = os.path.join(DOWNLOAD_FOLDER, f'instagram_{uid}_tmp.mp4')
+                with open(tmp_mp4, 'wb') as f:
+                    for chunk in r.iter_content(chunk_size=8192):
+                        f.write(chunk)
+
+                mp3_path = os.path.join(DOWNLOAD_FOLDER, f'instagram_{uid}.mp3')
+                ffmpeg_exe = os.path.join(BASE_DIR, '..', 'ffmpeg.exe')
+                if not os.path.exists(ffmpeg_exe):
+                    ffmpeg_exe = 'ffmpeg'
+                import subprocess
+                subprocess.run(
+                    [ffmpeg_exe, '-y', '-i', tmp_mp4, '-vn', '-acodec', 'libmp3lame', '-q:a', '2', mp3_path],
+                    check=True, capture_output=True
+                )
+                os.remove(tmp_mp4)
+
+                def remove_file_mp3(path):
+                    try:
+                        if os.path.exists(path): os.remove(path)
+                    except: pass
+
+                background_tasks.add_task(remove_file_mp3, mp3_path)
+                filename = f"{ig_info['title'][:30].strip()}_{uid}.mp3"
+                return FileResponse(mp3_path, filename=filename, media_type='audio/mpeg')
+
+            # --- Descarga normal como MP4 ---
             video_url = ig_info['video_url']
             headers = {'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_3_1 like Mac OS X) AppleWebKit/605.1.15'}
             r = await run_blocking(requests_get_sync, video_url, headers=headers, stream=True, timeout=60)
@@ -1260,17 +1306,29 @@ async def download_video(req: VideoRequest, background_tasks: BackgroundTasks):
             logger.debug(f"Instaloader download falló, intentando con yt-dlp: {e}")
 
     output_template = os.path.join(DOWNLOAD_FOLDER, f'%(title)s_{uid}.%(ext)s')
-    
-    if format_id and format_id not in ('best', 'bestvideo+bestaudio', None):
-        fmt = f"{format_id}/bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best"
-    else:
-        fmt = 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best'
 
-    extra_opts = {
-        'format': fmt,
-        'outtmpl': output_template,
-        'merge_output_format': 'mp4',
-    }
+    # --- Formato MP3: extraer solo audio ---
+    if format_id == 'mp3':
+        extra_opts = {
+            'format': 'bestaudio/best',
+            'outtmpl': output_template,
+            'postprocessors': [{
+                'key': 'FFmpegExtractAudio',
+                'preferredcodec': 'mp3',
+                'preferredquality': '192',
+            }],
+        }
+    else:
+        if format_id and format_id not in ('best', 'bestvideo+bestaudio', None):
+            fmt = f"{format_id}/bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best"
+        else:
+            fmt = 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best'
+
+        extra_opts = {
+            'format': fmt,
+            'outtmpl': output_template,
+            'merge_output_format': 'mp4',
+        }
     
     def my_hook(d):
         if d['status'] == 'downloading':

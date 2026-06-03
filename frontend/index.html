@@ -17,7 +17,7 @@
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
     <link rel="apple-touch-icon" href="icon.svg">
     
-    <link rel="stylesheet" href="style.css?v=3.7">
+    <link rel="stylesheet" href="style.css?v=3.8">
     <!-- JSZip: crear archivos .zip en el navegador sin backend -->
     <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
 
@@ -264,7 +264,7 @@
                         </button>
 
                         <button id="system-reset-btn" class="bg-white/5 hover:bg-red-500/10 border border-white/5 p-4 rounded-xl flex items-center gap-4 transition-all group">
-                            <div class="w-10 h-10 rounded-lg bg-red-500/10 flex items-center justify-center group-hover:bg-red-500/20">
+                            <div class="w-10 h-10 rounded-lg bg-red-500/10">
                                 <span class="material-symbols-outlined text-red-400">restart_alt</span>
                             </div>
                             <div class="text-left">
@@ -287,8 +287,8 @@
             <section id="video-info-card" class="glass rounded-3xl overflow-hidden hidden fade-in shadow-2xl">
                 <div class="flex flex-col divide-y divide-white/5">
                     <!-- Thumbnail -->
-                    <div class="relative aspect-video bg-black/40 flex items-center justify-center">
-                        <img id="video-thumbnail" src="" alt="Miniatura" class="w-full h-full object-contain drop-shadow-2xl" referrerpolicy="no-referrer">
+                    <div class="relative bg-black/40 flex items-center justify-center" style="max-height:280px;overflow:hidden;">
+                        <img id="video-thumbnail" src="" alt="Miniatura" class="w-full h-full object-contain drop-shadow-2xl" referrerpolicy="no-referrer" style="max-height:280px;">
                         <div id="video-duration" class="absolute bottom-4 right-4 bg-black/80 px-2 py-1 rounded-md text-xs font-bold text-white shadow-lg">0:00</div>
                     </div>
                     <!-- Info -->
@@ -425,7 +425,7 @@
 
     <!-- Bottom Nav eliminado ya que se integró en el header -->
 
-    <script src="main.js?v=3.7" defer></script>
+    <script src="main.js?v=3.8" defer></script>
     <script>
         if ('serviceWorker' in navigator) {
             window.addEventListener('load', () => {

@@ -498,7 +498,21 @@ document.addEventListener('DOMContentLoaded', () => {
             }
             
             if (startTime) filename += `_desde_${startTime.replace(/:/g, '-')}`;
-            a.download = `${filename}.mp4`;
+            
+            // Intentar leer el nombre del archivo desde el header Content-Disposition del servidor
+            const disposition = r.headers.get('Content-Disposition') || '';
+            const cdMatch = disposition.match(/filename\*?=(?:utf-8'')?([^;\n]+)/i);
+            if (cdMatch) {
+                // Usar el nombre de archivo que mandó el servidor (ya tiene la extensión correcta)
+                const serverFilename = decodeURIComponent(cdMatch[1].replace(/["']/g, '').trim());
+                // Extraer solo la extensión del servidor
+                const serverExt = serverFilename.split('.').pop();
+                a.download = `${filename}.${serverExt}`;
+            } else {
+                // Fallback: determinar extensión por formato seleccionado
+                const isMP3 = formatId === 'mp3' || selectedText.toLowerCase().includes('mp3');
+                a.download = `${filename}.${isMP3 ? 'mp3' : 'mp4'}`;
+            }
             
             document.body.appendChild(a); a.click();
             URL.revokeObjectURL(a.href); a.remove();

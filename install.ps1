@@ -1,102 +1,97 @@
-# install.ps1 - Instalador interactivo para Clipadsk
-Write-Host "Instalador interactivo Clipadsk" -ForegroundColor Cyan
+# install.ps1 — Instalador de Clipadsk para Windows
+# Ejecutar una sola vez en una PC nueva: .\install.ps1
+# Luego usar iniciar.bat para arrancar la app.
 
-function Ask-Yes($text, $default = $true) {
-    $yn = $default ? "[Y/n]" : "[y/N]"
-    while ($true) {
-        $r = Read-Host "$text $yn"
-        if ([string]::IsNullOrWhiteSpace($r)) { return $default }
-        if ($r -match '^[Yy]') { return $true }
-        if ($r -match '^[Nn]') { return $false }
-    }
-}
+$ErrorActionPreference = "Stop"
+$root = Split-Path -Parent $MyInvocation.MyCommand.Path
 
-Write-Host "\nResumen: Este script te guía para levantar Clipadsk en Windows." -ForegroundColor Yellow
+Write-Host ""
+Write-Host "  ==========================================" -ForegroundColor Cyan
+Write-Host "    Clipadsk  |  Instalador" -ForegroundColor Cyan
+Write-Host "  ==========================================" -ForegroundColor Cyan
+Write-Host ""
 
-# Lista de comprobación rápida (se mostrará al usuario)
-Write-Host "\nArchivos recomendados para copiar al pendrive:" -ForegroundColor Cyan
-Write-Host " - docker-compose.yml" -ForegroundColor Green
-Write-Host " - carpeta frontend/ completa" -ForegroundColor Green
-Write-Host " - carpeta backend/ completa (sin .venv ni backend/downloads ni backend/model)" -ForegroundColor Green
-Write-Host " - backend/requirements.txt" -ForegroundColor Green
-Write-Host " - install.ps1 (este script)" -ForegroundColor Green
-Write-Host " - .env.template" -ForegroundColor Green
-
-# 1) Detectar Docker
-$hasDocker = (Get-Command docker -ErrorAction SilentlyContinue) -ne $null
-if ($hasDocker) {
-    if (Ask-Yes "Docker detectado. ¿Deseas levantar con Docker Compose ahora? (recomendado)") {
-        Write-Host "Ejecutando: docker compose up --build" -ForegroundColor Green
-        docker compose up --build
-        exit
-    }
-}
-
-# 2) Comprobar Python
+# ── 1. Verificar Python ────────────────────────────────────────────────────────
+Write-Host "  [1/5] Verificando Python..." -ForegroundColor White
 $py = Get-Command python -ErrorAction SilentlyContinue
 if (-not $py) {
-    Write-Host "Python no encontrado en PATH. Instala Python 3.11+ y vuelve a ejecutar este script." -ForegroundColor Yellow
-    if (-not (Ask-Yes "¿Deseas continuar y mostrar solo instrucciones (sin instalar dependencias)?" $false)) { exit }
+    Write-Host "  [!] Python no encontrado. Intentando instalar con winget..." -ForegroundColor Yellow
+    winget install -e --id Python.Python.3.11 --accept-package-agreements --accept-source-agreements
+    Write-Host ""
+    Write-Host "  [OK] Python instalado. Cerrá y volvé a ejecutar install.ps1." -ForegroundColor Green
+    exit 0
+}
+$pyVersion = & python --version 2>&1
+Write-Host "  [OK] $pyVersion" -ForegroundColor Green
+
+# ── 2. Verificar FFmpeg ────────────────────────────────────────────────────────
+Write-Host "  [2/5] Verificando FFmpeg..." -ForegroundColor White
+$ff = Get-Command ffmpeg -ErrorAction SilentlyContinue
+if (-not $ff) {
+    Write-Host "  [!] FFmpeg no encontrado. Instalando con winget..." -ForegroundColor Yellow
+    winget install -e --id Gyan.FFmpeg --accept-package-agreements --accept-source-agreements
+    Write-Host "  [OK] FFmpeg instalado." -ForegroundColor Green
+} else {
+    Write-Host "  [OK] FFmpeg encontrado." -ForegroundColor Green
 }
 
-# 3) Crear y activar venv
-if (-not (Test-Path -Path ".venv")) {
-    Write-Host "Creando virtualenv en .venv..." -ForegroundColor Green
-    python -m venv .venv
-}
-Write-Host "Activando .venv..." -ForegroundColor Green
-& .\.venv\Scripts\Activate.ps1
-
-# 4) Crear .env a partir de .env.template
-if (Test-Path -Path ".env.template" -and -not (Test-Path -Path ".env")) {
-    Copy-Item .env.template .env
-    Write-Host ".env creado desde .env.template. Edita .env si necesitas claves." -ForegroundColor Cyan
-} elseif (-not (Test-Path -Path ".env")) {
-    Write-Host "No se encontró .env.template; creando .env mínimo..." -ForegroundColor Yellow
-    @"
-# Variables de entorno mínimas
-GROQ_API_KEY=
-FRONTEND_DIR=../frontend
-WHISPER_MODEL=small
-"@ | Out-File -Encoding UTF8 .env
+# ── 3. Descargar yt-dlp ────────────────────────────────────────────────────────
+Write-Host "  [3/5] Verificando yt-dlp..." -ForegroundColor White
+$ytdlp = Join-Path $root "yt-dlp.exe"
+if (-not (Test-Path $ytdlp)) {
+    Write-Host "  [!] Descargando yt-dlp.exe..." -ForegroundColor Yellow
+    Invoke-WebRequest -Uri "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe" -OutFile $ytdlp
+    Write-Host "  [OK] yt-dlp.exe descargado." -ForegroundColor Green
+} else {
+    Write-Host "  [OK] yt-dlp.exe ya existe." -ForegroundColor Green
 }
 
-# 5) Instalar dependencias
-if (Test-Path -Path "backend/requirements.txt") {
-    if (Ask-Yes "Instalar dependencias desde backend/requirements.txt ahora? (requiere internet)") {
-        Write-Host "Instalando dependencias..." -ForegroundColor Green
-        pip install -r backend/requirements.txt
+# ── 4. Crear entorno virtual e instalar dependencias ──────────────────────────
+Write-Host "  [4/5] Instalando dependencias Python..." -ForegroundColor White
+$venvPy = Join-Path $root "backend\venv\Scripts\python.exe"
+if (-not (Test-Path $venvPy)) {
+    Write-Host "  [+] Creando entorno virtual..." -ForegroundColor Gray
+    python -m venv (Join-Path $root "backend\venv")
+}
+Write-Host "  [+] Actualizando pip..." -ForegroundColor Gray
+& $venvPy -m pip install --upgrade pip --quiet
+Write-Host "  [+] Instalando requirements.txt..." -ForegroundColor Gray
+& $venvPy -m pip install -r (Join-Path $root "backend\requirements.txt")
+Write-Host "  [OK] Dependencias instaladas." -ForegroundColor Green
+
+# ── 5. Configurar .env ────────────────────────────────────────────────────────
+Write-Host "  [5/5] Configurando variables de entorno..." -ForegroundColor White
+$envFile = Join-Path $root ".env"
+$envTemplate = Join-Path $root ".env.template"
+if (-not (Test-Path $envFile)) {
+    if (Test-Path $envTemplate) {
+        Copy-Item $envTemplate $envFile
+        Write-Host "  [OK] .env creado desde .env.template." -ForegroundColor Green
+        Write-Host "       Editá .env y agrega tu GROQ_API_KEY si queres transcripcion por IA." -ForegroundColor Cyan
     } else {
-        Write-Host "Omitida instalación de dependencias. Instálalas manualmente más tarde." -ForegroundColor Yellow
+        @"
+# Variables de entorno de Clipadsk
+# Consegui tu clave gratis en https://console.groq.com/keys
+GROQ_API_KEY=
+"@ | Out-File -Encoding UTF8 $envFile
+        Write-Host "  [OK] .env creado con valores por defecto." -ForegroundColor Green
     }
 } else {
-    Write-Host "No se encontró backend/requirements.txt; salta instalación de pip." -ForegroundColor Yellow
+    Write-Host "  [OK] .env ya existe, no se sobreescribio." -ForegroundColor Green
 }
 
-# 6) Dependencias opcionales pesadas
-if (Ask-Yes "¿Instalar extras opcionales (faster-whisper)? Solo si deseas transcripción local") {
-    Write-Host "Instalando faster-whisper (puede requerir Torch y recursos adicionales)..." -ForegroundColor Green
-    pip install faster-whisper || Write-Host "Instalación de faster-whisper fallida. Instálala manualmente." -ForegroundColor Red
-}
-
-# 7) Crear carpetas necesarias
-if (-not (Test-Path -Path "backend/downloads")) { New-Item -ItemType Directory -Path "backend/downloads" | Out-Null }
-if (-not (Test-Path -Path "backend/model")) { New-Item -ItemType Directory -Path "backend/model" | Out-Null }
-
-# 8) Opciones de ejecución
-Write-Host "\nOpciones para ejecutar la aplicación:" -ForegroundColor Cyan
-Write-Host "1) Ejecutar backend local con uvicorn (uvicorn main:app --host 0.0.0.0 --port 5000)" -ForegroundColor Green
-Write-Host "2) Ejecutar backend\main.py directamente" -ForegroundColor Green
-Write-Host "3) Salir" -ForegroundColor Gray
-$opt = Read-Host "Elige 1/2/3"
-if ($opt -eq "1") {
-    Push-Location backend
-    Write-Host "Iniciando uvicorn..." -ForegroundColor Green
-    uvicorn main:app --host 0.0.0.0 --port 5000
-    Pop-Location
-} elseif ($opt -eq "2") {
-    Write-Host "Ejecutando backend\main.py..." -ForegroundColor Green
-    python backend\main.py
-} else {
-    Write-Host "Instalación/Configuración finalizada (parcial). Revisa README para pasos adicionales." -ForegroundColor Cyan
-}
+# ── Resultado final ────────────────────────────────────────────────────────────
+Write-Host ""
+Write-Host "  ==========================================" -ForegroundColor Green
+Write-Host "    Instalacion completada exitosamente!" -ForegroundColor Green
+Write-Host "  ==========================================" -ForegroundColor Green
+Write-Host ""
+Write-Host "  Para usar Clipadsk, hace doble clic en:" -ForegroundColor White
+Write-Host "    iniciar.bat" -ForegroundColor Cyan
+Write-Host ""
+Write-Host "  Para habilitar transcripcion con IA (opcional):" -ForegroundColor White
+Write-Host "    1. Ve a https://console.groq.com/keys" -ForegroundColor Gray
+Write-Host "    2. Crea una clave gratuita" -ForegroundColor Gray
+Write-Host "    3. Pegala en el archivo .env (GROQ_API_KEY=...)" -ForegroundColor Gray
+Write-Host "    4. O cargala directamente desde la app en Config > API Key" -ForegroundColor Gray
+Write-Host ""

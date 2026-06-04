@@ -1,128 +1,151 @@
 @echo off
+setlocal EnableDelayedExpansion
 cd /d "%~dp0"
 title Clipadsk
 
-:: Matar procesos previos para evitar conflictos de puerto 5000
-taskkill /f /im python.exe /t >nul 2>&1
-echo [+] Limpiando procesos previos...
-echo ==========================================
-echo   Clipadsk - Descargador Local
-echo ==========================================
+echo.
+echo  ==========================================
+echo    Clipadsk  ^|  Iniciando...
+echo  ==========================================
 echo.
 
-:: ── Verificar Actualizaciones (Git) ──────────────────────────
-:: Desactivado en el inicio para no sobreescribir configuraciones locales ni API keys/cookies.
-:: La actualización ahora se puede realizar desde la interfaz web de la aplicación en ejecución.
-:: if exist ".git" (
-::     echo [+] Buscando actualizaciones en el repositorio...
-::     git pull origin main
-::     echo.
-:: )
+:: ── Matar instancias previas en puerto 5000 ──────────────────────────────────
+for /f "tokens=5" %%a in ('netstat -aon ^| findstr ":5000 " 2^>nul') do (
+    taskkill /f /pid %%a >nul 2>&1
+)
 
-:: ── Actualizar yt-dlp ────────────────────────────────────────
-:: Desactivado en el inicio para evitar lentitud y bloqueos. Se actualiza desde la interfaz.
-:: if exist "yt-dlp.exe" (
-::     echo [+] Verificando version del motor de descarga...
-::     yt-dlp.exe -U
-::     echo.
-:: )
-
-
-:: ── Verificar Python ─────────────────────────────────────────
+:: ─────────────────────────────────────────────────────────────────────────────
+:: 1) PYTHON
+:: ─────────────────────────────────────────────────────────────────────────────
 python --version >nul 2>&1
 if %errorlevel% neq 0 (
-    echo [+] Python no encontrado. Intentando instalar automaticamente ^(Windows 10/11^)...
-    winget --version >nul 2>&1
+    echo  [!] Python no encontrado. Intentando instalar con winget...
+    winget install -e --id Python.Python.3.11 --accept-package-agreements --accept-source-agreements
     if %errorlevel% neq 0 (
-        echo [ERROR] Tu Windows no soporta auto-instalacion. Instala Python desde https://python.org
+        echo.
+        echo  [ERROR] No se pudo instalar Python automaticamente.
+        echo          Descargalo desde https://python.org e instala con "Add to PATH" marcado.
+        echo.
         pause
         exit /b 1
     )
-    winget install -e --id Python.Python.3.11 --accept-package-agreements --accept-source-agreements
     echo.
-    echo ==============================================================
-    echo  PYTHON INSTALADO. Por favor, CIERRA esta ventana y vuelve a
-    echo  abrir iniciar.bat para continuar.
-    echo ==============================================================
+    echo  [OK] Python instalado. Cerrá esta ventana y volvé a abrir iniciar.bat.
     pause
     exit /b 0
 )
+for /f "tokens=*" %%v in ('python --version 2^>^&1') do echo  [OK] %%v encontrado.
 
-:: ── Verificar FFmpeg ─────────────────────────────────────────
+:: ─────────────────────────────────────────────────────────────────────────────
+:: 2) FFMPEG
+:: ─────────────────────────────────────────────────────────────────────────────
 ffmpeg -version >nul 2>&1
 if %errorlevel% neq 0 (
-    echo [+] FFmpeg no encontrado. Intentando instalar automaticamente...
-    winget --version >nul 2>&1
+    echo  [!] FFmpeg no encontrado. Intentando instalar con winget...
+    winget install -e --id Gyan.FFmpeg --accept-package-agreements --accept-source-agreements
     if %errorlevel% neq 0 (
-        echo [AVISO] Tu Windows no soporta auto-instalacion. Descargalo desde https://ffmpeg.org/download.html
+        echo.
+        echo  [AVISO] No se pudo instalar FFmpeg automaticamente.
+        echo          Descargalo desde https://ffmpeg.org/download.html y agregalo al PATH.
+        echo          La app funcionara pero sin conversion de audio.
         echo.
     ) else (
-        winget install -e --id Gyan.FFmpeg --accept-package-agreements --accept-source-agreements
         echo.
-        echo ==============================================================
-        echo  FFMPEG INSTALADO. Por favor, CIERRA esta ventana y vuelve a
-        echo  abrir iniciar.bat para continuar.
-        echo ==============================================================
+        echo  [OK] FFmpeg instalado. Cerrá esta ventana y volvé a abrir iniciar.bat.
         pause
         exit /b 0
     )
+) else (
+    echo  [OK] FFmpeg encontrado.
 )
 
-:: ── Verificar yt-dlp.exe ─────────────────────────────────────
+:: ─────────────────────────────────────────────────────────────────────────────
+:: 3) YT-DLP
+:: ─────────────────────────────────────────────────────────────────────────────
 if not exist "yt-dlp.exe" (
-    echo [+] yt-dlp.exe no encontrado. Descargando ultima version...
-    powershell -Command "Invoke-WebRequest -Uri 'https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe' -OutFile 'yt-dlp.exe'"
+    echo  [!] yt-dlp.exe no encontrado. Descargando...
+    powershell -NoProfile -Command "Invoke-WebRequest -Uri 'https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe' -OutFile 'yt-dlp.exe'"
     if %errorlevel% neq 0 (
-        echo [ERROR] No se pudo descargar yt-dlp.exe. Verifica tu conexion a internet.
+        echo  [ERROR] No se pudo descargar yt-dlp.exe. Verifica tu conexion a internet.
         pause
         exit /b 1
     )
+    echo  [OK] yt-dlp.exe descargado.
+) else (
+    echo  [OK] yt-dlp.exe encontrado.
 )
 
-:: ── Instalar dependencias si hace falta ──────────────────────
-if not exist "backend\venv" (
-    echo [+] Creando entorno virtual... Esto solo ocurre la primera vez.
-    python -m venv backend\venv
-    echo [+] Instalando dependencias basicas...
-    backend\venv\Scripts\python.exe -m pip install --upgrade pip
-    
-    :: No instalamos PyTorch completo si solo usamos Groq/Whisper-API, 
-    :: pero pydub y yt-dlp python wrapper son necesarios.
-    echo [+] Instalando dependencias del backend...
-    backend\venv\Scripts\python.exe -m pip install -r backend\requirements.txt
-    
-    echo [+] Dependencias instaladas correctamente.
-
+:: ─────────────────────────────────────────────────────────────────────────────
+:: 4) ENTORNO VIRTUAL + DEPENDENCIAS (solo la primera vez)
+:: ─────────────────────────────────────────────────────────────────────────────
+if not exist "backend\venv\Scripts\python.exe" (
     echo.
-    set FIRST_RUN=1
+    echo  [+] Primera vez: creando entorno virtual e instalando dependencias...
+    echo      Esto puede tardar 2-3 minutos. Solo ocurre una vez.
+    echo.
+    python -m venv backend\venv
+    if %errorlevel% neq 0 (
+        echo  [ERROR] No se pudo crear el entorno virtual.
+        pause
+        exit /b 1
+    )
+    backend\venv\Scripts\python.exe -m pip install --upgrade pip --quiet
+    backend\venv\Scripts\python.exe -m pip install -r backend\requirements.txt
+    if %errorlevel% neq 0 (
+        echo  [ERROR] Fallo al instalar dependencias. Revisa tu conexion a internet.
+        pause
+        exit /b 1
+    )
+    echo.
+    echo  [OK] Dependencias instaladas correctamente.
+) else (
+    echo  [OK] Entorno virtual listo.
 )
 
-
-:: ── Copiar cookies si existen ────────────────────────────────
+:: ─────────────────────────────────────────────────────────────────────────────
+:: 5) SINCRONIZAR COOKIES (si existe cookies.txt en la raiz)
+:: ─────────────────────────────────────────────────────────────────────────────
 if exist "cookies.txt" (
-    echo [+] Copiando cookies.txt al backend...
-    copy "cookies.txt" "backend\cookies.txt" >nul
+    copy /y "cookies.txt" "backend\cookies.txt" >nul
+    echo  [OK] cookies.txt copiado al backend.
 )
 
-:: ── Arrancar backend SIN ventana visible ─────────────────────
-echo [+] Iniciando backend...
-powershell -NoProfile -WindowStyle Hidden -Command "Start-Process '%~dp0backend\venv\Scripts\python.exe' -ArgumentList '%~dp0backend\main.py' -WorkingDirectory '%~dp0backend' -WindowStyle Hidden"
+:: ─────────────────────────────────────────────────────────────────────────────
+:: 6) ARRANCAR BACKEND (oculto, sin ventana)
+:: ─────────────────────────────────────────────────────────────────────────────
+echo.
+echo  [+] Iniciando servidor backend...
+powershell -NoProfile -WindowStyle Hidden -Command ^
+    "Start-Process '%~dp0backend\venv\Scripts\python.exe' -ArgumentList '%~dp0backend\main.py' -WorkingDirectory '%~dp0backend' -WindowStyle Hidden"
 
-:: ── Esperar a que levante ────────────────────────────────────
-echo [+] Iniciando servidor... esto puede tardar unos segundos.
-timeout /t 10 >nul
-
-:: ── Verificar si el backend está activo (silencioso) ─────────
+:: ─────────────────────────────────────────────────────────────────────────────
+:: 7) ESPERAR A QUE RESPONDA (hasta 30 segundos)
+:: ─────────────────────────────────────────────────────────────────────────────
+echo  [+] Esperando que el servidor este listo...
+set /a intentos=0
+:esperar
+timeout /t 2 >nul
 curl -s http://127.0.0.1:5000/api/health/cookies >nul 2>&1
-if %errorlevel% neq 0 (
-    timeout /t 4 >nul
-)
+if %errorlevel% equ 0 goto listo
+set /a intentos+=1
+if %intentos% lss 15 goto esperar
+echo  [AVISO] El servidor tarda mas de lo esperado. Abriendo igual...
 
-:: ── Minimizar esta ventana antes de abrir el navegador ────────
-powershell -NoProfile -Command "Add-Type -MemberDefinition '[DllImport(\"user32.dll\")] public static extern bool ShowWindow(IntPtr h,int n);' -Name W -Namespace W; [W.W]::ShowWindow((Get-Process -Id $PID).MainWindowHandle,6)" >nul 2>&1
+:listo
+echo  [OK] Servidor activo.
 
-:: ── Abrir frontend ────────────────────────────────────────────
-start http://127.0.0.1:5000/setup.html
+:: ─────────────────────────────────────────────────────────────────────────────
+:: 8) ABRIR NAVEGADOR
+:: ─────────────────────────────────────────────────────────────────────────────
+echo.
+echo  ==========================================
+echo    Abriendo Clipadsk en el navegador...
+echo    http://127.0.0.1:5000
+echo  ==========================================
+echo.
+start http://127.0.0.1:5000
 
-:: La ventana se cierra sola, el backend sigue corriendo en segundo plano
+:: Minimizar esta ventana
+powershell -NoProfile -Command "$h=(Get-Process -Id $PID).MainWindowHandle; Add-Type -MemberDefinition '[DllImport(\"user32.dll\")] public static extern bool ShowWindow(IntPtr h,int n);' -Name W -Namespace W; [W.W]::ShowWindow($h,6)" >nul 2>&1
+
 exit

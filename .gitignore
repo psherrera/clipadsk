@@ -4,43 +4,51 @@ __pycache__/
 *.pyo
 *.pyd
 
-# App specific
+# Virtual Environments
+.venv/
+venv/
+backend/venv/
+
+# App data
 backend/downloads/
 backend/model/
 backend/transcripts_cache.json
+backend/transcripts_cache.json.migrated
 backend/cookies.txt
+backend/cookies_ig.txt
 backend/NULL
+backend/clipadsk.db
+backend/*.mp4
+backend/*.mp3
+backend/*.wav
+backend/*.ogg
 
-# Docker
-.docker/
+# Base de datos
+clipadsk.db
+transcripts_cache.json
+transcripts_cache.json.migrated
+
+# Entorno
+.env
+
+# Binarios de terceros (se descargan automáticamente)
+yt-dlp.exe
+ffmpeg.exe
+ffprobe.exe
+ffplay.exe
 
 # OS
 .DS_Store
 Thumbs.db
 
-# Virtual Environment
-.venv/
-venv/
-backend/venv/
+# Docker
+.docker/
 
-# App data and caches
-clipadsk.db
-transcripts_cache.json
-transcripts_cache.json.migrated
-
-# Environments
-.env
-
-# Large Binaries and Media
-*.exe
-*.mp4
-*.zip
-*.txt
-!backend/requirements*.txt
-!README.md
-!cookies.txt.example
-
-# Folders
+# Tests y temporales
 scratch/
-backend/downloads/
-backend/__pycache__/
+*.bin
+dist/
+build/
+
+# Logs
+*.log

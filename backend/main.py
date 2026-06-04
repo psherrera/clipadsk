@@ -1996,10 +1996,6 @@ async def update_app(request: Request):
         if not provided or provided != admin_token:
             raise HTTPException(status_code=403, detail="Se requiere token de administrador para esta operación.")
     
-    # Detectar si estamos en un entorno ejecutable (PyInstaller)
-    if getattr(sys, 'frozen', False):
-        logger.warning("Intentando actualizar desde un ejecutable (.exe). Esta operación podría no ser compatible.")
-
     # Respaldar archivos de configuración locales para evitar que git pull los borre o sobreescriba
     config_backups = {}
     files_to_backup = [

@@ -616,6 +616,9 @@ def get_robust_opts(target_url, extra={}):
 
     cookie_path = os.path.join(BASE_DIR, 'cookies.txt')
     ig_cookie_path = os.path.join(BASE_DIR, 'cookies_ig.txt')
+    # Soporte para modo portable (.exe): el launcher inyecta COOKIES_PATH
+    # apuntando al archivo al lado del .exe
+    portable_cookie_path = os.environ.get('COOKIES_PATH', '')
 
     opts = {
         'quiet': False,
@@ -632,9 +635,13 @@ def get_robust_opts(target_url, extra={}):
     if is_instagram:
         cookie_b64 = os.environ.get('INSTAGRAM_COOKIES_B64') or os.environ.get('COOKIES_B64')
         local_paths = ['/etc/secrets/cookies_ig.txt', ig_cookie_path]
+        if portable_cookie_path:
+            local_paths.insert(0, portable_cookie_path)
     else:
         cookie_b64 = os.environ.get('COOKIES_B64')
         local_paths = ['/etc/secrets/cookies.txt', cookie_path]
+        if portable_cookie_path:
+            local_paths.insert(0, portable_cookie_path)
 
     # Cargar cookies desde variable de entorno
     if cookie_b64:
@@ -851,8 +858,8 @@ async def get_video_info(req: VideoRequest, request: Request):
             'label': 'Mejor calidad (.mp4)'
         })
 
-    # Para Instagram, siempre agregar la opción de descarga como MP3
-    if is_instagram:
+    # Agregar la opción de descarga como MP3 para YouTube e Instagram (cualquier plataforma con audio)
+    if is_instagram or is_youtube:
         formats.append({
             'format_id': 'mp3',
             'ext': 'mp3',

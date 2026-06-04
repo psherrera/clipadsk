@@ -64,6 +64,10 @@ def patch_env():
     if COOKIES_FILE.exists():
         os.environ["COOKIES_PATH"] = str(COOKIES_FILE)
 
+    # Indicar al backend dónde está el repositorio git para que "Actualizar App" funcione.
+    # EXE_DIR es la carpeta donde está el .exe, que debe ser el root del repo clonado.
+    os.environ.setdefault("GIT_REPO_DIR", str(EXE_DIR))
+
     # Asegurar carpeta de descargas
     DOWNLOADS_DIR.mkdir(parents=True, exist_ok=True)
 

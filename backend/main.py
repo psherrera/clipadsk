@@ -1996,6 +1996,10 @@ async def update_app(request: Request):
         if not provided or provided != admin_token:
             raise HTTPException(status_code=403, detail="Se requiere token de administrador para esta operación.")
     
+    # Detectar si estamos en un entorno ejecutable (PyInstaller)
+    if getattr(sys, 'frozen', False):
+        logger.warning("Intentando actualizar desde un ejecutable (.exe). Esta operación podría no ser compatible.")
+
     # Respaldar archivos de configuración locales para evitar que git pull los borre o sobreescriba
     config_backups = {}
     files_to_backup = [
@@ -2016,13 +2020,31 @@ async def update_app(request: Request):
 
     pull_error = None
     pull_stdout = ""
+    pull_stderr = ""
+
+    # Determinar directorio del repo git.
+    git_repo_dir = os.environ.get('GIT_REPO_DIR', ROOT_DIR)
+
     try:
         import subprocess
-        # Intentar git pull
-        result = subprocess.run(["git", "pull", "origin", "main"], capture_output=True, text=True, check=True)
-        pull_stdout = result.stdout
+        logger.info(f"Ejecutando git pull en: {git_repo_dir}")
+        result = subprocess.run(
+            ["git", "pull", "origin", "main"],
+            capture_output=True,
+            text=True,
+            cwd=git_repo_dir
+        )
+        pull_stdout = result.stdout.strip()
+        pull_stderr = result.stderr.strip()
+
+        if result.returncode != 0:
+            pull_error = f"git pull salió con código {result.returncode}. stderr: {pull_stderr}"
+        elif "Already up to date" in pull_stdout:
+            pull_stdout = "La aplicación ya está actualizada. No hay cambios nuevos."
+    except FileNotFoundError:
+        pull_error = "Git no está instalado o no está en el PATH."
     except Exception as e:
-        pull_error = e
+        pull_error = str(e)
 
     # Restaurar siempre los archivos de configuración respaldados
     for fpath, content in config_backups.items():
@@ -2034,9 +2056,9 @@ async def update_app(request: Request):
             logger.warning(f"No se pudo restaurar {fpath}: {ex}")
 
     if pull_error:
-        return JSONResponse(status_code=500, content={"error": f"Error al actualizar Git: {str(pull_error)}"})
+        return JSONResponse(status_code=500, content={"error": f"Error al actualizar: {pull_error}"})
 
-    return {"status": "ok", "message": "Aplicación actualizada con éxito.", "output": pull_stdout}
+    return {"status": "ok", "message": "✅ Aplicación actualizada con éxito. Recargando...", "output": pull_stdout}
 
 @app.post("/api/system/update-engine")
 async def update_engine(request: Request):

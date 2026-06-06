@@ -143,7 +143,7 @@ echo    Abriendo Clipadsk en el navegador...
 echo    http://127.0.0.1:5000
 echo  ==========================================
 echo.
-start http://127.0.0.1:5000
+explorer "http://127.0.0.1:5000"
 
 :: Minimizar esta ventana
 powershell -NoProfile -Command "$h=(Get-Process -Id $PID).MainWindowHandle; Add-Type -MemberDefinition '[DllImport(\"user32.dll\")] public static extern bool ShowWindow(IntPtr h,int n);' -Name W -Namespace W; [W.W]::ShowWindow($h,6)" >nul 2>&1

@@ -581,3 +581,12 @@ input::placeholder {
     box-shadow: 0 20px 60px rgba(137, 90, 246, 0.08);
 }
 
+/* Ocultar barra de scroll horizontal */
+.no-scrollbar::-webkit-scrollbar {
+    display: none;
+}
+.no-scrollbar {
+    -ms-overflow-style: none;  /* IE y Edge */
+    scrollbar-width: none;  /* Firefox */
+}
+

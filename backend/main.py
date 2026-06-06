@@ -80,6 +80,8 @@ for d in [ROOT_DIR, BASE_DIR]:
 load_dotenv() # Cargar variables desde .env
 IS_RENDER = os.environ.get('RENDER') is not None
 GROQ_API_KEY = os.environ.get('GROQ_API_KEY')
+GROQ_MODEL = os.environ.get('GROQ_MODEL', 'llama-3.3-70b-versatile')  # configurable via env
+GROQ_CHAT_MODEL = os.environ.get('GROQ_CHAT_MODEL', 'llama-3.1-8b-instant')
 WHISPER_MODEL_SIZE = os.environ.get('WHISPER_MODEL', 'small')
 WHISPER_MODEL = None
 
@@ -140,35 +142,15 @@ async def log_requests(request: Request, call_next):
         logger.debug(f"API request: {request.method} {request.url.path}")
     response = await call_next(request)
     return response
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+# --- RUTAS DERIVADAS (usan BASE_DIR/ROOT_DIR ya definidos arriba) ---
 # Si se provee FRONTEND_DIR por env (Docker/Render), la usamos prioritariamente
-FRONTEND_DIR = os.environ.get('FRONTEND_DIR')
-
-# Fallback local: El ROOT_DIR del proyecto Pro es el padre de backend/
-ROOT_DIR = os.path.dirname(BASE_DIR)
-
-if not FRONTEND_DIR:
-    FRONTEND_DIR = os.path.join(ROOT_DIR, 'frontend')
-
+FRONTEND_DIR = os.environ.get('FRONTEND_DIR') or os.path.join(ROOT_DIR, 'frontend')
 DOWNLOAD_FOLDER = os.path.join(BASE_DIR, 'downloads')
 CACHE_FILE = os.path.join(BASE_DIR, 'transcripts_cache.json')
 
 if not os.path.exists(DOWNLOAD_FOLDER):
     os.makedirs(DOWNLOAD_FOLDER)
-
-# --- ROBUSTEZ FFMPEG ---
-ffmpeg_extra_paths = [
-    ROOT_DIR,
-    os.path.join(ROOT_DIR, 'bin'),
-    r'C:\Program Files\Red Giant\Trapcode Suite\Tools',
-    r'C:\Program Files\SnapDownloader\resources\win',
-]
-current_path = os.environ.get("PATH", "")
-nuevo_path = current_path
-for p in ffmpeg_extra_paths:
-    if os.path.exists(p) and p not in nuevo_path:
-        nuevo_path = p + os.pathsep + nuevo_path
-os.environ["PATH"] = nuevo_path
 
 # --- BASE DE DATOS (SQLite) ---
 DB_FILE = os.path.join(BASE_DIR, 'clipadsk.db')
@@ -468,7 +450,7 @@ Procesa el texto que se encuentra a continuación entre las etiquetas [INICIO DE
                     TEXTO:
                     {chunk}"""
                 completion = actual_client.chat.completions.create(
-                    model="llama-3.3-70b-versatile",
+                    model=GROQ_MODEL,
                     messages=[{"role": "user", "content": prompt}],
                     temperature=0.3,
                     max_tokens=4000,
@@ -505,7 +487,7 @@ Procesa el texto que se encuentra a continuación entre las etiquetas [INICIO DE
                 TRANSCRIPCIÓN:
                 {text}"""
             completion = actual_client.chat.completions.create(
-                model="llama-3.3-70b-versatile",
+                model=GROQ_MODEL,
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.3,
                 max_tokens=4000,
@@ -516,16 +498,21 @@ Procesa el texto que se encuentra a continuación entre las etiquetas [INICIO DE
         return text
 
 
-# --- PROGRESO GLOBAL ---
-progress_store = {}
+# --- PROGRESO GLOBAL (TTLCache: auto-limpia entradas > 2h para evitar memory leak) ---
+try:
+    from cachetools import TTLCache
+    progress_store = TTLCache(maxsize=500, ttl=7200)
+    log_store      = TTLCache(maxsize=500, ttl=7200)
+except ImportError:
+    # cachetools no instalado — fallback a dict simple
+    progress_store = {}
+    log_store = {}
+    logger.warning("cachetools no disponible. progress_store y log_store usarán dict simple (sin TTL).")
 
 def update_progress(uid: str, progress: int, text: str):
     if uid:
         progress_store[uid] = {"progress": progress, "text": text}
         add_log(uid, f"Progreso {progress}%: {text}")
-
-# --- LOGS DE ERROR PARA SOPORTE ---
-log_store = {}
 
 def add_log(uid: str, message: str):
     if not uid: return
@@ -1228,7 +1215,7 @@ async def chat_with_transcript(req: ChatRequest):
         """
         
         completion = local_groq.chat.completions.create(
-            model="llama-3.1-8b-instant",
+            model=GROQ_CHAT_MODEL,
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": req.question}

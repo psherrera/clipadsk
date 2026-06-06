@@ -58,11 +58,27 @@ document.addEventListener('DOMContentLoaded', () => {
     const uid = Math.random().toString(36).substring(2, 10);
     
     let currentTab             = 'youtube';
-
     let currentTranscript      = '';
     let currentSrt             = '';
     let currentMaxResThumbnail = '';
     let currentSegments        = [];
+
+    // ─── SEGURIDAD: escapeHtml para evitar XSS en datos de usuario ───────────────
+    function escapeHtml(str) {
+        if (!str) return '';
+        return String(str)
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#039;');
+    }
+
+    // AbortController activo para fetches cancelables
+    let activeAbortController = null;
+    // Flag para evitar doble polling en transcripción
+    let isTranscribing = false;
+    let activeTranscriptPollInterval = null;
 
     // ─── PLATFORM DETECTION ─────────────────────────────────────────────────────
     const PLATFORMS = {
@@ -155,13 +171,15 @@ document.addEventListener('DOMContentLoaded', () => {
         container.innerHTML = history.map((item, i) => {
             const date = new Date(item.date).toLocaleDateString('es-AR', { day:'2-digit', month:'short', year:'numeric' });
             const platformIcon = PLATFORMS[item.platform]?.icon || 'link';
-            const preview = item.transcript ? item.transcript.substring(0, 140) + '...' : 'Sin transcripcion';
+            // escapeHtml para prevenir XSS con datos del historial
+            const safeTitle   = escapeHtml(item.title || item.url);
+            const preview     = escapeHtml(item.transcript ? item.transcript.substring(0, 140) + '...' : 'Sin transcripcion');
             return `
             <div class="glass rounded-2xl p-5 space-y-3 fade-in">
                 <div class="flex items-start justify-between gap-3">
                     <div class="flex items-center gap-2 min-w-0">
                         <span class="material-symbols-outlined text-primary text-lg flex-shrink-0">${platformIcon}</span>
-                        <span class="text-white font-semibold text-sm truncate">${item.title || item.url}</span>
+                        <span class="text-white font-semibold text-sm truncate">${safeTitle}</span>
                     </div>
                     <span class="text-slate-500 text-[10px] flex-shrink-0 font-mono">${date}</span>
                 </div>
@@ -465,10 +483,10 @@ document.addEventListener('DOMContentLoaded', () => {
         downloadBtn.disabled = true;
         downloadProgress?.classList.remove('hidden');
 
-        const uid = Math.random().toString(36).substring(2, 15);
-        const interval = setInterval(async () => {
+        const downloadUid = Math.random().toString(36).substring(2, 15);
+        const downloadInterval = setInterval(async () => {
             try {
-                const r = await fetch(`${API_BASE}/progress/${uid}`);
+                const r = await fetch(`${API_BASE}/progress/${downloadUid}`);
                 if (r.ok) {
                     const data = await r.json();
                     updateProgress(data.progress || 0, data.text || 'Procesando en el servidor...');
@@ -477,7 +495,7 @@ document.addEventListener('DOMContentLoaded', () => {
         }, 800);
 
         try {
-            const bodyData = { url, format_id: formatId, uid };
+            const bodyData = { url, format_id: formatId, uid: downloadUid };
             if (startTime) bodyData.start_time = startTime;
             if (endTime) bodyData.end_time = endTime;
 
@@ -519,11 +537,11 @@ document.addEventListener('DOMContentLoaded', () => {
             updateProgress(100, 'Descarga completada!');
             setTimeout(() => downloadProgress?.classList.add('hidden'), 4000);
         } catch (err) {
-            clearInterval(interval);
+            clearInterval(downloadInterval);
             showToast(`Error: ${err.message}`, 'error');
             downloadProgress?.classList.add('hidden');
         } finally { 
-            clearInterval(interval);
+            clearInterval(downloadInterval);
             downloadBtn.disabled = false; 
         }
     });
@@ -561,53 +579,82 @@ document.addEventListener('DOMContentLoaded', () => {
 
 
     showTranscriptBtn?.addEventListener('click', async () => {
+        // Evitar doble ejecución simultánea
+        if (isTranscribing) return;
+        isTranscribing = true;
+
+        // Cancelar poll anterior si existe
+        if (activeTranscriptPollInterval) {
+            clearInterval(activeTranscriptPollInterval);
+            activeTranscriptPollInterval = null;
+        }
+        // Cancelar fetch anterior si existe
+        if (activeAbortController) activeAbortController.abort();
+        activeAbortController = new AbortController();
+        const transcriptAbort = activeAbortController;
+
         const url = videoUrlInput?.value.trim();
         transcriptSection?.classList.remove('hidden');
         transcriptSection?.classList.add('fade-in');
         transcriptContent.innerHTML = `
-            <div class="flex items-center gap-3 text-slate-400">
-                <div class="w-5 h-5 border-2 border-slate-700 border-t-accent rounded-full animate-spin flex-shrink-0"></div>
-                <p id="transcript-progress-text" class="text-sm animate-pulse">Iniciando proceso...</p>
+            <div class="space-y-3">
+                <div class="flex items-center gap-3 text-slate-400">
+                    <div class="w-5 h-5 border-2 border-slate-700 border-t-accent rounded-full animate-spin flex-shrink-0"></div>
+                    <p id="transcript-progress-text" class="text-sm animate-pulse">Iniciando proceso...</p>
+                    <span id="transcript-progress-pct" class="text-xs text-accent font-mono ml-auto">0%</span>
+                </div>
+                <div class="w-full bg-slate-800 rounded-full h-1.5 overflow-hidden">
+                    <div id="transcript-progress-bar" class="h-full bg-gradient-to-r from-accent to-primary rounded-full transition-all duration-500" style="width:0%"></div>
+                </div>
             </div>`;
         showTranscriptBtn.disabled = true;
 
-        const uid = Math.random().toString(36).substring(2, 15);
-        const pollInterval = setInterval(async () => {
+        const transcriptUid = Math.random().toString(36).substring(2, 15);
+        activeTranscriptPollInterval = setInterval(async () => {
             try {
-                const r = await fetch(`${API_BASE}/progress/${uid}`);
+                const r = await fetch(`${API_BASE}/progress/${transcriptUid}`);
                 if (r.ok) {
                     const data = await r.json();
                     const textEl = document.getElementById('transcript-progress-text');
-                    if (textEl && data.text) {
-                        textEl.textContent = `${data.text} (${data.progress}%)`;
-                    }
+                    const pctEl  = document.getElementById('transcript-progress-pct');
+                    const barEl  = document.getElementById('transcript-progress-bar');
+                    if (textEl && data.text) textEl.textContent = data.text;
+                    if (pctEl) pctEl.textContent = `${data.progress || 0}%`;
+                    if (barEl) barEl.style.width = `${data.progress || 0}%`;
                 }
             } catch (e) {}
         }, 800);
 
         try {
-            const reqBody = { url, groq_api_key: localStorage.getItem(GROQ_KEY_STORE) || undefined, uid };
-            const r    = await fetch(`${API_BASE}/transcript`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(reqBody) });
+            const reqBody = { url, groq_api_key: localStorage.getItem(GROQ_KEY_STORE) || undefined, uid: transcriptUid };
+            const r = await fetch(`${API_BASE}/transcript`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(reqBody),
+                signal: transcriptAbort.signal
+            });
             const data = await r.json();
 
-            clearInterval(pollInterval);
+            clearInterval(activeTranscriptPollInterval);
+            activeTranscriptPollInterval = null;
 
             if (data.error) {
-                transcriptContent.innerHTML = `
-                    <div class="bg-red-500/10 p-6 rounded-2xl border border-red-500/20 text-red-400 text-sm space-y-4">
-                        <div class="flex items-center gap-2">
-                            <span class="material-symbols-outlined">error</span>
-                            <p class="font-bold">Error en la transcripción</p>
-                        </div>
-                        <p class="opacity-80">${data.error.replace(/\u001b\[[0-9;]*m/g, '')}</p>
-                        <div class="pt-2">
-                            <p class="text-[10px] text-slate-500 mb-3 italic">Si el error persiste, descarga el reporte y envíaselo al administrador.</p>
-                            <button onclick="downloadErrorLog('${uid}')" class="bg-white/5 hover:bg-white/10 border border-white/10 px-4 py-2.5 rounded-xl text-xs font-bold transition-all flex items-center gap-2">
-                                <span class="material-symbols-outlined text-sm">bug_report</span> Descargar Reporte de Error
-                            </button>
-                        </div>
-                    </div>`;
-                return;
+                    const errorMsg = escapeHtml(data.error.replace(/\u001b\[[0-9;]*m/g, ''));
+                    transcriptContent.innerHTML = `
+                        <div class="bg-red-500/10 p-6 rounded-2xl border border-red-500/20 text-red-400 text-sm space-y-4">
+                            <div class="flex items-center gap-2">
+                                <span class="material-symbols-outlined">error</span>
+                                <p class="font-bold">Error en la transcripción</p>
+                            </div>
+                            <p class="opacity-80">${errorMsg}</p>
+                            <div class="pt-2">
+                                <p class="text-[10px] text-slate-500 mb-3 italic">Si el error persiste, descarga el reporte y envíaselo al administrador.</p>
+                                <button onclick="downloadErrorLog('${escapeHtml(transcriptUid)}')" class="bg-white/5 hover:bg-white/10 border border-white/10 px-4 py-2.5 rounded-xl text-xs font-bold transition-all flex items-center gap-2">
+                                    <span class="material-symbols-outlined text-sm">bug_report</span> Descargar Reporte de Error
+                                </button>
+                            </div>
+                        </div>`;
+                    return;
             }
 
 
@@ -618,10 +665,14 @@ document.addEventListener('DOMContentLoaded', () => {
             saveToHistory({ url, platform: detectPlatformFromUrl(url), title: titleEl.textContent || url, transcript: data.transcript, srt: data.srt, segments: data.segments });
 
         } catch (err) {
-            clearInterval(pollInterval);
+            clearInterval(activeTranscriptPollInterval);
+            activeTranscriptPollInterval = null;
+            if (err.name === 'AbortError') return; // cancelado intencionalmente
             transcriptContent.innerHTML = `<p class="text-red-400 text-sm">Error al conectar con el servidor.</p>`;
         } finally { 
-            clearInterval(pollInterval);
+            clearInterval(activeTranscriptPollInterval);
+            activeTranscriptPollInterval = null;
+            isTranscribing = false;
             showTranscriptBtn.disabled = false; 
         }
     });

@@ -87,7 +87,8 @@ document.addEventListener('DOMContentLoaded', () => {
         redes:     { hosts: ['tiktok.com', 'vm.tiktok.com', 'twitter.com', 'x.com', 't.co', 'facebook.com', 'fb.watch', 'fb.com'], icon: 'share', label: 'Redes (TikTok/X/FB)', placeholder: 'Pega enlace de TikTok, X o Facebook...' },
         whatsapp:  { hosts: [],                                       icon: 'mic',           label: 'WhatsApp',  placeholder: 'Sube un audio de WhatsApp (.ogg/.mp3)' },
         video:     { hosts: [],                                       icon: 'video_file',    label: 'Video',     placeholder: 'Subí un video local (.mp4/.mov)' },
-        history:   { hosts: [],                                       icon: 'settings',      label: 'Configuracion', placeholder: '' },
+        history:   { hosts: [],                                       icon: 'history',       label: 'Historial', placeholder: '' },
+        config:    { hosts: [],                                       icon: 'settings',      label: 'Configuración', placeholder: '' },
     };
 
     function detectPlatformFromUrl(url) {
@@ -273,15 +274,18 @@ document.addEventListener('DOMContentLoaded', () => {
         const waSection   = document.getElementById('whatsapp-section');
         const vidSection  = document.getElementById('video-section');
         const histSection = document.getElementById('history-section');
+        const configSection = document.getElementById('config-section');
 
-        mainSection?.classList.toggle('hidden', tab === 'whatsapp' || tab === 'video' || tab === 'history');
+        mainSection?.classList.toggle('hidden', tab === 'whatsapp' || tab === 'video' || tab === 'history' || tab === 'config');
         waSection?.classList.toggle('hidden', tab !== 'whatsapp');
         vidSection?.classList.toggle('hidden', tab !== 'video');
         histSection?.classList.toggle('hidden', tab !== 'history');
+        configSection?.classList.toggle('hidden', tab !== 'config');
 
         // Limpiar toda la interfaz al cambiar (o re-clicar) una pestana
         videoInfoCard?.classList.add('hidden');
         transcriptSection?.classList.add('hidden');
+        document.getElementById('empty-state-panel')?.classList.remove('hidden');
         showTranscriptBtn?.classList.add('hidden');
         downloadTxtBtn?.classList.add('hidden');
         qualityWarning?.classList.add('hidden');
@@ -312,10 +316,10 @@ document.addEventListener('DOMContentLoaded', () => {
         downloadSrtBtn?.classList.add('hidden');
 
         if (cfg) {
-            if (tabTitle)    tabTitle.textContent    = tab === 'history' ? 'Configuracion y Guardados' : `${cfg.label} Transcriptor`;
-            if (appSubtitle) appSubtitle.textContent = tab === 'history' ? 'Ajustes, claves de API y transcripciones locales.' : `Transcribi contenido de ${cfg.label} con IA.`;
+            if (tabTitle)    tabTitle.textContent    = tab === 'history' ? 'Historial de Transcripciones' : tab === 'config' ? 'Configuración General' : `${cfg.label} Transcriptor`;
+            if (appSubtitle) appSubtitle.textContent = tab === 'history' ? 'Historial de transcripciones guardadas en este navegador.' : tab === 'config' ? 'Administración de API Keys, mantenimiento y guías.' : `Transcribi contenido de ${cfg.label} con IA.`;
             if (inputIcon)   inputIcon.textContent   = cfg.icon;
-            if (videoUrlInput && tab !== 'history') videoUrlInput.placeholder = cfg.placeholder;
+            if (videoUrlInput && tab !== 'history' && tab !== 'config') videoUrlInput.placeholder = cfg.placeholder;
         }
 
         if (tab === 'history') renderHistory();
@@ -405,6 +409,7 @@ document.addEventListener('DOMContentLoaded', () => {
         qualityWarning?.classList.add('hidden');
         loadingSpinner?.classList.remove('hidden');
         transcriptSection?.classList.add('hidden');
+        document.getElementById('empty-state-panel')?.classList.remove('hidden');
         showTranscriptBtn?.classList.add('hidden');
         downloadTxtBtn?.classList.add('hidden');
         downloadSrtBtn?.classList.add('hidden');
@@ -596,6 +601,7 @@ document.addEventListener('DOMContentLoaded', () => {
         const url = videoUrlInput?.value.trim();
         transcriptSection?.classList.remove('hidden');
         transcriptSection?.classList.add('fade-in');
+        document.getElementById('empty-state-panel')?.classList.add('hidden');
         transcriptContent.innerHTML = `
             <div class="space-y-3">
                 <div class="flex items-center gap-3 text-slate-400">
@@ -749,6 +755,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
         // 2. Mostrar la sección de transcripción si está oculta
         transcriptSection?.classList.remove('hidden');
+        document.getElementById('empty-state-panel')?.classList.add('hidden');
 
         // 3. Crear cabecera con etiqueta de método y selectores de vista
         const methodLabel = methodLabels[method] || method;
@@ -985,23 +992,48 @@ document.addEventListener('DOMContentLoaded', () => {
         const ext = '.' + file.name.split('.').pop().toLowerCase();
         if (!ALLOWED.includes(ext)) { showToast(`Formato no soportado: ${ext}`, 'error'); return; }
 
-        if (waDropZone) waDropZone.innerHTML = `
-            <div class="flex flex-col items-center gap-3">
-                <div class="w-10 h-10 border-4 border-slate-700 border-t-primary rounded-full animate-spin"></div>
-                <p class="font-semibold text-white text-sm">${file.name}</p>
-                <p class="text-slate-400 text-xs animate-pulse">Transcribiendo con IA Whisper...</p>
+        transcriptSection?.classList.remove('hidden');
+        transcriptSection?.classList.add('fade-in');
+        document.getElementById('empty-state-panel')?.classList.add('hidden');
+        transcriptContent.innerHTML = `
+            <div class="space-y-3">
+                <div class="flex items-center gap-3 text-slate-400">
+                    <div class="w-5 h-5 border-2 border-slate-700 border-t-accent rounded-full animate-spin flex-shrink-0"></div>
+                    <p id="transcript-progress-text" class="text-sm animate-pulse">Enviando audio al servidor...</p>
+                    <span id="transcript-progress-pct" class="text-xs text-accent font-mono ml-auto">0%</span>
+                </div>
+                <div class="w-full bg-slate-800 rounded-full h-1.5 overflow-hidden">
+                    <div id="transcript-progress-bar" class="h-full bg-gradient-to-r from-accent to-primary rounded-full transition-all duration-500" style="width:0%"></div>
+                </div>
             </div>`;
 
+        const transcriptUid = Math.random().toString(36).substring(2, 15);
         const formData = new FormData();
         formData.append('file', file);
         formData.append('target_lang', selectedTargetLang);
-        formData.append('uid', uid);
+        formData.append('uid', transcriptUid);
         formData.append('groq_api_key', localStorage.getItem(GROQ_KEY_STORE) || '');
 
+        let localPollInterval = setInterval(async () => {
+            try {
+                const r = await fetch(`${API_BASE}/progress/${transcriptUid}`);
+                if (r.ok) {
+                    const data = await r.json();
+                    const textEl = document.getElementById('transcript-progress-text');
+                    const pctEl  = document.getElementById('transcript-progress-pct');
+                    const barEl  = document.getElementById('transcript-progress-bar');
+                    if (textEl && data.text) textEl.textContent = data.text;
+                    if (pctEl) pctEl.textContent = `${data.progress || 0}%`;
+                    if (barEl) barEl.style.width = `${data.progress || 0}%`;
+                }
+            } catch (e) {}
+        }, 800);
 
         try {
             const r    = await fetch(`${API_BASE}/transcript-file`, { method: 'POST', body: formData });
             const data = await r.json();
+            
+            clearInterval(localPollInterval);
             if (!r.ok) throw new Error(data.detail || 'Error en la transcripcion');
 
             currentTranscript = data.transcript;
@@ -1013,38 +1045,12 @@ document.addEventListener('DOMContentLoaded', () => {
 
             saveToHistory({ url: `whatsapp:${file.name}`, platform: 'whatsapp', title: file.name, transcript: data.transcript, srt: data.srt, segments: data.segments });
 
-            if (waDropZone) waDropZone.innerHTML = `
-                <div class="flex flex-col items-center gap-2">
-                    <span class="material-symbols-outlined text-emerald-400 text-4xl mb-1">check_circle</span>
-                    <p class="font-bold text-white text-sm">¡Audio listo!</p>
-                    <p class="text-slate-500 text-xs">${file.name}</p>
-                    <button onclick="document.getElementById('wa-file-input').click()" class="mt-2 text-[10px] font-bold text-primary uppercase border border-primary/20 px-3 py-1 rounded-full hover:bg-primary/10 transition-all">Subir otro</button>
-                </div>`;
-
-            if (waDropZone) waDropZone.innerHTML = `
-                <span class="material-symbols-outlined text-primary text-4xl mb-3">mic</span>
-                <p class="font-semibold text-white">Subir otro audio</p>
-                <p class="text-slate-500 text-xs mt-1">.ogg · .mp3 · .m4a · .wav</p>`;
-
         } catch (err) {
+            clearInterval(localPollInterval);
             showToast(`Error: ${err.message}`, 'error');
-            if (waDropZone) waDropZone.innerHTML = `
-                <span class="material-symbols-outlined text-red-400 text-4xl mb-2">error</span>
-                <p class="text-red-300 text-sm font-semibold">Error al procesar</p>
-                <p class="text-slate-500 text-xs">${err.message}</p>`;
+            transcriptContent.innerHTML = `<p class="text-red-400 text-sm">Error al procesar: ${err.message}</p>`;
         }
     }
-
-    window._wa = {
-        copy:     ()      => { if (currentTranscript) { navigator.clipboard.writeText(currentTranscript); showToast('Copiado', 'success'); } },
-        download: (name) => {
-            if (!currentTranscript) return;
-            const a = document.createElement('a');
-            a.href = URL.createObjectURL(new Blob([currentTranscript], { type: 'text/plain' }));
-            a.download = name.replace(/\.[^.]+$/, '') + '_transcripcion.txt';
-            a.click();
-        }
-    };
 
     // ─── VIDEO LOCAL UPLOAD ──────────────────────────────────────────────────────
     const vidFileInput = document.getElementById('vid-file-input');
@@ -1069,18 +1075,30 @@ document.addEventListener('DOMContentLoaded', () => {
         const ext = '.' + file.name.split('.').pop().toLowerCase();
         if (!ALLOWED.includes(ext)) { showToast(`Formato de video no soportado: ${ext}`, 'error'); return; }
 
-        // UI Reset
-        vidProgress?.classList.remove('hidden');
-        vidResult?.classList.add('hidden');
-        vidProgBar.style.width = '0%';
-        vidProgText.textContent = 'Subiendo video...';
+        transcriptSection?.classList.remove('hidden');
+        transcriptSection?.classList.add('fade-in');
+        document.getElementById('empty-state-panel')?.classList.add('hidden');
+        transcriptContent.innerHTML = `
+            <div class="space-y-3">
+                <div class="flex items-center gap-3 text-slate-400">
+                    <div class="w-5 h-5 border-2 border-slate-700 border-t-accent rounded-full animate-spin flex-shrink-0"></div>
+                    <p id="transcript-progress-text" class="text-sm animate-pulse">Enviando video al servidor...</p>
+                    <span id="transcript-progress-pct" class="text-xs text-accent font-mono ml-auto">0%</span>
+                </div>
+                <div class="w-full bg-slate-800 rounded-full h-1.5 overflow-hidden">
+                    <div id="transcript-progress-bar" class="h-full bg-gradient-to-r from-accent to-primary rounded-full transition-all duration-500" style="width:0%"></div>
+                </div>
+            </div>`;
 
+        const transcriptUid = Math.random().toString(36).substring(2, 15);
         const formData = new FormData();
         formData.append('file', file);
         formData.append('target_lang', selectedTargetLang);
-        formData.append('uid', uid);
+        formData.append('uid', transcriptUid);
         formData.append('groq_api_key', localStorage.getItem(GROQ_KEY_STORE) || '');
         formData.append('is_local_video', 'true');
+
+        let serverPollInterval = null;
 
         try {
             const xhr = new XMLHttpRequest();
@@ -1089,40 +1107,64 @@ document.addEventListener('DOMContentLoaded', () => {
             xhr.upload.onprogress = (e) => {
                 if (e.lengthComputable) {
                     const pct = Math.round((e.loaded / e.total) * 100);
-                    vidProgBar.style.width = `${pct}%`;
-                    if (pct < 100) vidProgText.textContent = `Cargando video: ${pct}%`;
-                    else vidProgText.textContent = 'Procesando en el servidor...';
+                    const barEl = document.getElementById('transcript-progress-bar');
+                    const textEl = document.getElementById('transcript-progress-text');
+                    const pctEl = document.getElementById('transcript-progress-pct');
+                    
+                    if (barEl) barEl.style.width = `${pct * 0.2}%`; // upload takes first 20%
+                    if (pctEl) pctEl.textContent = `${Math.round(pct * 0.2)}%`;
+                    if (textEl) {
+                        if (pct < 100) textEl.textContent = `Enviando video al servidor: ${pct}%`;
+                        else textEl.textContent = 'Procesando en el servidor...';
+                    }
                 }
             };
 
+            xhr.onloadstart = () => {
+                serverPollInterval = setInterval(async () => {
+                    try {
+                        const r = await fetch(`${API_BASE}/progress/${transcriptUid}`);
+                        if (r.ok) {
+                            const data = await r.json();
+                            const textEl = document.getElementById('transcript-progress-text');
+                            const pctEl  = document.getElementById('transcript-progress-pct');
+                            const barEl  = document.getElementById('transcript-progress-bar');
+                            const serverProgress = data.progress || 0;
+                            const visualProgress = 20 + Math.round(serverProgress * 0.8);
+                            
+                            if (textEl && data.text) textEl.textContent = data.text;
+                            if (pctEl) pctEl.textContent = `${visualProgress}%`;
+                            if (barEl) barEl.style.width = `${visualProgress}%`;
+                        }
+                    } catch (e) {}
+                }, 800);
+            };
+
             const response = await new Promise((resolve, reject) => {
-                xhr.onload = () => xhr.status >= 200 && xhr.status < 300 ? resolve(JSON.parse(xhr.responseText)) : reject(new Error(xhr.responseText));
-                xhr.onerror = () => reject(new Error('Fallo de red'));
+                xhr.onload = () => {
+                    clearInterval(serverPollInterval);
+                    if (xhr.status >= 200 && xhr.status < 300) resolve(JSON.parse(xhr.responseText));
+                    else reject(new Error(xhr.responseText || 'Error en servidor'));
+                };
+                xhr.onerror = () => {
+                    clearInterval(serverPollInterval);
+                    reject(new Error('Fallo de red'));
+                };
                 xhr.send(formData);
             });
 
             currentTranscript = response.transcript;
             currentSrt = response.srt || '';
 
-            // Usar la columna derecha (como YouTube)
             renderTranscript(response.transcript, 'groq_whisper_v3_file', response.srt, response.segments);
             downloadTxtBtn?.classList.remove('hidden');
 
             saveToHistory({ url: `video:${file.name}`, platform: 'video', title: file.name, transcript: response.transcript, srt: response.srt, segments: response.segments });
-            
-            vidProgress?.classList.add('hidden');
-            if (vidDropZone) vidDropZone.innerHTML = `
-                <div class="flex flex-col items-center gap-2">
-                    <span class="material-symbols-outlined text-emerald-400 text-4xl mb-1">check_circle</span>
-                    <p class="font-bold text-white text-sm">¡Video listo!</p>
-                    <p class="text-slate-500 text-xs">${file.name}</p>
-                    <button onclick="document.getElementById('vid-file-input').click()" class="mt-2 text-[10px] font-bold text-primary uppercase border border-primary/20 px-3 py-1 rounded-full hover:bg-primary/10 transition-all">Subir otro</button>
-                </div>`;
 
         } catch (err) {
+            clearInterval(serverPollInterval);
             showToast(`Error: ${err.message}`, 'error');
-            vidProgText.textContent = 'Fallo al procesar el video';
-            vidProgBar.classList.add('bg-red-500');
+            transcriptContent.innerHTML = `<p class="text-red-400 text-sm">Error al procesar el video: ${err.message}</p>`;
         }
     }
 
@@ -1491,7 +1533,7 @@ document.addEventListener('DOMContentLoaded', () => {
         const colors = { error: 'bg-red-500/90', success: 'bg-emerald-600/90', info: 'bg-slate-700/90' };
         const icons  = { error: 'error', success: 'check_circle', info: 'info' };
         const toast  = document.createElement('div');
-        toast.className = `fixed top-6 left-1/2 -translate-x-1/2 z-[200] flex items-center gap-3 px-5 py-3 rounded-2xl text-white text-sm font-semibold shadow-2xl ${colors[type]} fade-in`;
+        toast.className = `fixed bottom-24 lg:bottom-8 left-1/2 -translate-x-1/2 z-[200] flex items-center gap-3 px-5 py-3 rounded-2xl text-white text-sm font-semibold shadow-2xl ${colors[type]} fade-in`;
         toast.innerHTML = `<span class="material-symbols-outlined text-lg">${icons[type]}</span>${message}`;
         document.body.appendChild(toast);
         setTimeout(() => { toast.style.opacity = '0'; setTimeout(() => toast.remove(), 400); }, 3500);

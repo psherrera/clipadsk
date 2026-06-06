@@ -819,10 +819,39 @@ async def get_video_info(req: VideoRequest, request: Request):
     useful_formats.sort(key=lambda x: (x.get('height') or 0), reverse=True)
 
     for f in useful_formats:
-        res = f.get('resolution') or f"{f.get('height')}p"
-        if res == "Nonep" or not f.get('height'):
-            res = f.get('format_note') or f.get('format_id') or "Calidad única"
-        
+        height = f.get('height')
+        # Si no tiene height pero tiene resolution con formato WxH, extraer height
+        resolution_str = f.get('resolution')
+        if not height and resolution_str and 'x' in resolution_str:
+            try:
+                parts = resolution_str.split('x')
+                if len(parts) == 2:
+                    height = int(parts[1])
+            except ValueError:
+                pass
+
+        if height:
+            if height >= 2160:
+                res = "2160p (4K UHD)"
+            elif height >= 1440:
+                res = "1440p (2K QHD)"
+            elif height >= 1080:
+                res = "1080p (Full HD)"
+            elif height >= 720:
+                res = "720p (HD)"
+            elif height >= 480:
+                res = "480p (SD)"
+            elif height >= 360:
+                res = "360p (SD)"
+            else:
+                res = f"{height}p"
+        else:
+            note = f.get('format_note')
+            if note and not re.search(r'\d+x\d+', note) and len(note) < 15:
+                res = note
+            else:
+                res = "Calidad estándar"
+
         ext = f.get('ext', 'mp4')
         res_key = f"{res}_{ext}"
         if res_key not in seen_res:
@@ -1502,6 +1531,7 @@ async def transcript_audio_file(
         with open(input_path, 'wb') as f:
             f.write(content)
         
+        update_progress(uid, 5, "Archivo recibido en el servidor...")
         add_log(uid, f"Archivo recibido para transcribir: {file.filename} ({size_mb:.2f} MB)")
 
 
@@ -1514,6 +1544,7 @@ async def transcript_audio_file(
         if ext in AUDIO_EXTS | VIDEO_EXTS:
             converted_path = os.path.join(tmpdir, "converted.mp3")
             try:
+                update_progress(uid, 10, "Convirtiendo formato de audio/video...")
                 if AudioSegment:
                     logger.debug("Intentando conversion con pydub...")
                     audio = AudioSegment.from_file(input_path)
@@ -1554,11 +1585,14 @@ async def transcript_audio_file(
             srt_content = ""
             method = "groq_whisper_v3_file" if local_groq else "local_whisper"
 
+            update_progress(uid, 20, "Iniciando transcripción del audio...")
+
             if local_groq:
                 try:
                     all_segments = []
                     if AudioSegment and file_size_mb >= 20:
                         # Archivos grandes: trocear en partes de 20 minutos
+                        update_progress(uid, 22, "Dividiendo audio grande en partes...")
                         add_log(uid, f"Dividiendo audio de {file_size_mb:.1f}MB en partes...")
                         audio = AudioSegment.from_file(audio_path)
                         chunk_length_ms = 20 * 60 * 1000
@@ -1567,6 +1601,8 @@ async def transcript_audio_file(
                         for idx, chunk in enumerate(chunks):
                             with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as c_file:
                                 chunk.export(c_file.name, format="mp3", bitrate="64k")
+                                progress_pct = 25 + int((idx / len(chunks)) * 55)
+                                update_progress(uid, progress_pct, f"Transcribiendo parte {idx+1}/{len(chunks)} con Groq Whisper...")
                                 add_log(uid, f"Transcribiendo parte {idx+1}/{len(chunks)}...")
                                 with open(c_file.name, "rb") as cf:
                                     part_res = local_groq.audio.transcriptions.create(
@@ -1607,6 +1643,7 @@ async def transcript_audio_file(
                         else:
                             mime_type = "audio/ogg"
 
+                        update_progress(uid, 35, "Transcribiendo con Groq Whisper...")
                         with open(audio_path, "rb") as f:
                             trans_res = local_groq.audio.transcriptions.create(
                                 file=(os.path.basename(audio_path), f.read(), mime_type),
@@ -1623,9 +1660,14 @@ async def transcript_audio_file(
                     add_log(uid, f"Error critico en Groq Whisper: {str(ge)}")
                     if not WHISPER_MODEL_AVAILABLE:
                         raise Exception(f"Error en Groq API: {str(ge)}")
+                    update_progress(uid, 40, "Groq falló. Usando transcripción local con Whisper...")
                     add_log(uid, "Groq falló o la API Key es inválida. Intentando transcripción local con Whisper...")
                     transcription, srt_content = transcribe_with_local_whisper(audio_path, target_lang)
                     method = "local_whisper"
+            else:
+                update_progress(uid, 30, "Transcribiendo localmente con Whisper...")
+                transcription, srt_content = transcribe_with_local_whisper(audio_path, target_lang)
+
             # Unificar segmentos para retornar
             if method == "local_whisper":
                 segments_to_return = parse_subtitles_to_segments(srt_content)
@@ -1648,9 +1690,11 @@ async def transcript_audio_file(
 
             transcript_text = str(transcription).strip()
             # Limpieza con IA
+            update_progress(uid, 80, "Aplicando limpieza y formato con IA...")
             add_log(uid, f"Aplicando limpieza y formato IA ({target_lang})...")
             transcript_text = cleanup_transcript_with_ai(transcript_text, local_groq, target_lang, is_local_video=is_video)
             
+            update_progress(uid, 100, "Completado")
             add_log(uid, "Transcripcion de archivo completada con exito.")
             return {
                 "transcript": transcript_text,

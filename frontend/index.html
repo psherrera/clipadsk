@@ -92,6 +92,10 @@
                     <span class="text-[11px] lg:text-xs font-extrabold uppercase tracking-wider">Video</span>
                 </button>
                 <button class="nav-item flex flex-col lg:flex-row items-center gap-1.5 focus:outline-none text-slate-500 hover:text-slate-300 min-w-[60px] lg:min-w-0" data-tab="history">
+                    <span class="material-symbols-outlined text-[24px] lg:text-[20px]">history</span>
+                    <span class="text-[11px] lg:text-xs font-extrabold uppercase tracking-wider">Historial</span>
+                </button>
+                <button class="nav-item flex flex-col lg:flex-row items-center gap-1.5 focus:outline-none text-slate-500 hover:text-slate-300 min-w-[60px] lg:min-w-0" data-tab="config">
                     <span class="material-symbols-outlined text-[24px] lg:text-[20px]">settings</span>
                     <span class="text-[11px] lg:text-xs font-extrabold uppercase tracking-wider">Config</span>
                 </button>
@@ -201,6 +205,15 @@
 
             <!-- ═══ HISTORY SECTION ═══ -->
             <section id="history-section" class="hidden space-y-4">
+                <div class="flex items-center justify-between">
+                    <h3 class="text-lg font-bold text-white">Transcripciones guardadas</h3>
+                    <button onclick="const h=getHistory();if(h.length&&confirm('Borrar todo el historial?')){localStorage.removeItem('clipadsk_history');document.getElementById('history-list').innerHTML='';}" class="text-xs text-red-400 hover:text-red-300 transition-colors">Borrar todo</button>
+                </div>
+                <div id="history-list" class="space-y-3"></div>
+            </section>
+
+            <!-- ═══ CONFIG SECTION ═══ -->
+            <section id="config-section" class="hidden space-y-4">
                 <!-- GROQ API KEY CONFIG -->
                 <div class="glass rounded-2xl p-5 space-y-3 mb-6">
                     <div class="flex items-center justify-between">
@@ -264,7 +277,7 @@
                         </button>
 
                         <button id="system-reset-btn" class="bg-white/5 hover:bg-red-500/10 border border-white/5 p-4 rounded-xl flex items-center gap-4 transition-all group">
-                            <div class="w-10 h-10 rounded-lg bg-red-500/10">
+                            <div class="w-10 h-10 rounded-lg bg-red-500/10 flex items-center justify-center">
                                 <span class="material-symbols-outlined text-red-400">restart_alt</span>
                             </div>
                             <div class="text-left">
@@ -274,13 +287,6 @@
                         </button>
                     </div>
                 </div>
-
-
-                <div class="flex items-center justify-between">
-                    <h3 class="text-lg font-bold text-white">Transcripciones guardadas</h3>
-                    <button onclick="const h=getHistory();if(h.length&&confirm('Borrar todo el historial?')){localStorage.removeItem('clipadsk_history');document.getElementById('history-list').innerHTML='';}" class="text-xs text-red-400 hover:text-red-300 transition-colors">Borrar todo</button>
-                </div>
-                <div id="history-list" class="space-y-3"></div>
             </section>
 
             <!-- ═══ VIDEO RESULTS CARD ═══ -->
@@ -372,6 +378,44 @@
 
         <!-- ═══ DERECHA (Column 2) ═══ -->
         <div class="app-col-right lg:col-span-7 space-y-8 h-full">
+            
+            <!-- Estado Vacío del Panel Derecho -->
+            <div id="empty-state-panel" class="glass rounded-3xl p-8 py-16 space-y-8 h-full flex flex-col justify-center items-center text-center fade-in shadow-2xl border border-white/5">
+                <div class="relative flex items-center justify-center">
+                    <div class="absolute inset-0 bg-primary/20 blur-xl rounded-full scale-125 animate-pulse"></div>
+                    <div class="relative w-20 h-20 rounded-2xl bg-primary/10 border border-primary/20 flex items-center justify-center text-primary shadow-lg">
+                        <span class="material-symbols-outlined text-4xl">spatial_audio_off</span>
+                    </div>
+                </div>
+                
+                <div class="space-y-2 max-w-md">
+                    <h3 class="text-2xl font-bold text-white tracking-tight">Listo para procesar</h3>
+                    <p class="text-slate-400 text-sm leading-relaxed">
+                        Ingresá un enlace de YouTube/Redes o subí un archivo de audio/video en el panel izquierdo para comenzar.
+                    </p>
+                </div>
+                
+                <div class="w-full max-w-lg border-t border-white/10 pt-8 grid grid-cols-1 md:grid-cols-3 gap-6 text-left">
+                    <div class="space-y-2">
+                        <div class="flex items-center gap-2 text-xs font-bold text-accent uppercase tracking-wider">
+                            <span class="material-symbols-outlined text-sm bg-accent/10 p-1 rounded">download</span> Descargar
+                        </div>
+                        <p class="text-[11px] text-slate-500 leading-relaxed">Guarda videos en alta definición o extrae solo el audio en MP3 al instante.</p>
+                    </div>
+                    <div class="space-y-2">
+                        <div class="flex items-center gap-2 text-xs font-bold text-primary uppercase tracking-wider">
+                            <span class="material-symbols-outlined text-sm bg-primary/10 p-1 rounded">description</span> Transcribir
+                        </div>
+                        <p class="text-[11px] text-slate-500 leading-relaxed">Convierte voz a texto con Whisper IA en segundos con alta precisión.</p>
+                    </div>
+                    <div class="space-y-2">
+                        <div class="flex items-center gap-2 text-xs font-bold text-orange-400 uppercase tracking-wider">
+                            <span class="material-symbols-outlined text-sm bg-orange-500/10 p-1 rounded">smart_toy</span> Consultar
+                        </div>
+                        <p class="text-[11px] text-slate-500 leading-relaxed">Genera resúmenes automáticos, citas destacadas y chatea con la IA.</p>
+                    </div>
+                </div>
+            </div>
             
             <!-- Panel de Transcripción y Herramientas -->
             <section id="transcript-section" class="hidden glass rounded-3xl p-7 space-y-5 fade-in shadow-2xl h-full flex flex-col">

@@ -1645,10 +1645,23 @@ document.addEventListener('DOMContentLoaded', () => {
     downloadTxtBtn?.addEventListener('click', async () => {
         if (!currentTranscript) return;
 
-        const title     = (titleEl?.textContent || 'Transcripcion').trim().substring(0, 60);
-        const safeTitle = title.replace(/[/\\?%*:|"<>]/g, '-');
-        const header    = `${title}\n${'─'.repeat(Math.min(title.length, 60))}\n\n`;
-        const content   = header + getFormattedPlainText();
+        const title     = (titleEl?.textContent || 'Transcripción').trim();
+        const uploader  = (uploaderEl?.textContent || '').trim();
+        const desc      = (descriptionEl?.textContent || '').trim();
+        const url       = (videoUrlInput?.value || '').trim();
+
+        const safeTitle = title.substring(0, 60).replace(/[/\\?%*:|"<>]/g, '-');
+
+        let metadataHeader = '';
+        metadataHeader += `TÍTULO: ${title}\n`;
+        if (uploader) metadataHeader += `AUTOR/CANAL: ${uploader}\n`;
+        if (url)      metadataHeader += `ENLACE: ${url}\n`;
+        if (desc)     metadataHeader += `\nDESCRIPCIÓN / COPY:\n${desc}\n`;
+        
+        metadataHeader += `\n${'─'.repeat(60)}\n`;
+        metadataHeader += `TRANSCRIPCIÓN:\n${'─'.repeat(60)}\n\n`;
+
+        const content = metadataHeader + getFormattedPlainText();
 
         // Feedback visual
         const origHtml = downloadTxtBtn.innerHTML;

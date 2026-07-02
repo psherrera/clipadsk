@@ -74,11 +74,71 @@ document.addEventListener('DOMContentLoaded', () => {
             .replace(/'/g, '&#039;');
     }
 
+    // ─── LOG VIEWER ─────────────────────────────────────────────────────────────
+    /**
+     * Actualiza el visor de logs con un texto dado (para mensajes instantáneos).
+     */
+    function updateLogViewer(text) {
+        const viewer = document.getElementById('log-viewer');
+        if (viewer) {
+            viewer.textContent = text;
+            viewer.scrollTop = viewer.scrollHeight;
+        }
+    }
+
+    /**
+     * Carga los logs del servidor para un UID dado y los muestra en el visor.
+     */
+    async function fetchAndShowLogs(sessionUid) {
+        const viewer = document.getElementById('log-viewer');
+        if (!viewer || !sessionUid) return;
+        try {
+            const r = await fetch(`${API_BASE}/logs/${sessionUid}`);
+            if (!r.ok) { viewer.textContent = `Error ${r.status} al obtener los logs.`; return; }
+            const d = await r.json();
+            if (d.logs && d.logs.trim()) {
+                viewer.textContent = d.logs;
+            } else {
+                viewer.textContent = '— Sin logs disponibles para esta sesión. —';
+            }
+            viewer.scrollTop = viewer.scrollHeight;
+        } catch (e) {
+            viewer.textContent = `No se pudo obtener los logs: ${e.message}`;
+        }
+    }
+
+    // Botones del visor de logs
+    document.getElementById('log-refresh-btn')?.addEventListener('click', () => {
+        if (lastTranscriptUid) {
+            fetchAndShowLogs(lastTranscriptUid);
+        } else {
+            updateLogViewer('— Aún no hay ninguna transcripción en esta sesión. —');
+        }
+    });
+
+    document.getElementById('log-download-btn')?.addEventListener('click', async () => {
+        if (!lastTranscriptUid) { showToast('No hay logs para descargar aún.', 'info'); return; }
+        try {
+            const r = await fetch(`${API_BASE}/logs/${lastTranscriptUid}`);
+            const d = await r.json();
+            const blob = new Blob([d.logs || ''], { type: 'text/plain' });
+            const a = document.createElement('a');
+            a.href = URL.createObjectURL(blob);
+            a.download = `logs_clipadsk_${lastTranscriptUid}.txt`;
+            a.click();
+            URL.revokeObjectURL(a.href);
+        } catch (e) {
+            showToast('No se pudo descargar el log.', 'error');
+        }
+    });
+
     // AbortController activo para fetches cancelables
     let activeAbortController = null;
     // Flag para evitar doble polling en transcripción
     let isTranscribing = false;
     let activeTranscriptPollInterval = null;
+    // Ultimo UID de transcripción para el visor de logs
+    let lastTranscriptUid = null;
 
     // ─── PLATFORM DETECTION ─────────────────────────────────────────────────────
     const PLATFORMS = {
@@ -470,7 +530,13 @@ document.addEventListener('DOMContentLoaded', () => {
             });
 
             if (!data.has_ffmpeg) qualityWarning?.classList.remove('hidden');
-            showTranscriptBtn?.classList.remove('hidden');
+            
+            if (data.can_transcribe === false) {
+                showTranscriptBtn?.classList.add('hidden');
+            } else {
+                showTranscriptBtn?.classList.remove('hidden');
+            }
+
             videoInfoCard?.classList.remove('hidden');
             videoInfoCard?.classList.add('fade-in');
 
@@ -506,7 +572,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
             const r = await fetch(`${API_BASE}/download`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(bodyData) });
             if (!r.ok) { const e = await r.json(); throw new Error(e.detail || 'Error en descarga'); }
-            clearInterval(interval);
+            clearInterval(downloadInterval);
             updateProgress(95, 'Preparando archivo...');
             const blob = await r.blob();
             const a = document.createElement('a');
@@ -616,6 +682,10 @@ document.addEventListener('DOMContentLoaded', () => {
         showTranscriptBtn.disabled = true;
 
         const transcriptUid = Math.random().toString(36).substring(2, 15);
+        lastTranscriptUid = transcriptUid;
+        // Actualizar el visor de logs con estado "en proceso"
+        updateLogViewer(`[${new Date().toLocaleTimeString()}] Iniciando transcripción... (UID: ${transcriptUid})`);
+        document.getElementById('log-live-badge')?.classList.remove('hidden');
         activeTranscriptPollInterval = setInterval(async () => {
             try {
                 const r = await fetch(`${API_BASE}/progress/${transcriptUid}`);
@@ -639,13 +709,21 @@ document.addEventListener('DOMContentLoaded', () => {
                 body: JSON.stringify(reqBody),
                 signal: transcriptAbort.signal
             });
-            const data = await r.json();
+            let data;
+            try {
+                data = await r.json();
+            } catch (parseErr) {
+                throw new Error(`HTTP ${r.status} — Respuesta inválida del servidor. ¿El servidor está corriendo?`);
+            }
 
             clearInterval(activeTranscriptPollInterval);
             activeTranscriptPollInterval = null;
 
-            if (data.error) {
-                    const errorMsg = escapeHtml(data.error.replace(/\u001b\[[0-9;]*m/g, ''));
+            // El servidor puede devolver el error en data.error (500 internal) o data.detail (FastAPI HTTPException)
+            const serverError = data.error || data.detail;
+            if (!r.ok || serverError) {
+                    const errorMsg = escapeHtml((serverError || `HTTP ${r.status}`).replace(/\u001b\[[0-9;]*m/g, ''));
+
                     transcriptContent.innerHTML = `
                         <div class="bg-red-500/10 p-6 rounded-2xl border border-red-500/20 text-red-400 text-sm space-y-4">
                             <div class="flex items-center gap-2">
@@ -653,15 +731,20 @@ document.addEventListener('DOMContentLoaded', () => {
                                 <p class="font-bold">Error en la transcripción</p>
                             </div>
                             <p class="opacity-80">${errorMsg}</p>
-                            <div class="pt-2">
-                                <p class="text-[10px] text-slate-500 mb-3 italic">Si el error persiste, descarga el reporte y envíaselo al administrador.</p>
+                            <div class="pt-2 flex gap-2 flex-wrap">
+                                <p class="text-[10px] text-slate-500 w-full italic">Si el error persiste, descarga el reporte y envíaselo al administrador.</p>
                                 <button onclick="downloadErrorLog('${escapeHtml(transcriptUid)}')" class="bg-white/5 hover:bg-white/10 border border-white/10 px-4 py-2.5 rounded-xl text-xs font-bold transition-all flex items-center gap-2">
-                                    <span class="material-symbols-outlined text-sm">bug_report</span> Descargar Reporte de Error
+                                    <span class="material-symbols-outlined text-sm">bug_report</span> Descargar Reporte
+                                </button>
+                                <button onclick="document.querySelector('[data-tab=config]')?.click()" class="bg-white/5 hover:bg-white/10 border border-white/10 px-4 py-2.5 rounded-xl text-xs font-bold transition-all flex items-center gap-2">
+                                    <span class="material-symbols-outlined text-sm">terminal</span> Ver Logs
                                 </button>
                             </div>
                         </div>`;
+                    fetchAndShowLogs(transcriptUid);
                     return;
             }
+
 
 
             currentTranscript = data.transcript;
@@ -674,12 +757,100 @@ document.addEventListener('DOMContentLoaded', () => {
             clearInterval(activeTranscriptPollInterval);
             activeTranscriptPollInterval = null;
             if (err.name === 'AbortError') return; // cancelado intencionalmente
-            transcriptContent.innerHTML = `<p class="text-red-400 text-sm">Error al conectar con el servidor.</p>`;
+
+            // ── Recuperación automática para videos largos ───────────────────────
+            // Si la conexión se cortó (Failed to fetch / NetworkError), el servidor
+            // puede haber terminado igual. Intentamos recuperar el resultado por UID.
+            const isNetworkError = err.name === 'TypeError' || err.message?.includes('fetch') || err.message?.includes('network') || err.message?.includes('Network');
+            if (isNetworkError && transcriptUid) {
+                transcriptContent.innerHTML = `
+                    <div class="bg-amber-500/10 p-5 rounded-2xl border border-amber-500/20 space-y-3">
+                        <div class="flex items-center gap-2 text-amber-400">
+                            <div class="w-4 h-4 border-2 border-amber-700 border-t-amber-400 rounded-full animate-spin flex-shrink-0"></div>
+                            <p class="font-bold text-sm">La conexión se interrumpió — verificando si el servidor terminó...</p>
+                        </div>
+                        <p class="text-amber-400/70 text-xs">El video puede ser muy largo. Comprobando el resultado en el servidor...</p>
+                    </div>`;
+
+                // Hacer polling a /api/result/{uid} hasta 3 minutos
+                let retries = 0;
+                const maxRetries = 36; // 36 × 5s = 3 min
+                const recoveryInterval = setInterval(async () => {
+                    retries++;
+                    try {
+                        const rec = await fetch(`${API_BASE}/result/${transcriptUid}`);
+                        if (rec.ok) {
+                            const recData = await rec.json();
+                            clearInterval(recoveryInterval);
+                            if (recData.transcript) {
+                                currentTranscript = recData.transcript;
+                                renderTranscript(recData.transcript, recData.method, recData.srt, recData.segments);
+                                downloadTxtBtn?.classList.remove('hidden');
+                                saveToHistory({ url, platform: detectPlatformFromUrl(url), title: titleEl.textContent || url, transcript: recData.transcript, srt: recData.srt, segments: recData.segments });
+                                showToast('¡Transcripción recuperada del servidor!', 'success');
+                                return;
+                            }
+                        }
+                    } catch (_) { /* sigue intentando */ }
+
+                    if (retries >= maxRetries) {
+                        clearInterval(recoveryInterval);
+                        // Mostramos error final con botón de reintento manual
+                        const errDetail = escapeHtml(err.message || 'Error de red');
+                        transcriptContent.innerHTML = `
+                            <div class="bg-red-500/10 p-5 rounded-2xl border border-red-500/20 space-y-3">
+                                <div class="flex items-center gap-2 text-red-400">
+                                    <span class="material-symbols-outlined">wifi_off</span>
+                                    <p class="font-bold text-sm">No se pudo obtener la transcripción</p>
+                                </div>
+                                <p class="text-red-400/80 text-xs leading-relaxed">La conexión se cortó y el servidor no devolvió un resultado en 3 minutos. Esto puede pasar con videos muy largos.</p>
+                                <p class="text-slate-600 text-xs">${errDetail}</p>
+                                <div class="pt-1 flex gap-2 flex-wrap">
+                                    <button onclick="showTranscriptBtn?.click()" class="bg-primary/20 hover:bg-primary/30 border border-primary/30 text-primary px-4 py-2 rounded-xl text-xs font-bold transition-all flex items-center gap-2">
+                                        <span class="material-symbols-outlined text-sm">refresh</span> Reintentar
+                                    </button>
+                                    <button onclick="downloadErrorLog('${escapeHtml(transcriptUid)}')" class="bg-white/5 hover:bg-white/10 border border-white/10 px-4 py-2 rounded-xl text-xs font-bold transition-all flex items-center gap-2">
+                                        <span class="material-symbols-outlined text-sm">bug_report</span> Descargar Reporte
+                                    </button>
+                                    <button onclick="document.querySelector('[data-tab=config]')?.click()" class="bg-white/5 hover:bg-white/10 border border-white/10 px-4 py-2 rounded-xl text-xs font-bold transition-all flex items-center gap-2">
+                                        <span class="material-symbols-outlined text-sm">terminal</span> Ver Logs
+                                    </button>
+                                </div>
+                            </div>`;
+                        fetchAndShowLogs(transcriptUid);
+                    }
+                }, 5000);
+                return; // El finally se encargará del cleanup
+            }
+            // ── Fin recuperación ─────────────────────────────────────────────────
+
+            const errDetail = escapeHtml(err.message || 'Error desconocido');
+            transcriptContent.innerHTML = `
+                <div class="bg-red-500/10 p-5 rounded-2xl border border-red-500/20 space-y-3">
+                    <div class="flex items-center gap-2 text-red-400">
+                        <span class="material-symbols-outlined">wifi_off</span>
+                        <p class="font-bold text-sm">Error al conectar con el servidor</p>
+                    </div>
+                    <p class="text-red-400/80 text-xs leading-relaxed">${errDetail}</p>
+                    <div class="pt-1 flex gap-2 flex-wrap">
+                        <button onclick="downloadErrorLog('${escapeHtml(transcriptUid)}')" class="bg-white/5 hover:bg-white/10 border border-white/10 px-4 py-2 rounded-xl text-xs font-bold transition-all flex items-center gap-2">
+                            <span class="material-symbols-outlined text-sm">bug_report</span> Descargar Reporte
+                        </button>
+                        <button onclick="document.querySelector('[data-tab=config]')?.click()" class="bg-white/5 hover:bg-white/10 border border-white/10 px-4 py-2 rounded-xl text-xs font-bold transition-all flex items-center gap-2">
+                            <span class="material-symbols-outlined text-sm">terminal</span> Ver Logs
+                        </button>
+                    </div>
+                </div>`;
+            // Mostrar los logs en el visor
+            fetchAndShowLogs(transcriptUid);
         } finally { 
             clearInterval(activeTranscriptPollInterval);
             activeTranscriptPollInterval = null;
             isTranscribing = false;
-            showTranscriptBtn.disabled = false; 
+            showTranscriptBtn.disabled = false;
+            document.getElementById('log-live-badge')?.classList.add('hidden');
+            // Cargar logs finales en el visor
+            if (lastTranscriptUid) fetchAndShowLogs(lastTranscriptUid);
         }
     });
 

@@ -52,3 +52,8 @@ build/
 
 # Logs
 *.log
+
+# Archivos de configuración locales y ejecutables grandes
+cookies.txt
+cookies_ig.txt
+Clipa.exe

@@ -103,11 +103,15 @@ if not exist "backend\venv\Scripts\python.exe" (
 )
 
 :: ─────────────────────────────────────────────────────────────────────────────
-:: 5) SINCRONIZAR COOKIES (si existe cookies.txt en la raiz)
+:: 5) SINCRONIZAR COOKIES (si existe cookies.txt o cookies_ig.txt en la raiz)
 :: ─────────────────────────────────────────────────────────────────────────────
 if exist "cookies.txt" (
     copy /y "cookies.txt" "backend\cookies.txt" >nul
     echo  [OK] cookies.txt copiado al backend.
+)
+if exist "cookies_ig.txt" (
+    copy /y "cookies_ig.txt" "backend\cookies_ig.txt" >nul
+    echo  [OK] cookies_ig.txt copiado al backend.
 )
 
 :: ─────────────────────────────────────────────────────────────────────────────

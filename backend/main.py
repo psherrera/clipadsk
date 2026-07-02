@@ -99,6 +99,27 @@ MAX_CONCURRENT_JOBS = int(os.environ.get('MAX_CONCURRENT_JOBS', '2'))
 EXECUTOR = ThreadPoolExecutor(max_workers=MAX_WORKERS)
 SEMAPHORE = asyncio.Semaphore(MAX_CONCURRENT_JOBS)
 
+# --- RESULT STORE (para recuperar transcripciones si la conexión se corta) ---
+# Guarda resultados por uid durante 1 hora para que el frontend pueda recuperarlos
+RESULT_STORE: dict = {}  # uid -> {"result": ..., "ts": timestamp}
+RESULT_STORE_TTL = 3600  # 1 hora
+
+def store_result(uid: str, result: dict):
+    """Guarda el resultado de una transcripción en memoria."""
+    RESULT_STORE[uid] = {"result": result, "ts": time.time()}
+    # Limpiar entradas viejas
+    cutoff = time.time() - RESULT_STORE_TTL
+    expired = [k for k, v in RESULT_STORE.items() if v["ts"] < cutoff]
+    for k in expired:
+        RESULT_STORE.pop(k, None)
+
+def get_stored_result(uid: str):
+    """Recupera el resultado de una transcripción guardada, si existe."""
+    entry = RESULT_STORE.get(uid)
+    if entry:
+        return entry["result"]
+    return None
+
 
 async def run_blocking(fn: Any, *args, **kwargs):
     """Run a blocking function in a controlled threadpool with semaphore."""
@@ -621,7 +642,8 @@ def get_robust_opts(target_url, extra={}):
     # Seleccionar cookies según plataforma
     if is_instagram:
         cookie_b64 = os.environ.get('INSTAGRAM_COOKIES_B64') or os.environ.get('COOKIES_B64')
-        local_paths = ['/etc/secrets/cookies_ig.txt', ig_cookie_path]
+        # Buscar primero cookies_ig.txt y usar cookies.txt como fallback
+        local_paths = ['/etc/secrets/cookies_ig.txt', ig_cookie_path, '/etc/secrets/cookies.txt', cookie_path]
         if portable_cookie_path:
             local_paths.insert(0, portable_cookie_path)
     else:
@@ -728,6 +750,38 @@ def get_instagram_info(url):
         'video_url': post.video_url if post.is_video else None,
     }
 
+def get_instagram_carousel_info(url, cookies_path=None):
+    """Extrae la lista de imágenes/videos de un carrusel de Instagram usando gallery-dl."""
+    venv_dir = os.path.join(ROOT_DIR, "backend", "venv")
+    gallery_dl_bin = os.path.join(venv_dir, "Scripts", "gallery-dl.exe")
+    if not os.path.exists(gallery_dl_bin):
+        gallery_dl_bin = "gallery-dl" # fallback al path del sistema
+        
+    cmd = [gallery_dl_bin, "-j"]
+    if cookies_path and os.path.exists(cookies_path):
+        cmd.extend(["--cookies", cookies_path])
+    cmd.append(url)
+    
+    logger.info(f"Ejecutando gallery-dl: {cmd}")
+    try:
+        res = subprocess.run(cmd, capture_output=True, text=True, encoding='utf-8')
+        if res.returncode != 0:
+            logger.warning(f"gallery-dl falló con código {res.returncode}: {res.stderr}")
+            return None
+        
+        data = json.loads(res.stdout)
+        files = []
+        for item in data:
+            if isinstance(item, list) and len(item) >= 3 and item[0] == 3:
+                files.append({
+                    "url": item[1],
+                    "metadata": item[2]
+                })
+        return files
+    except Exception as e:
+        logger.exception(f"Error extrayendo carrusel con gallery-dl: {e}")
+        return None
+
 # --- ENDPOINTS ---
 
 @app.post("/api/video-info")
@@ -806,6 +860,48 @@ async def get_video_info(req: VideoRequest, request: Request):
 
     if not info:
         logger.error(f"EXTRACT_INFO FAILED for {url}.")
+        if is_instagram:
+            cookie_file = get_robust_opts(url).get('cookiefile')
+            files = await run_blocking(get_instagram_carousel_info, url, cookie_file)
+            if files:
+                first_file = files[0]
+                metadata = first_file.get("metadata", {})
+                title = metadata.get("description") or f"Instagram Post {metadata.get('post_shortcode', '')}"
+                if len(title) > 100:
+                    title = title[:100] + "..."
+                uploader = metadata.get("username") or "Instagram User"
+                
+                thumbnail = first_file.get("url")
+                if thumbnail:
+                    from urllib.parse import quote
+                    thumbnail = f"/api/proxy-thumbnail?url={quote(thumbnail, safe='')}"
+                
+                formats = [{
+                    'format_id': 'carousel_images',
+                    'ext': 'zip',
+                    'resolution': 'Imágenes (ZIP)',
+                    'filesize': None,
+                    'label': f"Conjunto de {len(files)} imágenes (.zip)"
+                }]
+                
+                return {
+                    'title': title,
+                    'thumbnail': thumbnail,
+                    'max_res_thumbnail': thumbnail,
+                    'duration': None,
+                    'uploader': uploader,
+                    'description': metadata.get("description") or "",
+                    'formats': formats,
+                    'has_ffmpeg': True,
+                    'has_subtitles': False,
+                    'can_transcribe': True,
+                }
+
+        if is_instagram and "No video formats found" in last_error:
+            raise HTTPException(
+                status_code=400,
+                detail="Este post de Instagram no contiene video (es una publicación de fotos/imágenes). Clipadsk solo puede descargar o transcribir videos y audios."
+            )
         raise HTTPException(
             status_code=400, 
             detail=f"No pudimos procesar este video. Puede ser privado o YouTube bloqueó la conexión. Errores: {last_error[:200]}"
@@ -904,6 +1000,19 @@ async def get_video_info(req: VideoRequest, request: Request):
         'has_subtitles': bool(info.get('subtitles') or info.get('automatic_captions'))
     }
 
+@app.get("/api/result/{uid}")
+async def get_transcript_result(uid: str):
+    """
+    Recupera el resultado de una transcripción previamente completada por su UID.
+    Útil cuando la conexión HTTP se cortó durante un video largo pero el servidor
+    terminó el proceso correctamente.
+    """
+    result = get_stored_result(uid)
+    if result is None:
+        raise HTTPException(status_code=404, detail="Resultado no disponible. La transcripción puede no haber terminado o el UID es incorrecto.")
+    return result
+
+
 @app.post("/api/transcript")
 async def get_transcript(req: VideoRequest):
     url = sanitize_url(req.url)
@@ -932,6 +1041,95 @@ async def get_transcript(req: VideoRequest):
         except Exception:
             pass
         return {"transcript": cached_val, "method": "cache"}
+
+    # --- INSTAGRAM CAROUSEL OCR FALLBACK ---
+    is_instagram = 'instagram.com' in url
+    local_groq = get_local_groq(req.groq_api_key)
+    if is_instagram:
+        cookie_file = get_robust_opts(url).get('cookiefile')
+        files = await run_blocking(get_instagram_carousel_info, url, cookie_file)
+        if files:
+            only_images = True
+            for f in files:
+                meta = f.get("metadata", {})
+                ext = meta.get("extension") or ""
+                video_url = meta.get("video_url")
+                if video_url or ext.lower() in ('mp4', 'mov', 'avi', 'mkv', 'webm'):
+                    only_images = False
+                    break
+            
+            if only_images:
+                if not local_groq:
+                    raise HTTPException(
+                        status_code=400, 
+                        detail="Para extraer texto de imágenes (OCR), necesitás configurar la API Key de Groq en Configuración."
+                    )
+                add_log(uid, f"Detectado carrusel de imágenes ({len(files)} diapositivas). Iniciando OCR con Groq Vision...")
+                ocr_text = ""
+                total_files = len(files)
+                for idx, file_item in enumerate(files):
+                    img_url = file_item["url"]
+                    update_progress(req.uid, int((idx / total_files) * 90) + 5, f"Analizando diapositiva {idx+1}/{total_files}...")
+                    
+                    try:
+                        headers = {'User-Agent': 'Mozilla/5.0'}
+                        img_res = requests.get(img_url, headers=headers, timeout=20)
+                        if img_res.status_code == 200:
+                            b64_img = base64.b64encode(img_res.content).decode('utf-8')
+                            
+                            chat_completion = local_groq.chat.completions.create(
+                                messages=[
+                                    {
+                                        "role": "user",
+                                        "content": [
+                                            {
+                                                "type": "text",
+                                                "text": "Extract all readable text from this image. Return only the extracted text, keeping logical line breaks. Do not add any introductory or extra conversational text."
+                                            },
+                                            {
+                                                "type": "image_url",
+                                                "image_url": {
+                                                    "url": f"data:image/jpeg;base64,{b64_img}"
+                                                }
+                                            }
+                                        ]
+                                    }
+                                ],
+                                model="meta-llama/llama-4-scout-17b-16e-instruct",
+                                temperature=0.1,
+                                max_tokens=1024
+                            )
+                            extracted = chat_completion.choices[0].message.content.strip()
+                            ocr_text += f"--- DIAPOSITIVA {idx+1} ---\n{extracted}\n\n"
+                            add_log(uid, f"Diapositiva {idx+1}/{total_files} procesada exitosamente.")
+                        else:
+                            ocr_text += f"--- DIAPOSITIVA {idx+1} ---\n[Error al descargar la imagen: Código {img_res.status_code}]\n\n"
+                            add_log(uid, f"Error al descargar diapositiva {idx+1}: código {img_res.status_code}")
+                    except Exception as ocr_err:
+                        logger.warning(f"Error en OCR diapositiva {idx+1}: {ocr_err}")
+                        ocr_text += f"--- DIAPOSITIVA {idx+1} ---\n[Error de extracción: {str(ocr_err)}]\n\n"
+                        add_log(uid, f"Error al procesar OCR de diapositiva {idx+1}: {str(ocr_err)}")
+                
+                update_progress(req.uid, 95, "Guardando resultado...")
+                ocr_text = ocr_text.strip()
+                
+                cache_data = {
+                    "transcript": ocr_text,
+                    "srt": "",
+                    "segments": []
+                }
+                save_cache_entry(cache_key, json.dumps(cache_data))
+                update_progress(req.uid, 100, "¡Extracción de texto completa!")
+                
+                result_payload = {
+                    "transcript": ocr_text,
+                    "srt": "",
+                    "segments": [],
+                    "method": "groq_vision_ocr"
+                }
+                if uid:
+                    store_result(uid, result_payload)
+                return result_payload
 
     with tempfile.TemporaryDirectory() as tmpdir:
         try:
@@ -1001,12 +1199,15 @@ async def get_transcript(req: VideoRequest):
                     save_cache_entry(cache_key, json.dumps(cache_data))
                     add_log(uid, "Transcripcion via subtitulos completada.")
                     update_progress(req.uid, 100, "¡Transcripción lista!")
-                    return {
+                    result_payload = {
                         "transcript": final_text,
                         "srt": srt_content,
                         "segments": segments,
                         "method": "subtitles"
                     }
+                    if uid:
+                        store_result(uid, result_payload)
+                    return result_payload
 
             raise Exception("No direct subtitles")
 
@@ -1152,12 +1353,15 @@ async def get_transcript(req: VideoRequest):
                         save_cache_entry(cache_key, json.dumps(cache_data))
                         add_log(uid, "Transcripcion de archivo completada.")
                         update_progress(req.uid, 100, "¡Transcripción lista!")
-                        return {
+                        result_payload = {
                             "transcript": transcription,
                             "srt": srt_content,
                             "segments": all_segments,
                             "method": "groq_whisper_v3_file"
                         }
+                        if uid:
+                            store_result(uid, result_payload)
+                        return result_payload
                     except Exception as ge:
                         add_log(uid, f"Error en Groq Whisper, intentando local: {str(ge)}")
                         if not WHISPER_MODEL_AVAILABLE:
@@ -1188,12 +1392,15 @@ async def get_transcript(req: VideoRequest):
                         save_cache_entry(cache_key, json.dumps(cache_data))
                         add_log(uid, "Transcripcion local completada.")
                         update_progress(req.uid, 100, "¡Transcripción lista!")
-                        return {
+                        result_payload = {
                             "transcript": transcription,
                             "srt": srt_content,
                             "segments": all_segments,
                             "method": "local_whisper"
                         }
+                        if uid:
+                            store_result(uid, result_payload)
+                        return result_payload
                     except Exception as le:
                         add_log(uid, f"Error en transcripcion local: {str(le)}")
                         raise le
@@ -1263,6 +1470,44 @@ async def download_video(req: VideoRequest, background_tasks: BackgroundTasks):
     url = sanitize_url(req.url)
     format_id = req.format_id
     uid = str(uuid.uuid4())
+
+    # --- CARRUSEL DE IMÁGENES (gallery-dl) ---
+    if format_id == 'carousel_images':
+        cookie_file = get_robust_opts(url).get('cookiefile')
+        files = await run_blocking(get_instagram_carousel_info, url, cookie_file)
+        if not files:
+            raise HTTPException(status_code=400, detail="No se pudieron extraer las imágenes del carrusel.")
+            
+        import zipfile
+        zip_filename = f"instagram_carousel_{uid}.zip"
+        zip_path = os.path.join(DOWNLOAD_FOLDER, zip_filename)
+        
+        def create_zip():
+            headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+            with zipfile.ZipFile(zip_path, 'w') as zipf:
+                for idx, file_item in enumerate(files):
+                    file_url = file_item["url"]
+                    meta = file_item.get("metadata", {})
+                    ext = meta.get("extension") or "jpg"
+                    try:
+                        r = requests.get(file_url, headers=headers, timeout=30)
+                        if r.status_code == 200:
+                            zipf.writestr(f"imagen_{idx+1}.{ext}", r.content)
+                    except Exception as download_err:
+                        logger.warning(f"Error descargando imagen {idx+1} para zip: {download_err}")
+                        
+        await run_blocking(create_zip)
+        
+        def remove_file(path):
+            try:
+                if os.path.exists(path): os.remove(path)
+            except: pass
+            
+        background_tasks.add_task(remove_file, zip_path)
+        
+        username_safe = "".join([c for c in files[0]["metadata"].get("username", "instagram") if c.isalnum() or c==' ']).strip() or "carrusel"
+        filename = f"carrusel_{username_safe}_{uid[:6]}.zip"
+        return FileResponse(zip_path, filename=filename, media_type='application/zip')
 
     # --- INSTAGRAM: usar instaloader para descarga ---
     if 'instagram.com' in url and instaloader:
@@ -1775,7 +2020,7 @@ Respondé solo con el resumen, sin encabezados ni explicaciones.
 TRANSCRIPCIÓN:
 {transcript}""",
 
-    "quotes": """¡IMPORTANTE! Respondé EXCLUSIVAMENTE con un array JSON válido, sin ningún texto antes ni después.
+    "quotes": """¡IMPORTANTE! Respondé EXCLUSIVAMENTE con un objeto JSON válido que contenga un array bajo la clave "quotes", sin ningún texto antes ni después.
 
 Sos un asistente para periodistas. Dado el siguiente texto transcripto, extraé las 5 CITAS TEXTUALES más noticiosas, llamativas o reveladoras.
 
@@ -1785,9 +2030,11 @@ Para cada cita devolvé un objeto JSON con estos campos exactos:
 - "search": una frase corta única de 4-8 palabras que esté dentro de la cita, para poder ubicarla en el texto
 
 Formato de respuesta (solo el JSON, nada más):
-[
-  {"quote": "...", "note": "...", "search": "..."}
-]
+{
+  "quotes": [
+    {"quote": "...", "note": "...", "search": "..."}
+  ]
+}
 
 TRANSCRIPCIÓN:
 {transcript}""",
@@ -1954,8 +2201,10 @@ async def extract_quotes_with_times(req: QuotesRequest):
         quotes_list = parsed if isinstance(parsed, list) else []
     except Exception as parse_err:
         logger.warning(f"No se pudo parsear JSON de citas: {parse_err}. Raw: {raw_result[:300]}")
-        # Fallback: devolver texto plano sin tiempos
-        return {"quotes": [], "raw": raw_result, "error": "No se pudo parsear el formato de citas."}
+        raise HTTPException(
+            status_code=500,
+            detail=f"No se pudo parsear el formato de citas generado por la IA. Por favor, reintentá. Error: {str(parse_err)}"
+        )
 
     # Enriquecer cada cita con tiempos buscando en los segmentos
     enriched = []
@@ -2032,6 +2281,7 @@ async def update_app(request: Request):
     files_to_backup = [
         (ROOT_DIR, ".env"),
         (ROOT_DIR, "cookies.txt"),
+        (ROOT_DIR, "cookies_ig.txt"),
         (BASE_DIR, "cookies.txt"),
         (BASE_DIR, "cookies_ig.txt")
     ]
@@ -2139,4 +2389,10 @@ if __name__ == "__main__":
 
     import uvicorn
     port = int(os.environ.get("PORT", 5000))
-    uvicorn.run(app, host="0.0.0.0", port=port)
+    uvicorn.run(
+        app,
+        host="0.0.0.0",
+        port=port,
+        timeout_keep_alive=600,   # 10 minutos — soporta videos muy largos
+        h11_max_incomplete_event_size=None,  # sin límite de tamaño de respuesta
+    )

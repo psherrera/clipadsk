@@ -34,8 +34,11 @@ document.addEventListener('DOMContentLoaded', () => {
     const transcriptSection    = document.getElementById('transcript-section');
     const transcriptContent    = document.getElementById('transcript-content');
     const copyTranscriptBtn    = document.getElementById('copy-transcript-btn');
+    const editTranscriptBtn    = document.getElementById('edit-transcript-btn');
+    const downloadDocxBtn      = document.getElementById('download-docx-btn');
     const downloadTxtBtn       = document.getElementById('download-txt-btn');
     const downloadSrtBtn       = document.getElementById('download-srt-btn');
+    const historySearchInput   = document.getElementById('history-search-input');
     const appSubtitle          = document.getElementById('app-subtitle');
     const tabTitle             = document.getElementById('tab-title');
     const inputIcon            = document.getElementById('input-icon');
@@ -62,6 +65,7 @@ document.addEventListener('DOMContentLoaded', () => {
     let currentSrt             = '';
     let currentMaxResThumbnail = '';
     let currentSegments        = [];
+    let isEditing              = false;
 
     // ─── SEGURIDAD: escapeHtml para evitar XSS en datos de usuario ───────────────
     function escapeHtml(str) {
@@ -144,7 +148,9 @@ document.addEventListener('DOMContentLoaded', () => {
     const PLATFORMS = {
         youtube:   { hosts: ['youtube.com', 'youtu.be'],             icon: 'subscriptions', label: 'YouTube',   placeholder: 'Pega el enlace de YouTube...' },
         instagram: { hosts: ['instagram.com'],                        icon: 'photo_library', label: 'Instagram', placeholder: 'Pega el enlace del Reel o Video...' },
-        redes:     { hosts: ['tiktok.com', 'vm.tiktok.com', 'twitter.com', 'x.com', 't.co', 'facebook.com', 'fb.watch', 'fb.com'], icon: 'share', label: 'Redes (TikTok/X/FB)', placeholder: 'Pega enlace de TikTok, X o Facebook...' },
+        tiktok:    { hosts: ['tiktok.com', 'vm.tiktok.com'],          icon: 'movie',         label: 'TikTok',    placeholder: 'Pega el enlace de TikTok...' },
+        redes:     { hosts: ['twitter.com', 'x.com', 't.co', 'facebook.com', 'fb.watch', 'fb.com'], icon: 'share', label: 'Redes (X/FB)', placeholder: 'Pega enlace de X o Facebook...' },
+        bunny:     { hosts: ['mediadelivery.net', 'b-cdn.net', 'bunnycdn.com'], icon: 'play_circle', label: 'Video Web', placeholder: 'Pega el enlace de la página o del video...' },
         whatsapp:  { hosts: [],                                       icon: 'mic',           label: 'WhatsApp',  placeholder: 'Sube un audio de WhatsApp (.ogg/.mp3)' },
         video:     { hosts: [],                                       icon: 'video_file',    label: 'Video',     placeholder: 'Subí un video local (.mp4/.mov)' },
         history:   { hosts: [],                                       icon: 'history',       label: 'Historial', placeholder: '' },
@@ -210,31 +216,66 @@ document.addEventListener('DOMContentLoaded', () => {
         if (idx !== -1) history.splice(idx, 1);
         history.unshift({ ...entry, date: new Date().toISOString() });
         if (history.length > 50) history.pop();
-        localStorage.setItem(HISTORY_KEY, JSON.stringify(history));
+        
+        try {
+            localStorage.setItem(HISTORY_KEY, JSON.stringify(history));
+        } catch (e) {
+            console.warn("Storage quota exceeded, trying to clean up older/larger history entries...", e);
+            // If it exceeds the quota, keep removing the oldest items until it fits
+            let success = false;
+            while (history.length > 1) {
+                history.pop();
+                try {
+                    localStorage.setItem(HISTORY_KEY, JSON.stringify(history));
+                    success = true;
+                    break;
+                } catch (retryError) {
+                    // Continue loop
+                }
+            }
+            if (!success) {
+                // If it still doesn't fit (e.g. this single item is too large), save it without segments/srt
+                try {
+                    const minimalEntry = { ...entry, segments: [], srt: "" };
+                    localStorage.setItem(HISTORY_KEY, JSON.stringify([minimalEntry]));
+                } catch (finalError) {
+                    console.error("Failed to save even a single minimal entry:", finalError);
+                }
+            }
+        }
         if (currentTab === 'history') renderHistory();
     }
 
-    function renderHistory() {
+    function renderHistory(filterText = '') {
         const container = document.getElementById('history-list');
         if (!container) return;
-        const history = getHistory();
+        let history = getHistory();
+
+        if (filterText) {
+            const query = filterText.toLowerCase();
+            history = history.filter(item => 
+                (item.title && item.title.toLowerCase().includes(query)) ||
+                (item.url && item.url.toLowerCase().includes(query)) ||
+                (item.transcript && item.transcript.toLowerCase().includes(query))
+            );
+        }
 
         if (history.length === 0) {
             container.innerHTML = `
                 <div class="text-center py-16 text-slate-500">
                     <span class="material-symbols-outlined text-5xl mb-4 block opacity-30">history</span>
-                    <p class="text-sm">Aún no hay transcripciones guardadas.</p>
-                    <p class="text-xs mt-1 opacity-60">Se guardan automáticamente al transcribir.</p>
+                    <p class="text-sm">${filterText ? 'No se encontraron resultados.' : 'Aún no hay transcripciones guardadas.'}</p>
+                    <p class="text-xs mt-1 opacity-60">${filterText ? 'Probá con otros términos.' : 'Se guardan automáticamente al transcribir.'}</p>
                 </div>`;
             return;
         }
 
-        container.innerHTML = history.map((item, i) => {
+        container.innerHTML = history.map((item) => {
             const date = new Date(item.date).toLocaleDateString('es-AR', { day:'2-digit', month:'short', year:'numeric' });
             const platformIcon = PLATFORMS[item.platform]?.icon || 'link';
-            // escapeHtml para prevenir XSS con datos del historial
             const safeTitle   = escapeHtml(item.title || item.url);
             const preview     = escapeHtml(item.transcript ? item.transcript.substring(0, 140) + '...' : 'Sin transcripcion');
+            const dateKey     = escapeHtml(item.date);
             return `
             <div class="glass rounded-2xl p-5 space-y-3 fade-in">
                 <div class="flex items-start justify-between gap-3">
@@ -247,21 +288,21 @@ document.addEventListener('DOMContentLoaded', () => {
                 ${item.transcript ? `
                 <p class="text-slate-400 text-xs leading-relaxed line-clamp-2">${preview}</p>
                 <div class="flex gap-2 flex-wrap">
-                    <button onclick="window._hist.load(${i})" class="text-[10px] font-bold uppercase tracking-widest bg-primary/20 text-primary px-3 py-1.5 rounded-full hover:bg-primary/30 transition-all flex items-center gap-1">
+                    <button onclick="window._hist.load('${dateKey}')" class="text-[10px] font-bold uppercase tracking-widest bg-primary/20 text-primary px-3 py-1.5 rounded-full hover:bg-primary/30 transition-all flex items-center gap-1">
                         <span class="material-symbols-outlined text-xs">visibility</span> Ver
                     </button>
-                    <button onclick="window._hist.copy(${i})" class="text-[10px] font-bold uppercase tracking-widest bg-accent/20 text-accent px-3 py-1.5 rounded-full hover:bg-accent/30 transition-all flex items-center gap-1">
+                    <button onclick="window._hist.copy('${dateKey}')" class="text-[10px] font-bold uppercase tracking-widest bg-accent/20 text-accent px-3 py-1.5 rounded-full hover:bg-accent/30 transition-all flex items-center gap-1">
                         <span class="material-symbols-outlined text-xs">content_copy</span> Copiar
                     </button>
-                    <button onclick="window._hist.download(${i})" class="text-[10px] font-bold uppercase tracking-widest bg-white/5 text-slate-300 px-3 py-1.5 rounded-full hover:bg-white/10 transition-all flex items-center gap-1">
+                    <button onclick="window._hist.download('${dateKey}')" class="text-[10px] font-bold uppercase tracking-widest bg-white/5 text-slate-300 px-3 py-1.5 rounded-full hover:bg-white/10 transition-all flex items-center gap-1">
                         <span class="material-symbols-outlined text-xs">download</span> .txt
                     </button>
                     ${item.srt ? `
-                    <button onclick="window._hist.downloadSrt(${i})" class="text-[10px] font-bold uppercase tracking-widest bg-emerald-500/10 text-emerald-300 px-3 py-1.5 rounded-full hover:bg-emerald-500/25 transition-all flex items-center gap-1">
+                    <button onclick="window._hist.downloadSrt('${dateKey}')" class="text-[10px] font-bold uppercase tracking-widest bg-emerald-500/10 text-emerald-300 px-3 py-1.5 rounded-full hover:bg-emerald-500/25 transition-all flex items-center gap-1">
                         <span class="material-symbols-outlined text-xs">subtitles</span> .srt
                     </button>
                     ` : ''}
-                    <button onclick="window._hist.remove(${i})" class="text-[10px] font-bold uppercase tracking-widest bg-red-500/10 text-red-400 px-3 py-1.5 rounded-full hover:bg-red-500/20 transition-all flex items-center gap-1 ml-auto">
+                    <button onclick="window._hist.remove('${dateKey}')" class="text-[10px] font-bold uppercase tracking-widest bg-red-500/10 text-red-400 px-3 py-1.5 rounded-full hover:bg-red-500/20 transition-all flex items-center gap-1 ml-auto">
                         <span class="material-symbols-outlined text-xs">delete</span>
                     </button>
                 </div>` : ''}
@@ -270,8 +311,8 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     window._hist = {
-        load: (i) => {
-            const item = getHistory()[i];
+        load: (date) => {
+            const item = getHistory().find(h => h.date === date);
             if (!item) return;
             switchTab(item.platform || 'youtube');
             if (videoUrlInput && !item.url.startsWith('whatsapp:') && !item.url.startsWith('video:')) {
@@ -291,12 +332,12 @@ document.addEventListener('DOMContentLoaded', () => {
             }
             showToast('Transcripción cargada', 'success');
         },
-        copy: (i) => {
-            const item = getHistory()[i];
+        copy: (date) => {
+            const item = getHistory().find(h => h.date === date);
             if (item?.transcript) { navigator.clipboard.writeText(item.transcript); showToast('Copiado', 'success'); }
         },
-        download: (i) => {
-            const item = getHistory()[i];
+        download: (date) => {
+            const item = getHistory().find(h => h.date === date);
             if (!item?.transcript) return;
             const blob = new Blob([item.transcript], { type: 'text/plain' });
             const a = document.createElement('a');
@@ -304,8 +345,8 @@ document.addEventListener('DOMContentLoaded', () => {
             a.download = `${(item.title || 'transcripcion').substring(0, 30)}.txt`;
             a.click();
         },
-        downloadSrt: (i) => {
-            const item = getHistory()[i];
+        downloadSrt: (date) => {
+            const item = getHistory().find(h => h.date === date);
             if (!item?.srt) return;
             const blob = new Blob([item.srt], { type: 'text/srt;charset=utf-8' });
             const a = document.createElement('a');
@@ -314,11 +355,14 @@ document.addEventListener('DOMContentLoaded', () => {
             a.click();
             URL.revokeObjectURL(a.href);
         },
-        remove: (i) => {
+        remove: (date) => {
             const history = getHistory();
-            history.splice(i, 1);
+            const idx = history.findIndex(h => h.date === date);
+            if (idx === -1) return;
+            history.splice(idx, 1);
             localStorage.setItem(HISTORY_KEY, JSON.stringify(history));
-            renderHistory();
+            const searchVal = historySearchInput?.value || '';
+            renderHistory(searchVal);
         }
     };
 
@@ -348,6 +392,8 @@ document.addEventListener('DOMContentLoaded', () => {
         document.getElementById('empty-state-panel')?.classList.remove('hidden');
         showTranscriptBtn?.classList.add('hidden');
         downloadTxtBtn?.classList.add('hidden');
+        editTranscriptBtn?.classList.add('hidden');
+        downloadDocxBtn?.classList.add('hidden');
         qualityWarning?.classList.add('hidden');
         downloadProgress?.classList.add('hidden');
         clearUrlBtn?.classList.add('hidden');
@@ -374,6 +420,11 @@ document.addEventListener('DOMContentLoaded', () => {
         currentSrt = '';
         currentMaxResThumbnail = '';
         downloadSrtBtn?.classList.add('hidden');
+        isEditing = false;
+        if (editTranscriptBtn) {
+            editTranscriptBtn.innerHTML = '<span class="material-symbols-outlined text-sm">edit</span> EDITAR';
+            editTranscriptBtn.className = "hidden bg-white/5 hover:bg-white/10 border border-white/10 text-slate-300 px-4 py-2 rounded-lg text-xs font-bold transition-all flex items-center gap-2";
+        }
 
         if (cfg) {
             if (tabTitle)    tabTitle.textContent    = tab === 'history' ? 'Historial de Transcripciones' : tab === 'config' ? 'Configuración General' : `${cfg.label} Transcriptor`;
@@ -382,7 +433,10 @@ document.addEventListener('DOMContentLoaded', () => {
             if (videoUrlInput && tab !== 'history' && tab !== 'config') videoUrlInput.placeholder = cfg.placeholder;
         }
 
-        if (tab === 'history') renderHistory();
+        if (tab === 'history') {
+            if (historySearchInput) historySearchInput.value = '';
+            renderHistory();
+        }
         if (videoUrlInput) videoUrlInput.value = '';
     }
 
@@ -901,6 +955,60 @@ document.addEventListener('DOMContentLoaded', () => {
         return result;
     }
 
+    function getParagraphTimestamps(paragraphs, segments) {
+        if (!segments || segments.length === 0) return [];
+        const result = [];
+        let segmentIdx = 0;
+        for (let p of paragraphs) {
+            const pText = p.trim().toLowerCase().replace(/[^a-z0-9]/g, '');
+            if (!pText) {
+                result.push(null);
+                continue;
+            }
+            let bestSeg = segments[segmentIdx];
+            let bestIdx = segmentIdx;
+            for (let i = segmentIdx; i < Math.min(segmentIdx + 15, segments.length); i++) {
+                const segText = (segments[i].text || '').trim().toLowerCase().replace(/[^a-z0-9]/g, '');
+                if (segText && pText.includes(segText)) {
+                    bestSeg = segments[i];
+                    bestIdx = i;
+                    break;
+                }
+            }
+            result.push(bestSeg ? bestSeg.start : null);
+            segmentIdx = Math.max(segmentIdx, bestIdx);
+        }
+        return result;
+    }
+
+    function formatCleanTextWithTimestamps(text, segments) {
+        if (!text) return '';
+        if (!segments || segments.length === 0) return formatAIResponse(text);
+        const paragraphs = text.split("\n\n");
+        const starts = getParagraphTimestamps(paragraphs, segments);
+        let html = '';
+        for (let i = 0; i < paragraphs.length; i++) {
+            const p = paragraphs[i].trim();
+            if (!p) continue;
+            let formattedP = p
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/\*\*(.*?)\*\*/g, '<strong class="text-white font-bold">$1</strong>')
+                .replace(/\*(.*?)\*/g, '<em>$1</em>')
+                .replace(/^[•\-]\s+(.+)$/gm, '<li class="ml-4 list-disc">$1</li>');
+            const startTime = starts[i];
+            if (startTime !== null && startTime !== undefined) {
+                const timeLabel = formatTimestamp(startTime);
+                const chip = `<span class="time-chip select-none" data-time="${timeLabel}" style="cursor:pointer; background:rgba(99,102,241,0.15); color:#818cf8; padding:2px 6px; border-radius:6px; font-weight:bold; font-size:11px; margin-right:8px; font-family:monospace;" title="Click para copiar timestamp">[${timeLabel}]</span>`;
+                html += `<p class="mb-4 flex items-start gap-1">${chip}<span>${formattedP}</span></p>`;
+            } else {
+                html += `<p class="mb-4">${formattedP}</p>`;
+            }
+        }
+        return html;
+    }
+
     function renderTranscript(text, method, srt = '', segments = []) {
         currentSrt = srt || '';
         currentSegments = segments || [];
@@ -928,6 +1036,9 @@ document.addEventListener('DOMContentLoaded', () => {
         transcriptSection?.classList.remove('hidden');
         document.getElementById('empty-state-panel')?.classList.add('hidden');
 
+        editTranscriptBtn?.classList.remove('hidden');
+        downloadDocxBtn?.classList.remove('hidden');
+
         // 3. Crear cabecera con etiqueta de método y selectores de vista
         const methodLabel = methodLabels[method] || method;
         const showSelector = currentSegments && currentSegments.length > 0;
@@ -950,7 +1061,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 ` : ''}
             </div>
             <div id="transcript-text-container" class="text-slate-300 text-sm leading-relaxed">
-                ${formatAIResponse(text)}
+                ${formatCleanTextWithTimestamps(text, currentSegments)}
             </div>`;
 
         // Añadir manejadores de evento para el selector de vistas
@@ -965,7 +1076,7 @@ document.addEventListener('DOMContentLoaded', () => {
             btnClean?.addEventListener('click', () => {
                 btnClean.className = "px-3 py-1.5 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 bg-primary text-white";
                 btnInteractive.className = "px-3 py-1.5 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 text-slate-400 hover:text-slate-200";
-                textContainer.innerHTML = formatAIResponse(text);
+                textContainer.innerHTML = formatCleanTextWithTimestamps(text, currentSegments);
                 document.getElementById('inline-clip-tool')?.classList.add('hidden');
             });
             
@@ -1636,10 +1747,128 @@ document.addEventListener('DOMContentLoaded', () => {
 
     copyTranscriptBtn?.addEventListener('click', () => {
         if (!currentTranscript) return;
-        navigator.clipboard.writeText(getFormattedPlainText());
+        
+        const title     = (titleEl?.textContent || 'Transcripción').trim();
+        const uploader  = (uploaderEl?.textContent || '').trim();
+        const desc      = (descriptionEl?.textContent || '').trim();
+        const url       = (videoUrlInput?.value || '').trim();
+
+        let metadataHeader = '';
+        metadataHeader += `TÍTULO: ${title}\n`;
+        if (uploader) metadataHeader += `AUTOR/CANAL: ${uploader}\n`;
+        if (url)      metadataHeader += `ENLACE: ${url}\n`;
+        if (desc)     metadataHeader += `\nDESCRIPCIÓN / COPY:\n${desc}\n`;
+        
+        metadataHeader += `\n${'─'.repeat(60)}\n`;
+        metadataHeader += `TRANSCRIPCIÓN:\n${'─'.repeat(60)}\n\n`;
+
+        const content = metadataHeader + getFormattedPlainText();
+        
+        navigator.clipboard.writeText(content);
         const orig = copyTranscriptBtn.innerHTML;
         copyTranscriptBtn.innerHTML = '<span class="material-symbols-outlined text-sm">check</span> COPIADO';
         setTimeout(() => { copyTranscriptBtn.innerHTML = orig; }, 2000);
+    });
+
+    editTranscriptBtn?.addEventListener('click', () => {
+        const textContainer = document.getElementById('transcript-text-container');
+        if (!textContainer) return;
+        
+        isEditing = !isEditing;
+        if (isEditing) {
+            textContainer.contentEditable = 'true';
+            textContainer.focus();
+            textContainer.style.border = '1px dashed #6366f1';
+            textContainer.style.padding = '8px';
+            textContainer.style.borderRadius = '8px';
+            textContainer.style.background = 'rgba(255, 255, 255, 0.02)';
+            editTranscriptBtn.innerHTML = '<span class="material-symbols-outlined text-sm">check</span> GUARDAR';
+            editTranscriptBtn.classList.remove('bg-white/5');
+            editTranscriptBtn.classList.add('bg-emerald-500/20', 'text-emerald-300');
+        } else {
+            textContainer.contentEditable = 'false';
+            textContainer.style.border = 'none';
+            textContainer.style.padding = '0';
+            textContainer.style.background = 'none';
+            editTranscriptBtn.innerHTML = '<span class="material-symbols-outlined text-sm">edit</span> EDITAR';
+            editTranscriptBtn.classList.add('bg-white/5');
+            editTranscriptBtn.classList.remove('bg-emerald-500/20', 'text-emerald-300');
+            
+            currentTranscript = textContainer.innerText;
+            
+            // Sync history
+            const history = getHistory();
+            const videoUrl = videoUrlInput?.value || '';
+            const idx = history.findIndex(h => h.url === videoUrl);
+            if (idx !== -1) {
+                history[idx].transcript = currentTranscript;
+                try {
+                    localStorage.setItem(HISTORY_KEY, JSON.stringify(history));
+                } catch (e) {
+                    console.warn("Storage quota exceeded on sync edit, pruning segments/srt...", e);
+                    try {
+                        history[idx].segments = [];
+                        history[idx].srt = "";
+                        localStorage.setItem(HISTORY_KEY, JSON.stringify(history));
+                    } catch (err) {
+                        console.error("Failed to sync edited transcript even after pruning segments:", err);
+                    }
+                }
+            }
+            showToast('Cambios guardados', 'success');
+        }
+    });
+
+    // Listen for inline input edits to sync currentTranscript
+    document.getElementById('transcript-content')?.addEventListener('input', (e) => {
+        const textContainer = document.getElementById('transcript-text-container');
+        if (textContainer && e.target === textContainer) {
+            currentTranscript = textContainer.innerText;
+        }
+    });
+
+    downloadDocxBtn?.addEventListener('click', async () => {
+        if (!currentTranscript) return;
+        
+        const title     = (titleEl?.textContent || 'Transcripción').trim();
+        const uploader  = (uploaderEl?.textContent || '').trim();
+        const desc      = (descriptionEl?.textContent || '').trim();
+        const url       = (videoUrlInput?.value || '').trim();
+        const safeTitle = title.substring(0, 60).replace(/[/\\?%*:|"<>]/g, '-');
+
+        const origHtml = downloadDocxBtn.innerHTML;
+        downloadDocxBtn.innerHTML = '<span class="material-symbols-outlined text-lg animate-spin">progress_activity</span> Generando...';
+        downloadDocxBtn.disabled = true;
+
+        try {
+            const r = await fetch(`${API_BASE}/export-docx`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    title,
+                    uploader,
+                    url,
+                    description: desc,
+                    transcript: getFormattedPlainText()
+                })
+            });
+
+            if (!r.ok) throw new Error('Error al generar DOCX en el servidor');
+
+            const blob = await r.blob();
+            const a = document.createElement('a');
+            a.href = URL.createObjectURL(blob);
+            a.download = `${safeTitle}.docx`;
+            a.click();
+            setTimeout(() => URL.revokeObjectURL(a.href), 10000);
+
+            downloadDocxBtn.innerHTML = '<span class="material-symbols-outlined text-lg">check</span> Descargado';
+            setTimeout(() => { downloadDocxBtn.innerHTML = origHtml; downloadDocxBtn.disabled = false; }, 2500);
+        } catch (err) {
+            showToast(err.message, 'error');
+            downloadDocxBtn.innerHTML = origHtml;
+            downloadDocxBtn.disabled = false;
+        }
     });
 
     downloadTxtBtn?.addEventListener('click', async () => {
@@ -1903,5 +2132,17 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     });
 
+    historySearchInput?.addEventListener('input', (e) => {
+        renderHistory(e.target.value);
+    });
+
+    transcriptContent?.addEventListener('click', (e) => {
+        const timeChip = e.target.closest('.time-chip');
+        if (timeChip) {
+            const timeVal = timeChip.dataset.time;
+            navigator.clipboard.writeText(`[${timeVal}]`);
+            showToast(`Copiado tiempo: [${timeVal}]`, 'success');
+        }
+    });
 
 });

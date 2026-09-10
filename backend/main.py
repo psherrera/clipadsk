@@ -569,6 +569,106 @@ async def get_logs(uid: str):
 # --- ENDPOINTS ---
 
 
+# --- DETECCIÓN DE BUNNY STREAM EMBEBIDO EN PÁGINAS WEB ---
+def detect_bunny_embed(page_url: str) -> str | None:
+    """
+    Descarga el HTML de una página y busca iframes de Bunny Stream
+    (iframe.mediadelivery.net) o playlists HLS de Bunny CDN (b-cdn.net).
+    
+    Retorna la URL del iframe de Bunny si se encuentra, o None.
+    Esta URL es compatible con el extractor [BunnyCdn] de yt-dlp.
+    """
+    # Si ya es una URL de Bunny directa, no hacer scraping
+    if 'mediadelivery.net' in page_url or 'b-cdn.net' in page_url:
+        return None  # Ya es Bunny, no necesita resolución
+    
+    # Solo analizar páginas web normales (no YouTube, Instagram, etc.)
+    known_platforms = [
+        'youtube.com', 'youtu.be', 'instagram.com', 'tiktok.com',
+        'twitter.com', 'x.com', 'facebook.com', 'fb.watch', 'fb.com',
+        'vm.tiktok.com', 't.co'
+    ]
+    if any(p in page_url for p in known_platforms):
+        return None
+
+    try:
+        logger.debug(f"Buscando embed Bunny en: {page_url}")
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+            'Accept-Language': 'es-419,es;q=0.9,en;q=0.8',
+        }
+        
+        # Intentar con cookies del sitio si están disponibles
+        cookie_path = os.path.join(BASE_DIR, 'cookies.txt')
+        session_cookies = {}
+        if os.path.exists(cookie_path):
+            try:
+                import http.cookiejar
+                cj = http.cookiejar.MozillaCookieJar(cookie_path)
+                cj.load(ignore_discard=True, ignore_expires=True)
+                for c in cj:
+                    session_cookies[c.name] = c.value
+            except Exception:
+                pass
+        
+        resp = requests.get(page_url, headers=headers, cookies=session_cookies, timeout=15, allow_redirects=True)
+        if resp.status_code != 200:
+            logger.debug(f"detect_bunny_embed: HTTP {resp.status_code} para {page_url}")
+            return None
+        
+        html = resp.text
+        
+        # Patrón 1: iframe de Bunny Stream
+        # <iframe src="https://iframe.mediadelivery.net/embed/745929/VIDEO-ID" ...>
+        iframe_pattern = re.search(
+            r'["\']?(https?://iframe\.mediadelivery\.net/embed/[\d]+/[a-f0-9\-]+)["\'\s]',
+            html, re.IGNORECASE
+        )
+        if iframe_pattern:
+            embed_url = iframe_pattern.group(1).strip().strip("\"'")
+            logger.info(f"Bunny iframe detectado: {embed_url}")
+            return embed_url
+        
+        # Patrón 2: src del player de Bunny con el video ID
+        # src="https://player.mediadelivery.net/.../VIDEO-ID/..."
+        player_pattern = re.search(
+            r'mediadelivery\.net[^"\']*?/embed/[\d]+/([a-f0-9\-]{36})',
+            html, re.IGNORECASE
+        )
+        if player_pattern:
+            video_id = player_pattern.group(1)
+            # Necesitamos el library ID también
+            lib_pattern = re.search(
+                r'mediadelivery\.net[^"\']*?/embed/([\d]+)/' + re.escape(video_id),
+                html, re.IGNORECASE
+            )
+            if lib_pattern:
+                library_id = lib_pattern.group(1)
+                embed_url = f"https://iframe.mediadelivery.net/embed/{library_id}/{video_id}"
+                logger.info(f"Bunny player detectado, embed URL: {embed_url}")
+                return embed_url
+
+        # Patrón 3: playlist HLS de Bunny CDN directo en el HTML
+        # src="https://vz-XXXX.b-cdn.net/VIDEO-ID/playlist.m3u8"
+        m3u8_pattern = re.search(
+            r'["\']?(https?://[a-z0-9\-]+\.b-cdn\.net/[a-f0-9\-]+/playlist\.m3u8)["\']?',
+            html, re.IGNORECASE
+        )
+        if m3u8_pattern:
+            m3u8_url = m3u8_pattern.group(1).strip().strip("\"'")
+            logger.info(f"Bunny m3u8 detectado: {m3u8_url} (necesita Referer: {page_url})")
+            # Para el m3u8 necesitamos el referer; devolvemos una tupla especial
+            # Pero como solo podemos retornar str|None, retornamos el m3u8 URL
+            # y el Referer se agrega en get_robust_opts al detectar b-cdn.net
+            return m3u8_url
+
+        logger.debug(f"No se encontró embed Bunny en {page_url}")
+        return None
+
+    except Exception as e:
+        logger.debug(f"detect_bunny_embed error para {page_url}: {e}")
+        return None
+
 
 # --- SANITIZACIÓN DE URLS ---
 def sanitize_url(url: str) -> str:
@@ -578,13 +678,19 @@ def sanitize_url(url: str) -> str:
     - youtu.be/ID?si=... → youtube.com/watch?v=ID
     - watch?v=ID&feature=youtu.be → watch?v=ID
     - Elimina parámetros de tracking/referral que confunden a yt-dlp
+    - Pasa URLs de Bunny CDN / MediaDelivery sin modificar
     """
     from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
     url = url.strip()
 
     try:
         parsed = urlparse(url)
-        
+
+        # URLs de Bunny CDN / MediaDelivery: pasar sin modificar
+        if 'mediadelivery.net' in parsed.netloc or 'b-cdn.net' in parsed.netloc:
+            logger.debug(f"URL Bunny CDN, sin modificar → {url}")
+            return url
+
         # Convertir youtu.be → youtube.com/watch?v=
         if parsed.netloc in ('youtu.be', 'www.youtu.be'):
             video_id = parsed.path.lstrip('/')
@@ -636,6 +742,8 @@ def get_robust_opts(target_url, extra={}):
         'nocheckcertificate': True,
         'ignoreerrors': False,
         'user_agent': random.choice(USER_AGENTS),
+        'js_runtimes': {'deno': {}, 'node': {}},
+        'remote_components': ['ejs:github'],
         **extra
     }
 
@@ -675,8 +783,8 @@ def get_robust_opts(target_url, extra={}):
 
     # Estrategia específica por plataforma
     if is_youtube:
-        # Dejamos que yt-dlp use sus clientes por defecto (web, tv, etc.) para que encuentre todas las calidades (1080p, 720p)
-        opts['user_agent'] = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_4_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4.1 Mobile/15E148 Safari/604.1'
+        # Usamos un User-Agent de Desktop reciente para que no restrinja los formatos
+        opts['user_agent'] = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/124.0.0.0 Safari/537.36'
         logger.debug(f"Estrategia YouTube optimizada (Cookies: {'Si' if 'cookiefile' in opts else 'No'})")
 
     elif is_tiktok:
@@ -694,6 +802,22 @@ def get_robust_opts(target_url, extra={}):
     elif is_facebook:
         # Facebook requiere cookies para la mayoría del contenido público
         opts['user_agent'] = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
+
+    # Bunny CDN: m3u8 directo requiere Referer para evitar 403
+    # Para iframe.mediadelivery.net no hace falta (yt-dlp tiene extractor nativo)
+    is_bunny_m3u8 = 'b-cdn.net' in target_url and 'playlist.m3u8' in target_url
+    is_bunny_iframe = 'mediadelivery.net' in target_url
+    if is_bunny_m3u8:
+        # Intentar extraer el dominio referer del entorno, o usar un genérico
+        bunny_referer = os.environ.get('BUNNY_REFERER', '')
+        if bunny_referer:
+            opts['http_headers'] = {'Referer': bunny_referer}
+            logger.debug(f"Bunny m3u8: usando Referer {bunny_referer}")
+        else:
+            logger.debug("Bunny m3u8: sin Referer configurado (puede fallar con 403)")
+    elif is_bunny_iframe:
+        opts['user_agent'] = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
+        logger.debug("Bunny iframe MediaDelivery: usando extractor nativo BunnyCdn")
 
     return opts
 
@@ -787,10 +911,20 @@ def get_instagram_carousel_info(url, cookies_path=None):
 @app.post("/api/video-info")
 async def get_video_info(req: VideoRequest, request: Request):
     url = sanitize_url(req.url)
+
+    # --- BUNNY STREAM: detectar iframe embebido en páginas web ---
+    # Si la URL es de una página web normal (no una plataforma conocida),
+    # intentamos extraer el embed de Bunny Stream que pueda tener
+    bunny_url = await asyncio.to_thread(detect_bunny_embed, url)
+    if bunny_url:
+        logger.info(f"Bunny embed encontrado en {url} → {bunny_url}")
+        url = bunny_url
+
     is_instagram = 'instagram.com' in url
 
     # --- INSTAGRAM: usar instaloader ---
     if is_instagram and instaloader:
+
         try:
             ig_info = await asyncio.to_thread(get_instagram_info, url)
             if ig_info['is_video']:
@@ -1018,10 +1152,17 @@ async def get_transcript(req: VideoRequest):
     url = sanitize_url(req.url)
     uid = req.uid
     lang = req.target_lang or "es"
-    
+
+    # --- BUNNY STREAM: detectar embed en páginas web ---
+    bunny_url = await asyncio.to_thread(detect_bunny_embed, url)
+    if bunny_url:
+        logger.info(f"Bunny embed encontrado para transcripción: {bunny_url}")
+        url = bunny_url
+
     add_log(uid, f"Iniciando transcripcion para: {url} | Idioma: {lang}")
-    
+
     is_youtube = 'youtube.com' in url or 'youtu.be' in url
+
     
     # Cache por URL e Idioma
     cache_key = f"{url}_{lang}"
@@ -1139,21 +1280,21 @@ async def get_transcript(req: VideoRequest):
                 # --- INTENTO DE SUBS CON 3 ESTRATEGIAS ---
                 sub_extracted = False
 
-                # 1. Celular sin cookies
+                # 1. Con cookies (Navegador)
                 try:
                     update_progress(req.uid, 10, "Buscando subtítulos (1/2)...")
                     opts = get_robust_opts(url, {'skip_download': True, 'writesubtitles': True, 'writeautomaticsub': True, 'subtitleslangs': ['es.*', 'en.*'], 'outtmpl': os.path.join(tmpdir, 'sub.%(ext)s'), 'ignoreerrors': True})
-                    opts.pop('cookiefile', None)
-                    opts['extractor_args'] = {'youtube': {'player_client': ['android', 'ios']}}
                     await run_blocking(ydl_download_sync, opts, url)
                     sub_extracted = True
                 except: pass
 
-                # 2. Con cookies
+                # 2. Celular sin cookies
                 if not sub_extracted:
                     try:
                         update_progress(req.uid, 20, "Buscando subtítulos (2/2)...")
                         opts = get_robust_opts(url, {'skip_download': True, 'writesubtitles': True, 'writeautomaticsub': True, 'subtitleslangs': ['es.*', 'en.*'], 'outtmpl': os.path.join(tmpdir, 'sub.%(ext)s'), 'ignoreerrors': True})
+                        opts.pop('cookiefile', None)
+                        opts['extractor_args'] = {'youtube': {'player_client': ['android', 'ios']}}
                         await run_blocking(ydl_download_sync, opts, url)
                         sub_extracted = True
                     except: pass
@@ -1219,11 +1360,9 @@ async def get_transcript(req: VideoRequest):
             
             add_log(uid, "Iniciando descarga de audio para Whisper...")
 
-            # Estrategia 1: Móvil sin cookies
+            # Estrategia 1: Con cookies (Navegador)
             try:
                 audio_opts = get_robust_opts(url, {'format': 'bestaudio/best', 'outtmpl': os.path.join(tmpdir, 'audio.%(ext)s'), 'postprocessors': [{'key': 'FFmpegExtractAudio','preferredcodec': 'mp3','preferredquality': '64'}]})
-                audio_opts.pop('cookiefile', None)
-                audio_opts['extractor_args'] = {'youtube': {'player_client': ['android', 'ios']}}
                 await run_blocking(ydl_download_sync, audio_opts, url)
                 for f in os.listdir(tmpdir):
                     if f.startswith('audio.'):
@@ -1232,10 +1371,12 @@ async def get_transcript(req: VideoRequest):
                         break
             except: pass
 
-            # Estrategia 2: Con cookies
+            # Estrategia 2: Móvil sin cookies
             if not audio_downloaded:
                 try:
                     audio_opts = get_robust_opts(url, {'format': 'bestaudio/best', 'outtmpl': os.path.join(tmpdir, 'audio.%(ext)s'), 'postprocessors': [{'key': 'FFmpegExtractAudio','preferredcodec': 'mp3','preferredquality': '64'}]})
+                    audio_opts.pop('cookiefile', None)
+                    audio_opts['extractor_args'] = {'youtube': {'player_client': ['android', 'ios']}}
                     await run_blocking(ydl_download_sync, audio_opts, url)
                     for f in os.listdir(tmpdir):
                         if f.startswith('audio.'):
@@ -1471,6 +1612,12 @@ async def download_video(req: VideoRequest, background_tasks: BackgroundTasks):
     format_id = req.format_id
     uid = str(uuid.uuid4())
 
+    # --- BUNNY STREAM: detectar embed en páginas web ---
+    bunny_url = await asyncio.to_thread(detect_bunny_embed, url)
+    if bunny_url:
+        logger.info(f"Bunny embed encontrado para descarga: {bunny_url}")
+        url = bunny_url
+
     # --- CARRUSEL DE IMÁGENES (gallery-dl) ---
     if format_id == 'carousel_images':
         cookie_file = get_robust_opts(url).get('cookiefile')
@@ -1587,10 +1734,21 @@ async def download_video(req: VideoRequest, background_tasks: BackgroundTasks):
             }],
         }
     else:
-        if format_id and format_id not in ('best', 'bestvideo+bestaudio', None):
-            fmt = f"{format_id}/bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best"
+        # Detectar si ffmpeg está disponible para muxing
+        ffmpeg_available = bool(FFMPEG_BIN) or bool(
+            subprocess.run(['ffmpeg', '-version'], capture_output=True).returncode == 0
+            if not FFMPEG_BIN else True
+        )
+
+        if not ffmpeg_available:
+            # Sin ffmpeg no podemos muxear; usar best (stream ya mezclado)
+            logger.warning("FFmpeg no encontrado. Forzando formato 'best' para evitar muxing.")
+            fmt = 'best[ext=mp4]/best'
+        elif format_id and format_id not in ('best', 'bestvideo+bestaudio', None):
+            # El format_id específico primero, luego fallbacks que no requieren ese ID
+            fmt = f"{format_id}+bestaudio[ext=m4a]/bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best[ext=mp4]/best"
         else:
-            fmt = 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best'
+            fmt = 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best[ext=mp4]/best'
 
         extra_opts = {
             'format': fmt,
@@ -1623,25 +1781,25 @@ async def download_video(req: VideoRequest, background_tasks: BackgroundTasks):
     last_err = ""
     update_progress(req.uid, 5, "Iniciando proceso...")
 
-    # --- ESTRATEGIA 1: Celular sin cookies (La que funcionó para info) ---
+    # --- ESTRATEGIA 1: Navegador con Cookies (Más robusto para todas las calidades) ---
     try:
-        logger.debug("Descarga Intento 1 - Celular sin cookies...")
+        logger.debug("Descarga Intento 1 - Con cookies...")
         update_progress(req.uid, 10, "Conectando al servidor (1/3)...")
         opts = get_robust_opts(url, extra_opts)
-        opts.pop('cookiefile', None)
-        opts['extractor_args'] = {'youtube': {'player_client': ['android', 'ios']}}
         await run_blocking(ydl_download_sync, opts, url)
         downloaded = True
     except Exception as e:
         last_err = str(e)
         logger.debug(f"Descarga Intento 1 falló: {last_err[:100]}")
 
-    # --- ESTRATEGIA 2: Navegador con Cookies ---
+    # --- ESTRATEGIA 2: Celular sin cookies ---
     if not downloaded:
         try:
-            logger.debug("Descarga Intento 2 - Con cookies...")
-            update_progress(req.uid, 15, "Reintentando con cookies (2/3)...")
+            logger.debug("Descarga Intento 2 - Celular sin cookies...")
+            update_progress(req.uid, 15, "Reintentando modo móvil (2/3)...")
             opts = get_robust_opts(url, extra_opts)
+            opts.pop('cookiefile', None)
+            opts['extractor_args'] = {'youtube': {'player_client': ['android', 'ios']}}
             await run_blocking(ydl_download_sync, opts, url)
             downloaded = True
         except Exception as e:
@@ -2227,6 +2385,122 @@ async def extract_quotes_with_times(req: QuotesRequest):
         })
 
     return {"quotes": enriched, "total": len(enriched)}
+
+
+class ExportDocxRequest(BaseModel):
+    title: str
+    uploader: Optional[str] = ""
+    url: Optional[str] = ""
+    description: Optional[str] = ""
+    transcript: str
+
+@app.post("/api/export-docx")
+async def export_docx(req: ExportDocxRequest):
+    try:
+        import docx
+        from docx.shared import Inches, Pt, RGBColor
+        from docx.enum.text import WD_ALIGN_PARAGRAPH
+        
+        doc = docx.Document()
+        
+        # Margins
+        for section in doc.sections:
+            section.top_margin = Inches(1)
+            section.bottom_margin = Inches(1)
+            section.left_margin = Inches(1)
+            section.right_margin = Inches(1)
+            
+        # Normal Style
+        style_normal = doc.styles['Normal']
+        font = style_normal.font
+        font.name = 'Arial'
+        font.size = Pt(11)
+        font.color.rgb = RGBColor(0x33, 0x41, 0x55) # Slate 700
+        
+        # Title
+        p_title = doc.add_paragraph()
+        p_title.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        p_title.paragraph_format.space_after = Pt(12)
+        run_title = p_title.add_run(req.title)
+        run_title.bold = True
+        run_title.font.size = Pt(18)
+        run_title.font.color.rgb = RGBColor(0x1e, 0x1b, 0x4b) # Indigo 950
+        
+        # Metadata
+        if req.uploader or req.url:
+            p_meta = doc.add_paragraph()
+            p_meta.paragraph_format.space_before = Pt(6)
+            p_meta.paragraph_format.space_after = Pt(12)
+            if req.uploader:
+                r = p_meta.add_run("Autor/Canal: ")
+                r.bold = True
+                p_meta.add_run(f"{req.uploader}\n")
+            if req.url:
+                r = p_meta.add_run("Enlace: ")
+                r.bold = True
+                p_meta.add_run(f"{req.url}\n")
+                
+        # Description
+        if req.description:
+            p_desc_title = doc.add_paragraph()
+            r = p_desc_title.add_run("Descripción / Copy:")
+            r.bold = True
+            r.font.size = Pt(12)
+            p_desc_title.paragraph_format.space_before = Pt(12)
+            p_desc_title.paragraph_format.space_after = Pt(4)
+            
+            p_desc = doc.add_paragraph()
+            p_desc.paragraph_format.left_indent = Inches(0.25)
+            p_desc.paragraph_format.space_after = Pt(18)
+            p_desc.add_run(req.description)
+            
+        # Divider
+        p_sep = doc.add_paragraph()
+        p_sep.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        p_sep.add_run("─" * 40)
+        p_sep.paragraph_format.space_after = Pt(18)
+        
+        # Transcription Title
+        p_trans_title = doc.add_paragraph()
+        r = p_trans_title.add_run("Transcripción:")
+        r.bold = True
+        r.font.size = Pt(14)
+        r.font.color.rgb = RGBColor(0x4f, 0x46, 0xe5) # Indigo Accent
+        p_trans_title.paragraph_format.space_after = Pt(12)
+        
+        # Transcription Text
+        paragraphs = req.transcript.split("\n\n")
+        for para in paragraphs:
+            para_clean = para.strip()
+            if para_clean:
+                if para_clean.startswith("--- ") and para_clean.endswith(" ---"):
+                    p_slide = doc.add_paragraph()
+                    p_slide.paragraph_format.space_before = Pt(12)
+                    p_slide.paragraph_format.space_after = Pt(6)
+                    r_slide = p_slide.add_run(para_clean)
+                    r_slide.bold = True
+                    r_slide.font.size = Pt(12)
+                    r_slide.font.color.rgb = RGBColor(0x63, 0x66, 0xf1)
+                else:
+                    p = doc.add_paragraph()
+                    p.paragraph_format.space_after = Pt(6)
+                    p.add_run(para_clean)
+                    
+        import io
+        file_stream = io.BytesIO()
+        doc.save(file_stream)
+        file_stream.seek(0)
+        
+        from fastapi.responses import StreamingResponse
+        headers = {
+            'Content-Disposition': 'attachment; filename="transcripcion.docx"',
+            'Access-Control-Expose-Headers': 'Content-Disposition'
+        }
+        return StreamingResponse(file_stream, media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document", headers=headers)
+        
+    except Exception as e:
+        logger.error(f"Error exportando a DOCX: {e}")
+        raise HTTPException(status_code=500, detail=f"No se pudo generar el archivo DOCX: {str(e)}")
 
 
 # --- SERVIDO DE FRONTEND ---

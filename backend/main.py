@@ -1225,10 +1225,22 @@ def _update_from_zip(root: str) -> tuple:
         return changed, None
 
 
+def _git(repo: str, *args) -> subprocess.CompletedProcess:
+    return subprocess.run(["git", *args], capture_output=True, text=True, cwd=repo, timeout=300)
+
+
 def _update_with_git(repo: str) -> tuple:
-    """git pull. Devuelve (hubo_cambios, salida, error)."""
+    """
+    git pull. Si hay cambios locales en archivos de la app (versiones viejas modificaban
+    yt-dlp.exe al "Actualizar motor"), se guardan con git stash y se reintenta.
+    Devuelve (hubo_cambios, salida, error).
+    """
     try:
-        res = subprocess.run(["git", "pull", "--ff-only", "origin", GITHUB_BRANCH], capture_output=True, text=True, cwd=repo, timeout=300)
+        res = _git(repo, "pull", "--ff-only", "origin", GITHUB_BRANCH)
+        if res.returncode != 0:
+            logger.info(f"git pull falló, se reintenta con stash: {res.stderr.strip()[-300:]}")
+            _git(repo, "stash", "push", "-m", f"clipadsk-actualizar {time.strftime('%Y-%m-%d %H:%M')}")
+            res = _git(repo, "pull", "--ff-only", "origin", GITHUB_BRANCH)
     except Exception as e:
         return False, "", str(e)
     out = res.stdout.strip()
@@ -1253,6 +1265,10 @@ def _update_app() -> dict:
     try:
         if use_git:
             changed, output, error = _update_with_git(repo)
+            if error:  # último recurso: bajar el ZIP de GitHub y copiarlo encima
+                logger.warning(f"Actualización con git falló ({error}); se usa el ZIP de GitHub")
+                n, error = _update_from_zip(ROOT_DIR)
+                changed, output = n > 0, f"{n} archivos actualizados desde GitHub (ZIP)"
         else:
             n, error = _update_from_zip(ROOT_DIR)
             changed, output = n > 0, f"{n} archivos actualizados desde GitHub"

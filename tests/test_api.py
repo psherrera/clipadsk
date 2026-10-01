@@ -112,3 +112,24 @@ def test_update_from_zip_keeps_user_files(tmp_path, monkeypatch):
     assert (root / ".env").read_text() == "GROQ_API_KEY=mia"
     assert not (root / "backend" / "venv").exists()
     assert main._update_from_zip(str(root)) == (0, None)  # segunda vez: nada que cambiar
+
+
+def test_update_with_git_stashes_local_changes(tmp_path):
+    """Una instalación vieja con yt-dlp.exe modificado igual se actualiza (los cambios van a git stash)."""
+    import subprocess as sp
+
+    def g(cwd, *a):
+        sp.run(["git", *a], cwd=cwd, check=True, capture_output=True)
+    remote, local = tmp_path / "remote", tmp_path / "local"
+    remote.mkdir()
+    g(remote, "init", "-q", "-b", "main")
+    g(remote, "config", "user.email", "t@t"); g(remote, "config", "user.name", "t")
+    (remote / "yt-dlp.exe").write_text("v1")
+    g(remote, "add", "."); g(remote, "commit", "-qm", "v1")
+    g(tmp_path, "clone", "-q", str(remote), str(local))
+    (remote / "yt-dlp.exe").unlink(); (remote / "nuevo.py").write_text("x")
+    g(remote, "add", "-A"); g(remote, "commit", "-qm", "v2")
+    (local / "yt-dlp.exe").write_text("actualizado por la version vieja")  # cambio local
+    changed, out, err = main._update_with_git(str(local))
+    assert err is None and changed
+    assert (local / "nuevo.py").exists() and not (local / "yt-dlp.exe").exists()

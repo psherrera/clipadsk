@@ -138,7 +138,15 @@ function Obtener-Codigo([string]$dir, [bool]$enLugar) {
         Info "Actualizando con git..."
         git -C $dir pull --ff-only origin $Rama 2>&1 | Out-Null
         if ($LASTEXITCODE -eq 0) { Ok "Codigo actualizado"; return }
-        Aviso "git pull no pudo actualizar (hay cambios locales?). Se sigue con la version actual."
+        # Versiones viejas modificaban archivos del repo (por ejemplo yt-dlp.exe al "Actualizar motor").
+        # Se guardan esos cambios con "git stash" (recuperables) y se reintenta.
+        Info "Hay cambios locales en archivos de la app; se guardan con 'git stash' y se reintenta..."
+        git -C $dir stash push -m "clipadsk-instalador $(Get-Date -Format 'yyyy-MM-dd HH:mm')" 2>&1 | Out-Null
+        git -C $dir pull --ff-only origin $Rama 2>&1 | Out-Null
+        if ($LASTEXITCODE -eq 0) { Ok "Codigo actualizado (cambios locales guardados en 'git stash list')"; return }
+        Aviso "git pull no pudo actualizar; se actualiza descargando el ZIP de GitHub."
+        Descargar-Zip-Repo $dir
+        Ok "Codigo actualizado"
         return
     }
     if ($yaInstalado) {
@@ -156,6 +164,75 @@ function Obtener-Codigo([string]$dir, [bool]$enLugar) {
     Info "Descargando el ZIP de GitHub..."
     Descargar-Zip-Repo $dir
     Ok "Codigo descargado en $dir"
+}
+
+function Detener-Servidor([string]$dir) {
+    # Un servidor de Clipadsk abierto bloquea archivos del entorno de Python (pip fallaria)
+    try {
+        $procesos = Get-CimInstance Win32_Process -Filter "Name='python.exe' OR Name='pythonw.exe'" -ErrorAction Stop |
+            Where-Object { $_.CommandLine -and $_.CommandLine -match 'backend[\\/]+main\.py' }
+        foreach ($p in $procesos) {
+            $texto = ("$($p.CommandLine) $($p.ExecutablePath)").ToLower()
+            if (-not $dir -or $texto.Contains($dir.ToLower().TrimEnd('\'))) {
+                Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue
+                Info "Se cerro un Clipadsk que estaba abierto (se vuelve a abrir al final)"
+            }
+        }
+    } catch {}
+}
+
+function Es-Clipadsk([string]$dir) {
+    return (Test-Path (Join-Path $dir 'backend\main.py')) -and
+           (Test-Path (Join-Path $dir 'frontend\index.html')) -and
+           (Test-Path (Join-Path $dir 'iniciar.bat'))
+}
+
+function Buscar-Instalaciones {
+    # Instalaciones de versiones anteriores (antes no habia instalador: cada uno la
+    # ponia donde queria). Se busca el servidor abierto y carpetas "*clip*" comunes.
+    $encontradas = New-Object System.Collections.ArrayList
+    try {
+        Get-CimInstance Win32_Process -Filter "Name='python.exe' OR Name='pythonw.exe'" -ErrorAction Stop | ForEach-Object {
+            # El servidor corre con el python del entorno: <carpeta>\backend\venv\Scripts\python.exe
+            if ($_.ExecutablePath -match '^(.*)\\backend\\venv\\Scripts\\pythonw?\.exe$') { [void]$encontradas.Add($Matches[1]) }
+        }
+    } catch {}
+    $bases = @(
+        [Environment]::GetFolderPath('Desktop'), [Environment]::GetFolderPath('MyDocuments'),
+        (Join-Path $env:USERPROFILE 'Downloads'), $env:USERPROFILE, $env:OneDrive
+    )
+    try { $bases += (Get-PSDrive -PSProvider FileSystem -ErrorAction Stop | Where-Object { $_.Free -ne $null } | ForEach-Object { $_.Root }) } catch {}
+    foreach ($base in $bases) {
+        if (-not $base -or -not (Test-Path $base)) { continue }
+        foreach ($d in (Get-ChildItem $base -Directory -Filter '*clip*' -ErrorAction SilentlyContinue)) {
+            [void]$encontradas.Add($d.FullName)
+            foreach ($d2 in (Get-ChildItem $d.FullName -Directory -Filter '*clip*' -ErrorAction SilentlyContinue)) { [void]$encontradas.Add($d2.FullName) }
+        }
+    }
+    $nueva = Join-Path $env:LOCALAPPDATA 'Clipadsk'
+    $vistas = @{}
+    $resultado = @()
+    foreach ($ruta in $encontradas) {
+        try { $ruta = (Resolve-Path $ruta -ErrorAction Stop).Path.TrimEnd('\') } catch { continue }
+        $clave = $ruta.ToLower()
+        if ($vistas.ContainsKey($clave) -or $clave -eq $nueva.ToLower()) { continue }
+        $vistas[$clave] = $true
+        if (Es-Clipadsk $ruta) { $resultado += $ruta }
+    }
+    return ,$resultado
+}
+
+function Copiar-Configuracion([string]$desde, [string]$hacia) {
+    foreach ($archivo in @('.env', 'cookies.txt', 'cookies_ig.txt')) {
+        foreach ($sub in @('', 'backend')) {
+            $origen = Join-Path (Join-Path $desde $sub) $archivo
+            $dest = Join-Path (Join-Path $hacia $sub) $archivo
+            if ((Test-Path $origen) -and -not (Test-Path $dest)) {
+                Copy-Item $origen $dest -Force
+                Ok "Copiado $archivo de la instalacion anterior"
+            }
+        }
+    }
 }
 
 function Asegurar-FFmpeg([string]$dir) {
@@ -228,12 +305,30 @@ function Instalar {
     # Carpeta de instalacion: la del script si ya trae el codigo (ZIP descomprimido),
     # si no %LOCALAPPDATA%\Clipadsk (no necesita permisos de administrador)
     $enLugar = $false
+    $anterior = $null
     if (-not $Destino) {
         if ($PSScriptRoot -and (Test-Path (Join-Path $PSScriptRoot 'backend\main.py'))) {
             $Destino = $PSScriptRoot
             $enLugar = $true
         } else {
             $Destino = Join-Path $env:LOCALAPPDATA 'Clipadsk'
+            if (-not (Es-Clipadsk $Destino)) {
+                $viejas = Buscar-Instalaciones
+                if ($viejas.Count -gt 0) {
+                    Write-Host ""
+                    Write-Host "  Se encontro Clipadsk instalado en:" -ForegroundColor White
+                    for ($i = 0; $i -lt $viejas.Count; $i++) { Write-Host "     [$($i + 1)] $($viejas[$i])" -ForegroundColor White }
+                    Write-Host "     [0] No, hacer una instalacion nueva (se copian .env y cookies)" -ForegroundColor Gray
+                    $resp = Read-Host "  Que carpeta actualizar? (Enter = 1)"
+                    if (-not $resp) { $resp = '1' }
+                    $n = 0
+                    if ([int]::TryParse($resp, [ref]$n) -and $n -ge 1 -and $n -le $viejas.Count) {
+                        $Destino = $viejas[$n - 1]
+                    } else {
+                        $anterior = $viejas[0]
+                    }
+                }
+            }
         }
     }
     Info "Carpeta de instalacion: $Destino"
@@ -257,7 +352,9 @@ function Instalar {
     }
 
     Paso 3 "Codigo de Clipadsk"
+    Detener-Servidor $Destino
     Obtener-Codigo $Destino $enLugar
+    if ($anterior) { Copiar-Configuracion $anterior $Destino }
     # Archivos bajados de internet: quitar la marca para que Windows no los bloquee
     Get-ChildItem $Destino -Recurse -File -ErrorAction SilentlyContinue |
         Where-Object { $_.FullName -notmatch '\\backend\\venv\\' } |

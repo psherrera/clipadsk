@@ -30,6 +30,22 @@ Se instala en `%LOCALAPPDATA%\Clipadsk`.
 3. Doble clic en **`INSTALAR.bat`**.
    Si Windows muestra "Windows protegió su PC": **Más información → Ejecutar de todas formas**.
 
+### Si ya tenés una versión anterior de Clipadsk
+
+Pegá **la misma línea** de la Opción 1 en PowerShell. El instalador busca la instalación
+anterior (por ejemplo `C:\clipadsk` o una carpeta en Documentos), pregunta si actualizarla
+ahí mismo y la actualiza conservando `.env`, cookies, FFmpeg y el historial.
+
+- Si Clipadsk está abierto, el instalador lo cierra y lo vuelve a abrir al final.
+- Si la versión vieja tenía archivos modificados (por ejemplo `yt-dlp.exe` actualizado
+  desde la app), se guardan con `git stash` en vez de borrarse.
+- Si elegís "instalación nueva", se instala en `%LOCALAPPDATA%\Clipadsk`, se copian `.env`
+  y cookies, y la carpeta vieja se puede borrar. El historial se mantiene igual, porque se
+  guarda en el navegador.
+
+No uses el botón "Actualizar aplicación" de la versión vieja: puede fallar si actualizaste
+el motor alguna vez. Desde esta versión en adelante, ese botón ya funciona siempre.
+
 ### Primer uso
 
 La primera vez la app pide una **API Key de Groq** (gratis, sin tarjeta) para transcribir

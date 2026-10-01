@@ -167,18 +167,27 @@ function Obtener-Codigo([string]$dir, [bool]$enLugar) {
 }
 
 function Detener-Servidor([string]$dir) {
-    # Un servidor de Clipadsk abierto bloquea archivos del entorno de Python (pip fallaria)
+    # Cierra el Clipadsk abierto:
+    # - el que usa el entorno de Python de $dir (bloquea archivos y pip fallaria)
+    # - el que ocupa el puerto 5000, aunque sea una version vieja en otra carpeta
+    #   (si no, el navegador seguiria mostrando la version vieja)
+    $cerrados = 0
+    $venv = (Join-Path $dir 'backend\venv').ToLower()
     try {
-        $procesos = Get-CimInstance Win32_Process -Filter "Name='python.exe' OR Name='pythonw.exe'" -ErrorAction Stop |
-            Where-Object { $_.CommandLine -and $_.CommandLine -match 'backend[\\/]+main\.py' }
-        foreach ($p in $procesos) {
-            $texto = ("$($p.CommandLine) $($p.ExecutablePath)").ToLower()
-            if (-not $dir -or $texto.Contains($dir.ToLower().TrimEnd('\'))) {
-                Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue
-                Info "Se cerro un Clipadsk que estaba abierto (se vuelve a abrir al final)"
-            }
+        Get-CimInstance Win32_Process -Filter "Name='python.exe' OR Name='pythonw.exe'" -ErrorAction Stop |
+            Where-Object { $_.ExecutablePath -and $_.ExecutablePath.ToLower().StartsWith($venv) } |
+            ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue; $cerrados++ }
+    } catch {}
+    try {
+        Get-NetTCPConnection -LocalPort 5000 -State Listen -ErrorAction Stop | ForEach-Object {
+            $p = Get-Process -Id $_.OwningProcess -ErrorAction SilentlyContinue
+            if ($p -and $p.ProcessName -match '^pythonw?$') { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue; $cerrados++ }
         }
     } catch {}
+    if ($cerrados -gt 0) {
+        Info "Se cerro Clipadsk, que estaba abierto (se vuelve a abrir al final)"
+        Start-Sleep -Seconds 1
+    }
 }
 
 function Es-Clipadsk([string]$dir) {

@@ -22,9 +22,14 @@ echo.
 echo   Clipadsk ^| Iniciando...
 echo.
 
-rem --- Cerrar una instancia anterior (solo el proceso que ESCUCHA en el puerto 5000)
-for /f "tokens=5" %%a in ('netstat -aon ^| findstr /r /c:":5000 .*LISTENING" 2^>nul') do (
-    taskkill /f /pid %%a >nul 2>&1
+rem --- Cerrar el Clipadsk que este usando el puerto 5000 (de esta carpeta o de una version
+rem     anterior instalada en otra). Se usa PowerShell porque netstat dice LISTENING o
+rem     ESCUCHANDO segun el idioma de Windows.
+powershell -NoProfile -Command "Get-NetTCPConnection -LocalPort 5000 -State Listen -ErrorAction SilentlyContinue | ForEach-Object { $p = Get-Process -Id $_.OwningProcess -ErrorAction SilentlyContinue; if ($p -and $p.ProcessName -match '^pythonw?$') { Stop-Process -Id $p.Id -Force } }" >nul 2>&1
+timeout /t 1 /nobreak >nul
+powershell -NoProfile -Command "if (Get-NetTCPConnection -LocalPort 5000 -State Listen -ErrorAction SilentlyContinue) { exit 1 } else { exit 0 }" >nul 2>&1
+if !errorlevel! neq 0 (
+    echo   [AVISO] El puerto 5000 esta ocupado por otro programa. Cerralo o reinicia la PC.
 )
 
 rem --- Reinstalar dependencias solo si cambio requirements.txt (por ejemplo, tras actualizar)
@@ -52,7 +57,8 @@ rem --- Esperar a que responda (hasta 40 segundos)
 set /a intentos=0
 :esperar
 timeout /t 2 /nobreak >nul
-powershell -NoProfile -Command "try { $null = Invoke-WebRequest 'http://127.0.0.1:5000/api/health' -UseBasicParsing -TimeoutSec 2; exit 0 } catch { exit 1 }" >nul 2>&1
+rem     (se verifica que responda la version NUEVA: la vieja no tiene /api/health)
+powershell -NoProfile -Command "try { $r = Invoke-RestMethod 'http://127.0.0.1:5000/api/health' -TimeoutSec 2; if ($r.status -eq 'ok') { exit 0 } } catch {}; exit 1" >nul 2>&1
 if !errorlevel! equ 0 goto listo
 set /a intentos+=1
 if !intentos! lss 20 goto esperar

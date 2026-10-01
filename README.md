@@ -5,25 +5,58 @@ Soporta YouTube, Instagram y más. Sin login, sin nube, sin telemetría.
 
 ---
 
-## Arranque rápido (Windows)
+## Instalación en Windows 10 / 11
 
-### Primera vez (instalación)
+No hace falta saber programar ni tener permisos de administrador. Se instala Python
+(si no está), FFmpeg, las dependencias y un acceso directo **Clipadsk** en el Escritorio.
 
-Hacé doble clic en `install.ps1` o ejecutalo en PowerShell:
+### Opción 1 — Una línea (recomendada)
+
+1. Abrí el menú Inicio, escribí **PowerShell** y abrilo.
+2. Pegá esta línea y apretá Enter:
 
 ```powershell
-.\install.ps1
+irm https://raw.githubusercontent.com/psherrera/clipadsk/main/instalar.ps1 | iex
 ```
 
-Instala Python, FFmpeg y yt-dlp si no están, crea el entorno virtual e instala las dependencias.
+3. Esperá unos minutos. Al terminar, Clipadsk se abre solo en el navegador.
+
+Se instala en `%LOCALAPPDATA%\Clipadsk`.
+
+### Opción 2 — Descargando el ZIP
+
+1. En esta página: botón verde **Code → Download ZIP**.
+2. Descomprimí el ZIP donde quieras (por ejemplo en Documentos).
+3. Doble clic en **`INSTALAR.bat`**.
+   Si Windows muestra "Windows protegió su PC": **Más información → Ejecutar de todas formas**.
+
+### Primer uso
+
+La primera vez la app pide una **API Key de Groq** (gratis, sin tarjeta) para transcribir
+rápido con IA: [console.groq.com/keys](https://console.groq.com/keys).
 
 ### Uso diario
 
-```bat
-iniciar.bat
-```
+Doble clic en el ícono **Clipadsk** del Escritorio (o en `iniciar.bat`).
 
-Levanta el backend y abre la app en el navegador automáticamente.
+### Actualizar
+
+Desde la app: **Configuración → Actualizar aplicación**. También se puede volver a correr
+el instalador: actualiza sin borrar la configuración, las cookies ni el historial.
+
+### Si algo falla
+
+El instalador guarda un registro en `%TEMP%\clipadsk-instalacion.log` y el servidor en
+`backend\clipadsk.log`. Mandá esos archivos a quien te pasó Clipadsk.
+
+### Mensaje para pasarle a alguien
+
+> Para instalar Clipadsk: abrí **PowerShell** desde el menú Inicio, pegá esta línea y apretá Enter:
+>
+> `irm https://raw.githubusercontent.com/psherrera/clipadsk/main/instalar.ps1 | iex`
+>
+> Tarda unos minutos y después se abre sola. Para usarla otro día, buscá el ícono **Clipadsk** en el Escritorio.
+> La primera vez te pide una clave gratis de Groq: creala en https://console.groq.com/keys
 
 ---
 
@@ -73,21 +106,6 @@ Las herramientas de IA (resumen, citas, datos, ángulos, diarización y chat) an
 
 ---
 
-## Actualizaciones
-
-Desde la app: **Config → Actualizar Aplicación** ejecuta `git pull` e instala las dependencias nuevas. Después hay que cerrar y volver a abrir `iniciar.bat`.
-
-**Config → Actualizar motor** actualiza yt-dlp (útil cuando YouTube o Instagram dejan de funcionar).
-
-O manualmente:
-
-```bat
-git pull origin main
-iniciar.bat
-```
-
----
-
 ## Estructura
 
 ```
@@ -104,8 +122,9 @@ clipadsk/
 ├── frontend/              ← index.html, main.js, style.css
 ├── tests/                 ← tests (pytest)
 ├── docker-compose.yml
+├── instalar.ps1           ← instalador / actualizador (Windows)
+├── INSTALAR.bat           ← doble clic para instalar desde el ZIP
 ├── iniciar.bat            ← arranque diario en Windows
-├── install.ps1            ← instalación inicial en Windows
 └── .env.template          ← plantilla de configuración
 ```
 
@@ -137,8 +156,8 @@ Para regenerar `backend/requirements-pinned.txt`: `scripts/pin_requirements.ps1`
 
 | Herramienta | Mínimo | Notas |
 |---|---|---|
-| Python | 3.10+ | Auto-instalable con `install.ps1` |
-| FFmpeg | cualquiera | Necesario para audio; auto-instalable |
-| yt-dlp | última versión | Auto-descargado al iniciar |
-| Git | cualquiera | Para actualizaciones automáticas |
-| GROQ_API_KEY | — | Opcional; acelera la transcripción |
+| Python | 3.10+ | Lo instala `instalar.ps1` si falta |
+| FFmpeg | cualquiera | Lo descarga `instalar.ps1` dentro de la carpeta de la app |
+| yt-dlp | última versión | Se instala con las dependencias; se actualiza desde Configuración |
+| Git | — | Opcional: sin git, las actualizaciones se bajan como ZIP de GitHub |
+| API Key de Groq | — | Gratis; transcripción rápida y herramientas de IA |

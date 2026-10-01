@@ -90,3 +90,25 @@ def test_cleanup_keeps_raw_chunk_on_failure(monkeypatch):
     text = "Hola esto es una prueba de texto bastante larga para limpiar. " * 3
     assert ai.cleanup_transcript(text, object(), "es", warnings) == text.strip() or warnings
     assert warnings
+
+
+def test_update_from_zip_keeps_user_files(tmp_path, monkeypatch):
+    """Instalaciones sin git: actualiza desde el ZIP de GitHub sin tocar .env ni el venv."""
+    import zipfile as zf
+    src = tmp_path / "zip.zip"
+    with zf.ZipFile(src, "w") as z:
+        z.writestr("clipadsk-main/backend/main.py", "nuevo")
+        z.writestr("clipadsk-main/frontend/index.html", "<html>nuevo</html>")
+        z.writestr("clipadsk-main/.env", "NO_DEBE_COPIARSE=1")
+        z.writestr("clipadsk-main/backend/venv/x.txt", "no")
+    root = tmp_path / "app"
+    (root / "backend").mkdir(parents=True)
+    (root / "backend" / "main.py").write_text("viejo")
+    (root / ".env").write_text("GROQ_API_KEY=mia")
+    monkeypatch.setattr(main, "http_download", lambda url, dest, headers, timeout=60: __import__("shutil").copy(src, dest))
+    changed, err = main._update_from_zip(str(root))
+    assert err is None and changed == 2
+    assert (root / "backend" / "main.py").read_text() == "nuevo"
+    assert (root / ".env").read_text() == "GROQ_API_KEY=mia"
+    assert not (root / "backend" / "venv").exists()
+    assert main._update_from_zip(str(root)) == (0, None)  # segunda vez: nada que cambiar

@@ -3,167 +3,62 @@ setlocal EnableDelayedExpansion
 cd /d "%~dp0"
 title Clipadsk
 
+rem ===========================================================================
+rem  Clipadsk - arranque diario
+rem  Si todavia no esta instalado en esta carpeta, ejecuta el instalador.
+rem  (Sin acentos a proposito: cmd.exe los muestra mal.)
+rem ===========================================================================
+
+if not exist "backend\venv\Scripts\python.exe" (
+    echo.
+    echo   Clipadsk todavia no esta instalado en esta carpeta.
+    echo   Iniciando el instalador...
+    echo.
+    powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0instalar.ps1"
+    exit /b
+)
+
 echo.
-echo  ==========================================
-echo    Clipadsk  ^|  Iniciando...
-echo  ==========================================
+echo   Clipadsk ^| Iniciando...
 echo.
 
-:: ── Matar instancias previas en puerto 5000 ──────────────────────────────────
-::    (solo procesos ESCUCHANDO en :5000; antes podía matar el navegador si tenía
-::     una conexión saliente a otro servidor en el puerto 5000)
+rem --- Cerrar una instancia anterior (solo el proceso que ESCUCHA en el puerto 5000)
 for /f "tokens=5" %%a in ('netstat -aon ^| findstr /r /c:":5000 .*LISTENING" 2^>nul') do (
     taskkill /f /pid %%a >nul 2>&1
 )
 
-:: ─────────────────────────────────────────────────────────────────────────────
-:: 1) PYTHON
-:: ─────────────────────────────────────────────────────────────────────────────
-python --version >nul 2>&1
-if %errorlevel% neq 0 (
-    echo  [!] Python no encontrado. Intentando instalar con winget...
-    winget install -e --id Python.Python.3.11 --accept-package-agreements --accept-source-agreements
-    if %errorlevel% neq 0 (
-        echo.
-        echo  [ERROR] No se pudo instalar Python automaticamente.
-        echo          Descargalo desde https://python.org e instala con "Add to PATH" marcado.
-        echo.
-        pause
-        exit /b 1
-    )
-    echo.
-    echo  [OK] Python instalado. Cerrá esta ventana y volvé a abrir iniciar.bat.
-    pause
-    exit /b 0
-)
-for /f "tokens=*" %%v in ('python --version 2^>^&1') do echo  [OK] %%v encontrado.
-
-:: ─────────────────────────────────────────────────────────────────────────────
-:: 2) FFMPEG
-:: ─────────────────────────────────────────────────────────────────────────────
-ffmpeg -version >nul 2>&1
-if %errorlevel% neq 0 (
-    echo  [!] FFmpeg no encontrado. Intentando instalar con winget...
-    winget install -e --id Gyan.FFmpeg --accept-package-agreements --accept-source-agreements
-    if %errorlevel% neq 0 (
-        echo.
-        echo  [AVISO] No se pudo instalar FFmpeg automaticamente.
-        echo          Descargalo desde https://ffmpeg.org/download.html y agregalo al PATH.
-        echo          La app funcionara pero sin conversion de audio.
-        echo.
-    ) else (
-        echo.
-        echo  [OK] FFmpeg instalado. Cerrá esta ventana y volvé a abrir iniciar.bat.
-        pause
-        exit /b 0
-    )
-) else (
-    echo  [OK] FFmpeg encontrado.
-)
-
-:: ─────────────────────────────────────────────────────────────────────────────
-:: 3) YT-DLP
-:: ─────────────────────────────────────────────────────────────────────────────
-if not exist "yt-dlp.exe" (
-    echo  [!] yt-dlp.exe no encontrado. Descargando...
-    powershell -NoProfile -Command "Invoke-WebRequest -Uri 'https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe' -OutFile 'yt-dlp.exe'"
-    if %errorlevel% neq 0 (
-        echo  [ERROR] No se pudo descargar yt-dlp.exe. Verifica tu conexion a internet.
-        pause
-        exit /b 1
-    )
-    echo  [OK] yt-dlp.exe descargado.
-) else (
-    echo  [OK] yt-dlp.exe encontrado.
-)
-
-:: ─────────────────────────────────────────────────────────────────────────────
-:: 4) ENTORNO VIRTUAL + DEPENDENCIAS
-::    Se reinstalan solas cuando cambia backend\requirements.txt (p. ej. tras actualizar)
-:: ─────────────────────────────────────────────────────────────────────────────
-set "PRIMERA_VEZ=0"
-if not exist "backend\venv\Scripts\python.exe" (
-    set "PRIMERA_VEZ=1"
-    echo.
-    echo  [+] Primera vez: creando entorno virtual e instalando dependencias...
-    echo      Esto puede tardar 2-3 minutos. Solo ocurre una vez.
-    echo.
-    python -m venv backend\venv
-    if !errorlevel! neq 0 (
-        echo  [ERROR] No se pudo crear el entorno virtual.
-        pause
-        exit /b 1
-    )
-    backend\venv\Scripts\python.exe -m pip install --upgrade pip --quiet
-)
-
+rem --- Reinstalar dependencias solo si cambio requirements.txt (por ejemplo, tras actualizar)
 fc /b "backend\requirements.txt" "backend\venv\.requirements.installed" >nul 2>&1
 if !errorlevel! neq 0 (
-    echo  [+] Instalando/actualizando dependencias...
-    backend\venv\Scripts\python.exe -m pip install -r backend\requirements.txt --quiet
-    if !errorlevel! neq 0 (
-        echo  [ERROR] Fallo al instalar dependencias. Revisa tu conexion a internet.
-        if "!PRIMERA_VEZ!"=="1" (
-            pause
-            exit /b 1
-        )
-        echo          Se intenta arrancar igual con las dependencias anteriores.
-    ) else (
+    echo   [+] Actualizando dependencias...
+    backend\venv\Scripts\python.exe -m pip install -r backend\requirements.txt --quiet --disable-pip-version-check
+    if !errorlevel! equ 0 (
         copy /y "backend\requirements.txt" "backend\venv\.requirements.installed" >nul
-        echo  [OK] Dependencias al dia.
+    ) else (
+        echo   [AVISO] No se pudieron actualizar las dependencias. Se arranca igual.
     )
-) else (
-    echo  [OK] Entorno virtual listo.
 )
 
-:: ─────────────────────────────────────────────────────────────────────────────
-:: 5) SINCRONIZAR COOKIES (si existe cookies.txt o cookies_ig.txt en la raiz)
-:: ─────────────────────────────────────────────────────────────────────────────
-if exist "cookies.txt" (
-    copy /y "cookies.txt" "backend\cookies.txt" >nul
-    echo  [OK] cookies.txt copiado al backend.
-)
-if exist "cookies_ig.txt" (
-    copy /y "cookies_ig.txt" "backend\cookies_ig.txt" >nul
-    echo  [OK] cookies_ig.txt copiado al backend.
-)
+rem --- Cookies opcionales en la carpeta principal
+if exist "cookies.txt" copy /y "cookies.txt" "backend\cookies.txt" >nul
+if exist "cookies_ig.txt" copy /y "cookies_ig.txt" "backend\cookies_ig.txt" >nul
 
-:: ─────────────────────────────────────────────────────────────────────────────
-:: 6) ARRANCAR BACKEND (oculto, sin ventana)
-:: ─────────────────────────────────────────────────────────────────────────────
-echo.
-echo  [+] Iniciando servidor backend...
+rem --- Arrancar el servidor en segundo plano (sin ventana)
+echo   [+] Iniciando servidor...
 powershell -NoProfile -WindowStyle Hidden -Command ^
-    "Start-Process '%~dp0backend\venv\Scripts\python.exe' -ArgumentList '%~dp0backend\main.py' -WorkingDirectory '%~dp0backend' -WindowStyle Hidden"
+    "Start-Process '%~dp0backend\venv\Scripts\python.exe' -ArgumentList '\"%~dp0backend\main.py\"' -WorkingDirectory '%~dp0backend' -WindowStyle Hidden"
 
-:: ─────────────────────────────────────────────────────────────────────────────
-:: 7) ESPERAR A QUE RESPONDA (hasta 30 segundos)
-:: ─────────────────────────────────────────────────────────────────────────────
-echo  [+] Esperando que el servidor este listo...
+rem --- Esperar a que responda (hasta 40 segundos)
 set /a intentos=0
 :esperar
-timeout /t 2 >nul
-curl -s -f http://127.0.0.1:5000/api/health >nul 2>&1
-if %errorlevel% equ 0 goto listo
+timeout /t 2 /nobreak >nul
+powershell -NoProfile -Command "try { $null = Invoke-WebRequest 'http://127.0.0.1:5000/api/health' -UseBasicParsing -TimeoutSec 2; exit 0 } catch { exit 1 }" >nul 2>&1
+if !errorlevel! equ 0 goto listo
 set /a intentos+=1
-if %intentos% lss 15 goto esperar
-echo  [AVISO] El servidor tarda mas de lo esperado. Abriendo igual...
-
+if !intentos! lss 20 goto esperar
+echo   [AVISO] El servidor tarda mas de lo normal. Si no abre, mira el registro en backend\clipadsk.log
 :listo
-echo  [OK] Servidor activo.
 
-:: ─────────────────────────────────────────────────────────────────────────────
-:: 8) ABRIR NAVEGADOR
-:: ─────────────────────────────────────────────────────────────────────────────
-echo.
-echo  ==========================================
-echo    Abriendo Clipadsk en el navegador...
-echo    http://127.0.0.1:5000
-echo  ==========================================
-echo.
-explorer "http://127.0.0.1:5000"
-
-:: Minimizar esta ventana
-powershell -NoProfile -Command "$h=(Get-Process -Id $PID).MainWindowHandle; Add-Type -MemberDefinition '[DllImport(\"user32.dll\")] public static extern bool ShowWindow(IntPtr h,int n);' -Name W -Namespace W; [W.W]::ShowWindow($h,6)" >nul 2>&1
-
+echo   [OK] Abriendo http://127.0.0.1:5000
+start "" "http://127.0.0.1:5000"
 exit

@@ -1179,6 +1179,64 @@ def _pip_install_requirements() -> tuple:
     return res.returncode == 0, (res.stderr or res.stdout).strip()[-500:]
 
 
+GITHUB_REPO = os.environ.get('CLIPADSK_REPO', 'psherrera/clipadsk')
+GITHUB_BRANCH = os.environ.get('CLIPADSK_BRANCH', 'main')
+# Nunca se pisan al actualizar (datos y configuración del usuario)
+UPDATE_SKIP = {'.env', 'cookies.txt', 'cookies_ig.txt', '.git'}
+UPDATE_SKIP_DIRS = {os.path.join('backend', 'venv'), os.path.join('backend', 'downloads'), os.path.join('backend', 'model')}
+
+
+def _update_from_zip(root: str) -> tuple:
+    """Actualiza descargando el ZIP de GitHub (instalaciones sin git). Devuelve (archivos cambiados, error)."""
+    import hashlib
+    url = f"https://github.com/{GITHUB_REPO}/archive/refs/heads/{GITHUB_BRANCH}.zip"
+    with tempfile.TemporaryDirectory() as tmp:
+        zip_path = os.path.join(tmp, 'app.zip')
+        try:
+            http_download(url, zip_path, {'User-Agent': 'Clipadsk-Updater'}, timeout=120)
+            with zipfile.ZipFile(zip_path) as zf:
+                zf.extractall(tmp)
+        except Exception as e:
+            return 0, f"No se pudo descargar la actualización de GitHub: {e}"
+        tops = [d for d in os.listdir(tmp) if os.path.isdir(os.path.join(tmp, d))]
+        if not tops or not os.path.exists(os.path.join(tmp, tops[0], 'backend', 'main.py')):
+            return 0, "El ZIP descargado no tiene el formato esperado."
+        src_root = os.path.join(tmp, tops[0])
+
+        def digest(path):
+            with open(path, 'rb') as f:
+                return hashlib.sha256(f.read()).hexdigest()
+
+        changed = 0
+        for dirpath, dirnames, filenames in os.walk(src_root):
+            rel_dir = os.path.relpath(dirpath, src_root)
+            rel_dir = '' if rel_dir == '.' else rel_dir
+            dirnames[:] = [d for d in dirnames if os.path.join(rel_dir, d) not in UPDATE_SKIP_DIRS and d != '.git']
+            for name in filenames:
+                rel = os.path.join(rel_dir, name)
+                if name in UPDATE_SKIP and rel_dir == '':
+                    continue
+                src, dst = os.path.join(dirpath, name), os.path.join(root, rel)
+                if os.path.exists(dst) and digest(dst) == digest(src):
+                    continue
+                os.makedirs(os.path.dirname(dst), exist_ok=True)
+                shutil.copy2(src, dst)
+                changed += 1
+        return changed, None
+
+
+def _update_with_git(repo: str) -> tuple:
+    """git pull. Devuelve (hubo_cambios, salida, error)."""
+    try:
+        res = subprocess.run(["git", "pull", "--ff-only", "origin", GITHUB_BRANCH], capture_output=True, text=True, cwd=repo, timeout=300)
+    except Exception as e:
+        return False, "", str(e)
+    out = res.stdout.strip()
+    if res.returncode != 0:
+        return False, out, f"git pull salió con código {res.returncode}: {res.stderr.strip()[-400:]}"
+    return not ("Already up to date" in out or "Ya está actualizado" in out), out, None
+
+
 def _update_app() -> dict:
     protected = [os.path.join(d, n) for d in (ROOT_DIR, BASE_DIR) for n in (".env", "cookies.txt", "cookies_ig.txt")]
     backups = {}
@@ -1191,16 +1249,13 @@ def _update_app() -> dict:
                 logger.warning(f"No se pudo respaldar {path}: {e}")
 
     repo = os.environ.get('GIT_REPO_DIR', ROOT_DIR)
-    error, output = None, ""
+    use_git = os.path.isdir(os.path.join(repo, '.git')) and shutil.which('git')
     try:
-        res = subprocess.run(["git", "pull", "origin", "main"], capture_output=True, text=True, cwd=repo, timeout=300)
-        output = res.stdout.strip()
-        if res.returncode != 0:
-            error = f"git pull salió con código {res.returncode}: {res.stderr.strip()[-400:]}"
-    except FileNotFoundError:
-        error = "Git no está instalado o no está en el PATH."
-    except Exception as e:
-        error = str(e)
+        if use_git:
+            changed, output, error = _update_with_git(repo)
+        else:
+            n, error = _update_from_zip(ROOT_DIR)
+            changed, output = n > 0, f"{n} archivos actualizados desde GitHub"
     finally:
         for path, content in backups.items():
             try:
@@ -1211,11 +1266,11 @@ def _update_app() -> dict:
 
     if error:
         return {"error": f"Error al actualizar: {error}"}
-    if "Already up to date" in output or "Ya está actualizado" in output:
+    if not changed:
         return {"status": "ok", "message": "La aplicación ya está actualizada. No hay cambios nuevos.", "output": output}
 
     ok, pip_out = _pip_install_requirements()
-    msg = "✅ Aplicación actualizada. Reiniciá Clipadsk (cerrá y abrí iniciar.bat) para aplicar los cambios."
+    msg = "✅ Aplicación actualizada. Cerrá y volvé a abrir Clipadsk para aplicar los cambios."
     if not ok:
         msg += f" ⚠️ No se pudieron instalar algunas dependencias: {pip_out}"
     return {"status": "ok", "message": msg, "output": output}

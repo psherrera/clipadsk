@@ -355,9 +355,13 @@
                                 <span class="quick-icon bg-accent/10 text-accent"><span class="material-symbols-outlined">rocket_launch</span></span>
                                 <h3 class="font-semibold text-white">¿Instalar en otra PC?</h3>
                             </div>
-                            <p class="text-xs text-slate-400 leading-relaxed">Si estás instalando Clipadsk en una computadora nueva, seguí la guía paso a paso.</p>
-                            <a href="setup.html" target="_blank" class="btn-ghost w-fit">
-                                Ver guía <span class="material-symbols-outlined text-base">open_in_new</span>
+                            <p class="text-xs text-slate-400 leading-relaxed">Para instalar Clipadsk en otra computadora: abrir <b class="text-white">PowerShell</b> desde el menú Inicio, pegar esta línea y apretar Enter.</p>
+                            <div class="field-wrap">
+                                <code id="install-cmd" class="flex-1 py-2.5 text-[11px] text-white break-all font-mono">irm https://raw.githubusercontent.com/psherrera/clipadsk/main/instalar.ps1 | iex</code>
+                                <button id="copy-install-cmd-btn" class="chip-btn chip-primary flex-shrink-0"><span class="material-symbols-outlined text-sm">content_copy</span> Copiar</button>
+                            </div>
+                            <a href="setup.html" target="_blank" class="link-btn inline-flex items-center gap-1">
+                                Guía de primeros pasos <span class="material-symbols-outlined text-base">open_in_new</span>
                             </a>
                         </div>
 
@@ -526,7 +530,7 @@
         </main>
     </div>
 
-    <script src="main.js?v=5.0" defer></script>
+    <script src="main.js?v=5.1" defer></script>
     <script>
         if ('serviceWorker' in navigator) {
             window.addEventListener('load', () => {

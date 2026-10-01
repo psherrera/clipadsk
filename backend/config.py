@@ -17,7 +17,16 @@ load_dotenv(os.path.join(BASE_DIR, '.env'))
 
 # ─── LOGGING ─────────────────────────────────────────────────────────────────
 LOG_LEVEL = os.environ.get('LOG_LEVEL', 'INFO').upper()
-logging.basicConfig(level=LOG_LEVEL, format='[%(asctime)s] %(levelname)s %(name)s: %(message)s')
+_log_format = '[%(asctime)s] %(levelname)s %(name)s: %(message)s'
+logging.basicConfig(level=LOG_LEVEL, format=_log_format)
+# El servidor corre sin ventana (iniciar.bat): además se guarda un registro en backend/clipadsk.log
+try:
+    from logging.handlers import RotatingFileHandler
+    _fh = RotatingFileHandler(os.path.join(BASE_DIR, 'clipadsk.log'), maxBytes=1_000_000, backupCount=2, encoding='utf-8')
+    _fh.setFormatter(logging.Formatter(_log_format))
+    logging.getLogger().addHandler(_fh)
+except OSError:
+    pass
 logger = logging.getLogger('clipadsk')
 
 

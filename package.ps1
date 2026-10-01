@@ -43,7 +43,7 @@ if (Test-Path (Join-Path $root 'backend')) {
 
 # Copiar ficheros sueltos
 # Nunca se copian .env ni cookies (contienen claves y sesiones personales)
-$toCopy = @('docker-compose.yml','install.ps1','iniciar.bat','.env.template','README.md','clipa.ico')
+$toCopy = @('docker-compose.yml','instalar.ps1','INSTALAR.bat','iniciar.bat','.env.template','.gitattributes','README.md','clipa.ico')
 foreach ($f in $toCopy) {
     $src = Join-Path $root $f
     if (Test-Path $src) { Copy-Item -Path $src -Destination (Join-Path $temp $f) -Force }

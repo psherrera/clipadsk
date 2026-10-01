@@ -665,6 +665,11 @@ document.addEventListener('DOMContentLoaded', () => {
     document.getElementById('sidebar-close-btn')?.addEventListener('click', () => toggleSidebar(false));
     document.getElementById('sidebar-backdrop')?.addEventListener('click', () => toggleSidebar(false));
 
+    document.getElementById('copy-install-cmd-btn')?.addEventListener('click', () => {
+        const cmd = document.getElementById('install-cmd')?.textContent.trim();
+        if (cmd) { navigator.clipboard.writeText(cmd); showToast('Comando copiado. Pegalo en PowerShell en la otra PC.', 'success'); }
+    });
+
     switchTab('home');
 
     // ─── SHARE TARGET ────────────────────────────────────────────────────────────

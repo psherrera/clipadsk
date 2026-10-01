@@ -1,518 +1,536 @@
 <!DOCTYPE html>
-<html lang="es" class="dark">
+<html lang="es">
 
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Clipadsk - Transcriptor para Periodistas</title>
-    
+    <title>Clipadsk 2.0 - Transcriptor para Periodistas</title>
+
+    <!-- Tema: se aplica antes de pintar para evitar parpadeo -->
+    <script>
+        (function () {
+            var t = null;
+            try { t = localStorage.getItem('clipadsk_theme'); } catch (e) {}
+            if (!t) t = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+            if (t === 'dark') document.documentElement.classList.add('dark');
+        })();
+    </script>
+
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
     <link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20..48,100..700,0..1,-50..200" rel="stylesheet">
-    
+
     <link rel="manifest" href="manifest.json">
-    <meta name="theme-color" content="#895af6">
-    <meta name="apple-mobile-web-app-capable" content="yes">
-    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="theme-color" content="#2a1566">
     <link rel="apple-touch-icon" href="icon.svg">
-    
-    <link rel="stylesheet" href="style.css?v=4.0">
+
+    <link rel="stylesheet" href="style.css?v=5.0">
     <!-- JSZip: crear archivos .zip en el navegador sin backend -->
     <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
 
+    <script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+    <!-- La configuración va DESPUÉS del script de Tailwind (si no, "tailwind" no existe todavía) -->
     <script id="tailwind-config">
+        // Los grises (slate), "white" y "black" usan variables CSS: en modo claro se invierten,
+        // así las clases que genera main.js (text-white, bg-white/5, text-slate-400...) se ven
+        // bien en los dos temas sin reescribir cada plantilla.
+        const v = (name) => `rgb(var(--${name}) / <alpha-value>)`;
         tailwind.config = {
             darkMode: "class",
             theme: {
                 extend: {
                     colors: {
-                        "primary": "#895af6",
-                        "accent": "#06b6d4",
-                        "background-dark": "#0a0812",
+                        primary: v('c-primary'),
+                        accent: v('c-accent'),
+                        "background-dark": v('c-bg'),
+                        onaccent: "#ffffff",
+                        white: v('c-white'),
+                        black: v('c-black'),
+                        slate: {
+                            50: v('s50'), 100: v('s100'), 200: v('s200'), 300: v('s300'), 400: v('s400'),
+                            500: v('s500'), 600: v('s600'), 700: v('s700'), 800: v('s800'), 900: v('s900'), 950: v('s950'),
+                        },
                     },
-                    fontFamily: { "display": ["Outfit", "Inter", "sans-serif"] }
+                    fontFamily: { display: ["Outfit", "Inter", "sans-serif"] },
                 },
             },
-        }
+        };
     </script>
-    <script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
 </head>
 
-<body class="bg-background-dark font-display text-slate-100 flex flex-col min-h-screen">
+<body class="font-display" data-view="home">
 
-
-
-    <!-- Background Blobs -->
-    <div class="background-blobs">
-        <div class="blob blob-1"></div>
-        <div class="blob blob-2"></div>
-        <div class="blob blob-3"></div>
-    </div>
-
-    <!-- Header -->
-    <header class="sticky top-0 z-50 glass border-b border-primary/20 px-6 py-4 flex flex-col lg:flex-row lg:items-center justify-between gap-4">
-        <div class="flex items-center justify-between w-full lg:w-auto">
-            <div class="flex items-center gap-3">
-                <div class="w-10 h-10 rounded-lg overflow-hidden shadow-lg shadow-primary/20">
-                    <img src="logo.png" alt="Clipadsk Logo" class="w-full h-full object-contain">
-                </div>
-                <h1 class="text-xl font-bold tracking-tight bg-clip-text text-transparent bg-gradient-to-r from-white to-slate-400">Clipadsk</h1>
+    <!-- ═══════════════════════════ MENÚ LATERAL ═══════════════════════════ -->
+    <aside id="sidebar" class="sidebar">
+        <div class="sidebar-brand">
+            <img src="logo.png" alt="" class="sidebar-logo">
+            <div>
+                <p class="sidebar-title">Clipadsk</p>
+                <p class="sidebar-version">versión 2.0</p>
             </div>
-            
-            <!-- Mobile status badges right of logo -->
-            <div class="flex items-center gap-3 lg:hidden">
-                <div id="status-badge-mobile" class="flex items-center gap-2 px-3 py-1 bg-slate-800/50 border border-white/5 rounded-full">
-                    <div id="status-dot-mobile" class="w-2 h-2 rounded-full bg-slate-600"></div>
-                </div>
-            </div>
+            <button id="sidebar-close-btn" class="sidebar-close" aria-label="Cerrar menú">
+                <span class="material-symbols-outlined">close</span>
+            </button>
         </div>
 
-        <!-- Navigation (Desktop: inline, Mobile: bottom fixed) -->
-        <nav class="fixed bottom-0 left-0 right-0 z-50 glass border-t border-primary/20 px-2 py-3 lg:static lg:bg-transparent lg:border-none lg:p-0 lg:flex-1 lg:ml-8">
-            <div class="max-w-2xl mx-auto lg:mx-0 flex items-center justify-around lg:justify-start overflow-hidden gap-2 lg:gap-6 no-scrollbar">
-                <button class="nav-item active flex flex-col lg:flex-row items-center gap-1.5 focus:outline-none min-w-[60px] lg:min-w-0" data-tab="youtube">
-                    <span class="material-symbols-outlined text-[24px] lg:text-[20px]">subscriptions</span>
-                    <span class="text-[11px] lg:text-xs font-extrabold uppercase tracking-wider">YouTube</span>
-                </button>
-                <button class="nav-item flex flex-col lg:flex-row items-center gap-1.5 focus:outline-none text-slate-500 hover:text-slate-300 min-w-[60px] lg:min-w-0" data-tab="instagram">
-                    <span class="material-symbols-outlined text-[24px] lg:text-[20px]">photo_library</span>
-                    <span class="text-[11px] lg:text-xs font-extrabold uppercase tracking-wider">Instagram</span>
-                </button>
-                <button class="nav-item flex flex-col lg:flex-row items-center gap-1.5 focus:outline-none text-slate-500 hover:text-slate-300 min-w-[60px] lg:min-w-0" data-tab="tiktok">
-                    <span class="material-symbols-outlined text-[24px] lg:text-[20px]">movie</span>
-                    <span class="text-[11px] lg:text-xs font-extrabold uppercase tracking-wider">TikTok</span>
-                </button>
-                <button class="nav-item flex flex-col lg:flex-row items-center gap-1.5 focus:outline-none text-slate-500 hover:text-slate-300 min-w-[60px] lg:min-w-0" data-tab="redes">
-                    <span class="material-symbols-outlined text-[24px] lg:text-[20px]">share</span>
-                    <span class="text-[11px] lg:text-xs font-extrabold uppercase tracking-wider">Otros</span>
-                </button>
-                <button class="nav-item flex flex-col lg:flex-row items-center gap-1.5 focus:outline-none text-slate-500 hover:text-slate-300 min-w-[60px] lg:min-w-0" data-tab="whatsapp">
-                    <span class="material-symbols-outlined text-[24px] lg:text-[20px]">mic</span>
-                    <span class="text-[11px] lg:text-xs font-extrabold uppercase tracking-wider">WhatsApp</span>
-                </button>
-                <button class="nav-item flex flex-col lg:flex-row items-center gap-1.5 focus:outline-none text-slate-500 hover:text-slate-300 min-w-[60px] lg:min-w-0" data-tab="video">
-                    <span class="material-symbols-outlined text-[24px] lg:text-[20px]">video_file</span>
-                    <span class="text-[11px] lg:text-xs font-extrabold uppercase tracking-wider">Video</span>
-                </button>
-                <button class="nav-item flex flex-col lg:flex-row items-center gap-1.5 focus:outline-none text-slate-500 hover:text-slate-300 min-w-[60px] lg:min-w-0" data-tab="history">
-                    <span class="material-symbols-outlined text-[24px] lg:text-[20px]">history</span>
-                    <span class="text-[11px] lg:text-xs font-extrabold uppercase tracking-wider">Historial</span>
-                </button>
-                <button class="nav-item flex flex-col lg:flex-row items-center gap-1.5 focus:outline-none text-slate-500 hover:text-slate-300 min-w-[60px] lg:min-w-0" data-tab="config">
-                    <span class="material-symbols-outlined text-[24px] lg:text-[20px]">settings</span>
-                    <span class="text-[11px] lg:text-xs font-extrabold uppercase tracking-wider">Config</span>
-                </button>
-            </div>
+        <nav class="sidebar-nav">
+            <button class="nav-item active" data-tab="home">
+                <span class="material-symbols-outlined">space_dashboard</span><span>Inicio</span>
+            </button>
+
+            <p class="sidebar-group">Transcribir enlaces</p>
+            <button class="nav-item" data-tab="youtube">
+                <span class="material-symbols-outlined">subscriptions</span><span>YouTube</span>
+            </button>
+            <button class="nav-item" data-tab="instagram">
+                <span class="material-symbols-outlined">photo_library</span><span>Instagram</span>
+            </button>
+            <button class="nav-item" data-tab="tiktok">
+                <span class="material-symbols-outlined">movie</span><span>TikTok</span>
+            </button>
+            <button class="nav-item" data-tab="redes">
+                <span class="material-symbols-outlined">share</span><span>X / Facebook</span>
+            </button>
+
+            <p class="sidebar-group">Archivos</p>
+            <button class="nav-item" data-tab="whatsapp">
+                <span class="material-symbols-outlined">mic</span><span>Audio / WhatsApp</span>
+            </button>
+            <button class="nav-item" data-tab="video">
+                <span class="material-symbols-outlined">video_file</span><span>Video propio</span>
+            </button>
+
+            <p class="sidebar-group">Biblioteca</p>
+            <button class="nav-item" data-tab="history">
+                <span class="material-symbols-outlined">history</span><span>Historial</span>
+            </button>
         </nav>
 
-        <div class="hidden lg:flex items-center gap-3">
-            <div id="status-badge" class="flex items-center gap-2 px-3 py-1 bg-slate-800/50 border border-white/5 rounded-full">
-                <div id="status-dot" class="w-2 h-2 rounded-full bg-slate-600"></div>
-                <span id="status-text" class="text-xs font-medium text-slate-500">Offline</span>
-            </div>
-            <button id="pwa-install-btn" class="hidden bg-primary/10 hover:bg-primary/20 text-primary border border-primary/20 px-3 py-1 rounded-full text-[10px] font-bold uppercase tracking-widest transition-all">
-                Instalar App
+        <div class="sidebar-footer">
+            <button class="nav-item" data-tab="config">
+                <span class="material-symbols-outlined">settings</span><span>Configuración</span>
             </button>
+            <div class="sidebar-status">
+                <div id="status-badge" class="flex items-center gap-2">
+                    <div id="status-dot" class="w-2 h-2 rounded-full bg-slate-600"></div>
+                    <span id="status-text" class="text-xs font-medium">Offline</span>
+                </div>
+                <button id="pwa-install-btn" class="hidden sidebar-pill">Instalar app</button>
+            </div>
+        </div>
+    </aside>
+    <div id="sidebar-backdrop" class="sidebar-backdrop hidden"></div>
+
+    <!-- ═══════════════════════════ CONTENIDO ═══════════════════════════ -->
+    <div class="app-shell">
+
+        <header class="topbar">
+            <button id="sidebar-open-btn" class="icon-btn lg:hidden" aria-label="Abrir menú">
+                <span class="material-symbols-outlined">menu</span>
+            </button>
+            <div class="min-w-0 flex-1">
+                <h1 id="tab-title" class="text-2xl font-bold text-white truncate">Inicio</h1>
+                <p id="app-subtitle" class="text-sm text-slate-400 truncate">Tu mesa de trabajo para desgrabar y analizar.</p>
+            </div>
+            <div class="topbar-search hidden md:flex">
+                <span class="material-symbols-outlined text-slate-400 text-xl">search</span>
+                <input id="global-search-input" type="text" placeholder="Buscar en tus transcripciones..." autocomplete="off">
+            </div>
             <span id="quality-warning" class="hidden px-3 py-1 bg-amber-500/10 border border-amber-500/20 text-amber-500 text-xs rounded-full">⚠️ FFmpeg</span>
-        </div>
-    </header>
+            <button id="theme-toggle-btn" class="icon-btn" title="Cambiar tema claro / oscuro" aria-label="Cambiar tema">
+                <span class="material-symbols-outlined theme-icon-dark">dark_mode</span>
+                <span class="material-symbols-outlined theme-icon-light">light_mode</span>
+            </button>
+        </header>
 
-    <main class="app-main flex-1 w-full max-w-[1800px] mx-auto px-5 md:px-8 pb-28 lg:pb-4 lg:grid lg:grid-cols-12 lg:gap-8 items-start space-y-8 lg:space-y-0">
+        <main class="app-main">
 
-        <!-- ═══ IZQUIERDA (Column 1) ═══ -->
-        <div class="app-col-left lg:col-span-5 space-y-6">
-            <!-- Page Title -->
-            <section class="space-y-1">
-                <h2 id="tab-title" class="text-3xl font-extrabold text-white">YouTube Transcriptor</h2>
-                <p id="app-subtitle" class="text-slate-400 text-sm">Transcribí contenido de YouTube con IA.</p>
-            </section>
+            <!-- ═══ INICIO (dashboard) ═══ -->
+            <section id="home-section" class="home-grid fade-in">
 
-            <!-- ═══ MAIN INPUT SECTION ═══ -->
-            <section id="main-input-section" class="space-y-4">
-                <div class="glass p-2.5 rounded-2xl flex flex-col gap-3 transition-all focus-within:ring-2 focus-within:ring-primary/20">
-                    <div class="flex-1 flex items-center px-4 gap-4 bg-slate-900/50 rounded-xl border border-white/5 focus-within:border-primary/50 transition-all py-1">
-                        <span class="material-symbols-outlined text-slate-500" id="input-icon">subscriptions</span>
-                        <input type="text" id="video-url"
-                            class="w-full bg-transparent border-none focus:ring-0 py-3 text-slate-100 placeholder:text-slate-600"
-                            placeholder="Pega el enlace aqui..." autocomplete="off">
-                        <button id="clear-url-btn" class="hidden hover:bg-white/10 p-1.5 rounded-lg transition-all text-slate-500 hover:text-white">
-                            <span class="material-symbols-outlined text-lg">close</span>
+                <!-- Bienvenida + métricas -->
+                <div class="glass card home-welcome">
+                    <div class="flex items-start justify-between gap-4">
+                        <div>
+                            <h2 id="home-greeting" class="text-xl font-bold text-white">Hola de nuevo</h2>
+                            <p class="text-sm text-slate-400">Resumen de tu trabajo en Clipadsk</p>
+                        </div>
+                        <span class="text-[11px] text-slate-500 text-right leading-tight">Sobre tus últimas<br>50 transcripciones</span>
+                    </div>
+                    <div class="metric-grid">
+                        <div class="metric">
+                            <span class="material-symbols-outlined metric-icon">description</span>
+                            <p id="m-total" class="metric-value">0</p>
+                            <p class="metric-label">Transcripciones</p>
+                        </div>
+                        <div class="metric">
+                            <span class="material-symbols-outlined metric-icon">date_range</span>
+                            <p id="m-week" class="metric-value">0</p>
+                            <p class="metric-label">Esta semana</p>
+                        </div>
+                        <div class="metric">
+                            <span class="material-symbols-outlined metric-icon">schedule</span>
+                            <p id="m-hours" class="metric-value">0 min</p>
+                            <p class="metric-label">De audio</p>
+                        </div>
+                        <div class="metric">
+                            <span class="material-symbols-outlined metric-icon">notes</span>
+                            <p id="m-words" class="metric-value">0</p>
+                            <p class="metric-label">Palabras</p>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Banner -->
+                <div class="home-banner">
+                    <div class="flex items-center gap-1.5 mb-3">
+                        <span class="banner-dot active"></span><span class="banner-dot"></span><span class="banner-dot"></span>
+                    </div>
+                    <h3 class="text-lg font-bold text-onaccent">Herramientas periodísticas</h3>
+                    <p class="text-sm text-onaccent/80 mt-1 max-w-sm">Después de transcribir, generá en un clic el resumen, las citas con su minuto exacto, los datos duros y quién habla en cada momento.</p>
+                    <button id="home-try-btn" class="banner-btn">Empezar con un enlace</button>
+                    <span class="material-symbols-outlined banner-art">newspaper</span>
+                </div>
+
+                <!-- Accesos rápidos -->
+                <div class="glass card home-quick-link">
+                    <div class="quick-head">
+                        <span class="quick-icon bg-primary/10 text-primary"><span class="material-symbols-outlined">link</span></span>
+                        <div>
+                            <p class="font-semibold text-white">Pegar un enlace</p>
+                            <p class="text-xs text-slate-400">YouTube, Instagram, TikTok, X, Facebook o una web con video</p>
+                        </div>
+                    </div>
+                    <div class="flex gap-2 mt-4">
+                        <input id="home-url-input" type="text" class="field flex-1 min-w-0" placeholder="https://..." autocomplete="off">
+                        <button id="home-url-btn" class="btn-primary">
+                            <span class="material-symbols-outlined text-lg">arrow_forward</span> Analizar
                         </button>
                     </div>
-                    <button id="fetch-info-btn" class="w-full bg-accent hover:bg-accent/90 text-background-dark font-extrabold px-8 py-3.5 rounded-xl flex items-center justify-center gap-2 transition-transform active:scale-95 shadow-lg shadow-accent/20">
-                        <span class="material-symbols-outlined">analytics</span> Analizar
-                    </button>
                 </div>
-
-                <div id="loading-spinner" class="hidden flex flex-col items-center gap-4 py-6">
-                    <div class="w-12 h-12 border-4 border-slate-800 border-t-accent rounded-full animate-spin"></div>
-                    <p class="text-slate-400 animate-pulse text-sm">Procesando enlace...</p>
-                </div>
-            </section>
-
-            <!-- ═══ WHATSAPP SECTION ═══ -->
-            <section id="whatsapp-section" class="hidden space-y-4">
-                <!-- Dropzone -->
-                <div id="wa-dropzone" class="border-2 border-dashed border-white/10 rounded-2xl p-10 flex flex-col items-center justify-center text-center cursor-pointer hover:border-primary/40 transition-all">
-                    <span class="material-symbols-outlined text-primary text-5xl mb-3">mic</span>
-                    <p class="font-bold text-white text-lg">Subir audio de WhatsApp</p>
-                    <p class="text-slate-400 text-sm mt-1">Arrastra el archivo o hace click para seleccionar</p>
-                    <p class="text-slate-500 text-xs mt-3">.ogg · .opus · .mp3 · .m4a · .wav · .mp4</p>
-                </div>
-                <button id="wa-upload-btn" class="w-full glow-button py-4 rounded-xl font-bold flex items-center justify-center gap-3 transition-all">
-                    <span class="material-symbols-outlined">upload_file</span> Seleccionar archivo de audio
+                <button class="glass card quick-card" data-goto="whatsapp">
+                    <span class="quick-icon bg-emerald-500/10 text-emerald-500"><span class="material-symbols-outlined">mic</span></span>
+                    <div class="text-left">
+                        <p class="font-semibold text-white">Audio / WhatsApp</p>
+                        <p class="text-xs text-slate-400">Notas de voz y grabaciones</p>
+                    </div>
+                    <span class="material-symbols-outlined quick-arrow">chevron_right</span>
                 </button>
-                <input type="file" id="wa-file-input" accept=".ogg,.opus,.mp3,.m4a,.wav,.mp4,.aac,.webm,.weba" class="hidden">
-
-                <!-- WhatsApp result -->
-                <div id="wa-result" class="hidden glass rounded-2xl p-6 fade-in"></div>
-            </section>
-
-            <!-- ═══ VIDEO LOCAL SECTION ═══ -->
-            <section id="video-section" class="hidden space-y-4">
-                <!-- Info badge -->
-                <div class="flex items-center gap-3 p-4 rounded-2xl bg-primary/5 border border-primary/15">
-                    <span class="material-symbols-outlined text-primary text-xl flex-shrink-0">info</span>
-                    <p class="text-xs text-slate-400 leading-relaxed">
-                        Subi una grabación de video propia (.mp4, .mov, .avi, .mkv) y Clipadsk extraerá el audio y lo transcribirá con IA.
-                    </p>
-                </div>
-
-                <!-- Dropzone -->
-                <div id="vid-dropzone" class="border-2 border-dashed border-white/10 rounded-2xl p-10 flex flex-col items-center justify-center text-center cursor-pointer hover:border-primary/40 transition-all group">
-                    <span class="material-symbols-outlined text-emerald-400 text-5xl mb-3 group-hover:scale-110 transition-transform">video_file</span>
-                    <p class="font-bold text-white text-lg">Arrastrá tu video aquí</p>
-                    <p class="text-slate-400 text-sm mt-1">O hacé clic para seleccionar</p>
-                    <p class="text-slate-500 text-xs mt-3">.mp4 · .mov · .avi · .mkv · .webm</p>
-                    <p class="text-slate-600 text-xs mt-1">Hasta 200 MB</p>
-                </div>
-                <button id="vid-upload-btn" class="w-full py-4 rounded-xl font-bold flex items-center justify-center gap-3 transition-all border border-emerald-500/30 bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-300">
-                    <span class="material-symbols-outlined">video_call</span> Seleccionar video
+                <button class="glass card quick-card" data-goto="video">
+                    <span class="quick-icon bg-accent/10 text-accent"><span class="material-symbols-outlined">video_file</span></span>
+                    <div class="text-left">
+                        <p class="font-semibold text-white">Video propio</p>
+                        <p class="text-xs text-slate-400">Entrevistas y conferencias grabadas</p>
+                    </div>
+                    <span class="material-symbols-outlined quick-arrow">chevron_right</span>
                 </button>
-                <input type="file" id="vid-file-input" accept=".mp4,.mov,.avi,.mkv,.webm" class="hidden">
 
-                <!-- Upload progress -->
-                <div id="vid-progress" class="hidden glass rounded-2xl p-5 space-y-3">
-                    <div class="flex items-center gap-3">
-                        <div class="w-5 h-5 border-2 border-slate-700 border-t-emerald-400 rounded-full animate-spin flex-shrink-0"></div>
-                        <p id="vid-progress-text" class="text-sm text-slate-300 animate-pulse">Subiendo video...</p>
+                <!-- Últimas transcripciones -->
+                <div class="glass card home-recent">
+                    <div class="flex items-center justify-between mb-3">
+                        <h3 class="font-semibold text-white">Últimas transcripciones</h3>
+                        <button class="link-btn" data-goto="history">Ver historial</button>
                     </div>
-                    <div class="w-full bg-slate-900 rounded-full h-1.5 overflow-hidden">
-                        <div id="vid-progress-bar" class="h-full bg-emerald-400 transition-all duration-300" style="width:0%"></div>
+                    <div class="recent-table">
+                        <div class="recent-row recent-head">
+                            <span>Título</span><span>Fuente</span><span>Duración</span><span>Fecha</span><span></span>
+                        </div>
+                        <div id="home-recent-list"></div>
                     </div>
                 </div>
 
-                <!-- Video result -->
-                <div id="vid-result" class="hidden glass rounded-2xl p-6 fade-in"></div>
+                <!-- Fuentes + estado -->
+                <div class="home-side">
+                    <div class="glass card">
+                        <h3 class="font-semibold text-white mb-3">Por fuente</h3>
+                        <div id="home-sources" class="space-y-3"></div>
+                    </div>
+                    <div class="glass card">
+                        <h3 class="font-semibold text-white mb-3">Estado del sistema</h3>
+                        <ul id="home-system" class="space-y-2.5 text-sm"></ul>
+                    </div>
+                </div>
             </section>
 
-            <!-- ═══ HISTORY SECTION ═══ -->
-            <section id="history-section" class="hidden space-y-4">
-                <div class="flex items-center justify-between">
-                    <h3 class="text-lg font-bold text-white">Transcripciones guardadas</h3>
-                    <button onclick="const h=getHistory();if(h.length&&confirm('Borrar todo el historial?')){localStorage.removeItem('clipadsk_history');document.getElementById('history-list').innerHTML='';}" class="text-xs text-red-400 hover:text-red-300 transition-colors">Borrar todo</button>
-                </div>
-                <div class="relative">
-                    <span class="material-symbols-outlined absolute left-3 top-1/2 -translate-y-1/2 text-slate-500 text-sm">search</span>
-                    <input type="text" id="history-search-input" placeholder="Buscar por título o contenido..." class="w-full bg-slate-900/50 border border-white/10 rounded-xl py-2.5 pl-10 pr-3 text-xs text-slate-200 focus:ring-2 focus:ring-primary outline-none">
-                </div>
-                <div id="history-list" class="space-y-3"></div>
-            </section>
+            <!-- ═══ ESPACIO DE TRABAJO (herramientas) ═══ -->
+            <div id="workspace" class="workspace hidden">
 
-            <!-- ═══ CONFIG SECTION ═══ -->
-            <section id="config-section" class="hidden space-y-4">
-                <!-- GROQ API KEY CONFIG -->
-                <div class="glass rounded-2xl p-5 space-y-3 mb-6">
-                    <div class="flex items-center justify-between">
-                        <div class="flex items-center gap-2">
-                            <span class="material-symbols-outlined text-primary text-xl">key</span>
-                            <h3 class="text-sm font-bold text-white">API Key de Groq (Personal)</h3>
-                        </div>
-                        <a href="https://console.groq.com/keys" target="_blank" class="text-[10px] font-bold text-primary hover:text-white uppercase tracking-widest transition-colors bg-primary/10 hover:bg-primary/50 px-3 py-1.5 rounded-full flex items-center gap-1">
-                            <span class="material-symbols-outlined text-[14px]">help</span> ¿Como obtenerla?
-                        </a>
-                    </div>
-                    <p class="text-xs text-slate-400 leading-relaxed">Configurá tu propia API Key de Groq para evitar límites de uso compartidos. Tus datos se guardan solo en tu navegador.</p>
-                    <div class="flex gap-2">
-                        <input type="password" id="groq-api-key-input" placeholder="gsk_..." class="flex-1 bg-slate-900/80 border border-white/10 rounded-xl px-4 py-3 text-sm focus:ring-2 focus:ring-primary outline-none text-slate-200">
-                        <button id="save-api-key-btn" class="bg-primary hover:bg-primary/90 text-white px-5 py-3 rounded-xl transition-all font-bold text-sm shadow-lg shadow-primary/20">Guardar</button>
-                    </div>
-                </div>
+                <!-- Columna izquierda -->
+                <div class="app-col-left">
 
-                <!-- SETUP GUIDE LINK -->
-                <div class="glass rounded-2xl p-5 border-l-4 border-accent mb-6">
-                    <div class="flex items-center justify-between gap-4">
-                        <div class="space-y-1">
-                            <h3 class="text-sm font-bold text-white flex items-center gap-2">
-                                <span class="material-symbols-outlined text-accent text-lg">rocket_launch</span>
-                                ¿Pasar a otra PC?
-                            </h3>
-                            <p class="text-[11px] text-slate-400">Si estás instalando Clipadsk en una computadora nueva, revisa la guía de configuración.</p>
-                        </div>
-                        <a href="setup.html" target="_blank" class="bg-white/5 hover:bg-white/10 border border-white/10 px-4 py-2.5 rounded-xl text-xs font-bold transition-all flex items-center gap-2 flex-shrink-0">
-                            Ver Guía <span class="material-symbols-outlined text-xs">open_in_new</span>
-                        </a>
-                    </div>
-                </div>
-
-                <!-- MAINTENANCE & REPAIR -->
-                <div class="glass rounded-2xl p-5 space-y-4 mb-6">
-                    <div class="flex items-center gap-2 mb-1">
-                        <span class="material-symbols-outlined text-red-400 text-xl">build_circle</span>
-                        <h3 class="text-sm font-bold text-white">Mantenimiento y Reparación</h3>
-                    </div>
-                    
-                    <div class="grid grid-cols-1 gap-3">
-                        <button id="system-update-app-btn" class="bg-white/5 hover:bg-indigo-500/10 border border-white/5 p-4 rounded-xl flex items-center gap-4 transition-all group">
-                            <div class="w-10 h-10 rounded-lg bg-indigo-500/10 flex items-center justify-center group-hover:bg-indigo-500/20">
-                                <span class="material-symbols-outlined text-indigo-400">update</span>
-                            </div>
-                            <div class="text-left">
-                                <p class="text-sm font-bold text-white">Actualizar Aplicación</p>
-                                <p class="text-[10px] text-slate-500">Descarga los últimos arreglos desde GitHub</p>
-                            </div>
-                        </button>
-
-                        <button id="system-update-engine-btn" class="bg-white/5 hover:bg-amber-500/10 border border-white/5 p-4 rounded-xl flex items-center gap-4 transition-all group">
-                            <div class="w-10 h-10 rounded-lg bg-amber-500/10 flex items-center justify-center group-hover:bg-amber-500/20">
-                                <span class="material-symbols-outlined text-amber-400">settings_suggest</span>
-                            </div>
-                            <div class="text-left">
-                                <p class="text-sm font-bold text-white">Actualizar Motor (yt-dlp)</p>
-                                <p class="text-[10px] text-slate-500">Arregla fallos de descarga de YouTube</p>
-                            </div>
-                        </button>
-
-                        <button id="system-reset-btn" class="bg-white/5 hover:bg-red-500/10 border border-white/5 p-4 rounded-xl flex items-center gap-4 transition-all group">
-                            <div class="w-10 h-10 rounded-lg bg-red-500/10 flex items-center justify-center">
-                                <span class="material-symbols-outlined text-red-400">restart_alt</span>
-                            </div>
-                            <div class="text-left">
-                                <p class="text-sm font-bold text-white">Limpiar Temporales</p>
-                                <p class="text-[10px] text-slate-500">Borra archivos locales para liberar espacio</p>
-                            </div>
-                        </button>
-                    </div>
-                </div>
-
-                <!-- LOG VIEWER -->
-                <div class="glass rounded-2xl p-5 space-y-3">
-                    <div class="flex items-center justify-between">
-                        <div class="flex items-center gap-2">
-                            <span class="material-symbols-outlined text-slate-400 text-xl">terminal</span>
-                            <h3 class="text-sm font-bold text-white">Logs del servidor</h3>
-                        </div>
-                        <div class="flex items-center gap-2">
-                            <span id="log-live-badge" class="hidden text-[10px] font-bold bg-emerald-500/15 text-emerald-400 border border-emerald-500/30 px-2 py-0.5 rounded-full animate-pulse">● EN VIVO</span>
-                            <button id="log-refresh-btn" class="text-[10px] font-bold uppercase tracking-widest bg-white/5 hover:bg-white/10 border border-white/10 px-3 py-1.5 rounded-full text-slate-400 hover:text-white transition-all flex items-center gap-1">
-                                <span class="material-symbols-outlined text-xs">refresh</span> Actualizar
-                            </button>
-                            <button id="log-download-btn" class="text-[10px] font-bold uppercase tracking-widest bg-white/5 hover:bg-white/10 border border-white/10 px-3 py-1.5 rounded-full text-slate-400 hover:text-white transition-all flex items-center gap-1">
-                                <span class="material-symbols-outlined text-xs">download</span> .txt
+                    <!-- Enlace -->
+                    <section id="main-input-section" class="glass card space-y-4">
+                        <p class="card-label">Enlace del video</p>
+                        <div class="field-wrap">
+                            <span class="material-symbols-outlined text-slate-400" id="input-icon">subscriptions</span>
+                            <input type="text" id="video-url" class="flex-1 bg-transparent border-none focus:ring-0 py-3 text-white placeholder:text-slate-500" placeholder="Pega el enlace aqui..." autocomplete="off">
+                            <button id="clear-url-btn" class="hidden icon-btn-sm">
+                                <span class="material-symbols-outlined text-lg">close</span>
                             </button>
                         </div>
-                    </div>
-                    <p class="text-[11px] text-slate-500">Muestra los pasos del último proceso de transcripción. Útil para diagnosticar errores.</p>
-                    <div id="log-viewer" class="bg-black/40 rounded-xl p-4 font-mono text-[11px] text-slate-400 leading-relaxed max-h-64 overflow-y-auto border border-white/5 whitespace-pre-wrap">
-                        <span class="text-slate-600">— Sin logs recientes. Iniciá una transcripción para ver el detalle aquí. —</span>
-                    </div>
-                </div>
-            </section>
-
-            <!-- ═══ VIDEO RESULTS CARD ═══ -->
-            <section id="video-info-card" class="glass rounded-3xl overflow-hidden hidden fade-in shadow-2xl">
-                <div class="flex flex-col divide-y divide-white/5">
-                    <!-- Thumbnail -->
-                    <div class="relative bg-black/40 flex items-center justify-center" style="max-height:280px;overflow:hidden;">
-                        <img id="video-thumbnail" src="" alt="Miniatura" class="w-full h-full object-contain drop-shadow-2xl" referrerpolicy="no-referrer" style="max-height:280px;">
-                        <div id="video-duration" class="absolute bottom-4 right-4 bg-black/80 px-2 py-1 rounded-md text-xs font-bold text-white shadow-lg">0:00</div>
-                    </div>
-                    <!-- Info -->
-                    <div class="p-7 flex flex-col space-y-5">
-                        <div class="space-y-3">
-                            <h3 id="video-title" class="text-xl font-bold leading-tight text-white line-clamp-2">Titulo del Video</h3>
-                            <div class="flex items-center gap-2">
-                                <span class="bg-primary/20 text-primary px-3 py-1 rounded-full text-xs font-bold" id="video-uploader">Canal</span>
-                            </div>
-                            <p id="video-description" class="text-slate-400 text-sm line-clamp-2"></p>
+                        <button id="fetch-info-btn" class="btn-primary w-full py-3.5">
+                            <span class="material-symbols-outlined">analytics</span> Analizar
+                        </button>
+                        <div id="loading-spinner" class="hidden flex flex-col items-center gap-3 py-4">
+                            <div class="w-10 h-10 border-4 border-slate-800 border-t-primary rounded-full animate-spin"></div>
+                            <p class="text-slate-400 animate-pulse text-sm">Procesando enlace...</p>
                         </div>
-                        <div class="space-y-4 pt-2">
-                            <div class="flex flex-col gap-2">
-                                <label class="text-[10px] font-bold text-slate-500 uppercase tracking-widest">Formato de salida</label>
+                    </section>
+
+                    <!-- WhatsApp / audio -->
+                    <section id="whatsapp-section" class="hidden glass card space-y-4">
+                        <p class="card-label">Audio</p>
+                        <div id="wa-dropzone" class="dropzone">
+                            <span class="dropzone-icon bg-emerald-500/10 text-emerald-500"><span class="material-symbols-outlined text-4xl">mic</span></span>
+                            <p class="font-semibold text-white text-lg">Subí un audio de WhatsApp o una grabación</p>
+                            <p class="text-slate-400 text-sm mt-1">Arrastrá el archivo o hacé clic para elegirlo</p>
+                            <p class="text-slate-500 text-xs mt-3">.ogg · .opus · .mp3 · .m4a · .wav · .mp4</p>
+                        </div>
+                        <button id="wa-upload-btn" class="btn-primary w-full py-3.5">
+                            <span class="material-symbols-outlined">upload_file</span> Seleccionar archivo de audio
+                        </button>
+                        <input type="file" id="wa-file-input" accept=".ogg,.opus,.mp3,.m4a,.wav,.mp4,.aac,.webm,.weba,.flac" class="hidden">
+                        <div id="wa-result" class="hidden fade-in"></div>
+                    </section>
+
+                    <!-- Video local -->
+                    <section id="video-section" class="hidden glass card space-y-4">
+                        <p class="card-label">Video propio</p>
+                        <div id="vid-dropzone" class="dropzone group">
+                            <span class="dropzone-icon bg-accent/10 text-accent"><span class="material-symbols-outlined text-4xl">video_file</span></span>
+                            <p class="font-semibold text-white text-lg">Arrastrá tu video acá</p>
+                            <p class="text-slate-400 text-sm mt-1">Se extrae el audio y se transcribe con IA</p>
+                            <p class="text-slate-500 text-xs mt-3">.mp4 · .mov · .avi · .mkv · .webm</p>
+                        </div>
+                        <button id="vid-upload-btn" class="btn-primary w-full py-3.5">
+                            <span class="material-symbols-outlined">video_call</span> Seleccionar video
+                        </button>
+                        <input type="file" id="vid-file-input" accept=".mp4,.mov,.avi,.mkv,.webm" class="hidden">
+                        <div id="vid-progress" class="hidden space-y-3">
+                            <div class="flex items-center gap-3">
+                                <div class="w-5 h-5 border-2 border-slate-700 border-t-accent rounded-full animate-spin flex-shrink-0"></div>
+                                <p id="vid-progress-text" class="text-sm text-slate-300 animate-pulse">Subiendo video...</p>
+                            </div>
+                            <div class="progress-track"><div id="vid-progress-bar" class="h-full bg-accent transition-all duration-300" style="width:0%"></div></div>
+                        </div>
+                        <div id="vid-result" class="hidden fade-in"></div>
+                    </section>
+
+                    <!-- Historial -->
+                    <section id="history-section" class="hidden space-y-4">
+                        <div class="glass card flex flex-col sm:flex-row sm:items-center gap-3">
+                            <div class="field-wrap flex-1">
+                                <span class="material-symbols-outlined text-slate-400 text-xl">search</span>
+                                <input type="text" id="history-search-input" placeholder="Buscar por título o contenido..." class="flex-1 bg-transparent border-none focus:ring-0 py-2.5 text-sm text-white placeholder:text-slate-500">
+                            </div>
+                            <button id="history-clear-btn" class="btn-ghost text-red-500">
+                                <span class="material-symbols-outlined text-lg">delete_sweep</span> Borrar todo
+                            </button>
+                        </div>
+                        <div id="history-list" class="history-grid"></div>
+                    </section>
+
+                    <!-- Configuración -->
+                    <section id="config-section" class="hidden config-grid">
+                        <div class="glass card space-y-3">
+                            <div class="flex items-center justify-between gap-2">
+                                <div class="flex items-center gap-3">
+                                    <span class="quick-icon bg-primary/10 text-primary"><span class="material-symbols-outlined">key</span></span>
+                                    <h3 class="font-semibold text-white">API Key de Groq</h3>
+                                </div>
+                                <a href="https://console.groq.com/keys" target="_blank" rel="noopener" class="link-btn flex items-center gap-1">
+                                    <span class="material-symbols-outlined text-[16px]">help</span> ¿Cómo obtenerla?
+                                </a>
+                            </div>
+                            <p class="text-xs text-slate-400 leading-relaxed">Con tu propia API Key de Groq (gratis) la transcripción es mucho más rápida. Se guarda solo en este navegador.</p>
+                            <div class="flex gap-2">
+                                <input type="password" id="groq-api-key-input" placeholder="gsk_..." class="field flex-1">
+                                <button id="save-api-key-btn" class="btn-primary">Guardar</button>
+                            </div>
+                        </div>
+
+                        <div class="glass card space-y-3">
+                            <div class="flex items-center gap-3">
+                                <span class="quick-icon bg-accent/10 text-accent"><span class="material-symbols-outlined">rocket_launch</span></span>
+                                <h3 class="font-semibold text-white">¿Instalar en otra PC?</h3>
+                            </div>
+                            <p class="text-xs text-slate-400 leading-relaxed">Si estás instalando Clipadsk en una computadora nueva, seguí la guía paso a paso.</p>
+                            <a href="setup.html" target="_blank" class="btn-ghost w-fit">
+                                Ver guía <span class="material-symbols-outlined text-base">open_in_new</span>
+                            </a>
+                        </div>
+
+                        <div class="glass card space-y-3">
+                            <div class="flex items-center gap-3">
+                                <span class="quick-icon bg-red-500/10 text-red-500"><span class="material-symbols-outlined">build_circle</span></span>
+                                <h3 class="font-semibold text-white">Mantenimiento</h3>
+                            </div>
+                            <div class="grid grid-cols-1 gap-2.5">
+                                <button id="system-update-app-btn" class="maint-btn group">
+                                    <div class="w-10 h-10 rounded-lg bg-indigo-500/10 flex items-center justify-center"><span class="material-symbols-outlined text-indigo-500">update</span></div>
+                                    <div class="text-left"><p class="text-sm font-semibold text-white">Actualizar aplicación</p><p class="text-[11px] text-slate-500">Descarga los últimos arreglos desde GitHub</p></div>
+                                </button>
+                                <button id="system-update-engine-btn" class="maint-btn group">
+                                    <div class="w-10 h-10 rounded-lg bg-amber-500/10 flex items-center justify-center"><span class="material-symbols-outlined text-amber-500">settings_suggest</span></div>
+                                    <div class="text-left"><p class="text-sm font-semibold text-white">Actualizar motor (yt-dlp)</p><p class="text-[11px] text-slate-500">Cuando YouTube o Instagram dejan de descargar</p></div>
+                                </button>
+                                <button id="system-reset-btn" class="maint-btn group">
+                                    <div class="w-10 h-10 rounded-lg bg-red-500/10 flex items-center justify-center"><span class="material-symbols-outlined text-red-500">restart_alt</span></div>
+                                    <div class="text-left"><p class="text-sm font-semibold text-white">Limpiar temporales</p><p class="text-[11px] text-slate-500">Borra descargas y caché del servidor</p></div>
+                                </button>
+                            </div>
+                        </div>
+
+                        <div class="glass card space-y-3">
+                            <div class="flex items-center justify-between gap-2">
+                                <div class="flex items-center gap-3">
+                                    <span class="quick-icon bg-slate-500/10 text-slate-400"><span class="material-symbols-outlined">terminal</span></span>
+                                    <h3 class="font-semibold text-white">Logs del servidor</h3>
+                                </div>
+                                <div class="flex items-center gap-2">
+                                    <span id="log-live-badge" class="hidden text-[10px] font-bold bg-emerald-500/15 text-emerald-500 border border-emerald-500/30 px-2 py-0.5 rounded-full animate-pulse">● EN VIVO</span>
+                                    <button id="log-refresh-btn" class="chip-btn"><span class="material-symbols-outlined text-sm">refresh</span> Actualizar</button>
+                                    <button id="log-download-btn" class="chip-btn"><span class="material-symbols-outlined text-sm">download</span> .txt</button>
+                                </div>
+                            </div>
+                            <p class="text-[11px] text-slate-500">Pasos del último proceso. Útil para diagnosticar errores.</p>
+                            <div id="log-viewer" class="log-viewer"><span class="text-slate-500">— Sin logs recientes. Iniciá una transcripción para ver el detalle acá. —</span></div>
+                        </div>
+                    </section>
+
+                    <!-- Resultado del análisis del enlace -->
+                    <section id="video-info-card" class="glass card p-0 overflow-hidden hidden fade-in">
+                        <div class="relative bg-black/40 flex items-center justify-center" style="max-height:260px;overflow:hidden;">
+                            <img id="video-thumbnail" src="" alt="Miniatura" class="w-full h-full object-contain" referrerpolicy="no-referrer" style="max-height:260px;" onerror="this.style.visibility='hidden'" onload="this.style.visibility='visible'">
+                            <div id="video-duration" class="absolute bottom-3 right-3 bg-[#000]/80 px-2 py-1 rounded-md text-xs font-bold text-onaccent">0:00</div>
+                        </div>
+                        <div class="p-6 space-y-5">
+                            <div class="space-y-2">
+                                <h3 id="video-title" class="text-lg font-bold leading-tight text-white line-clamp-2">Título del video</h3>
+                                <span class="inline-block bg-primary/10 text-primary px-3 py-1 rounded-full text-xs font-semibold" id="video-uploader">Canal</span>
+                                <p id="video-description" class="text-slate-400 text-sm line-clamp-2"></p>
+                            </div>
+
+                            <div class="space-y-2">
+                                <label class="card-label">Formato de salida</label>
                                 <div class="relative">
-                                    <select id="format-select" class="w-full bg-slate-900/50 border border-white/10 rounded-xl py-3.5 px-4 text-slate-200 appearance-none focus:ring-2 focus:ring-primary cursor-pointer"></select>
-                                    <span class="material-symbols-outlined absolute right-4 top-1/2 -translate-y-1/2 pointer-events-none text-slate-500">expand_more</span>
+                                    <select id="format-select" class="field w-full appearance-none cursor-pointer pr-10"></select>
+                                    <span class="material-symbols-outlined absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none text-slate-400">expand_more</span>
                                 </div>
                             </div>
-                            <div class="flex flex-col gap-2 mt-2">
-                                <label class="text-[10px] font-bold text-slate-500 uppercase tracking-widest">Recortar Video (Opcional)</label>
+
+                            <div class="space-y-2">
+                                <label class="card-label">Recortar (opcional)</label>
                                 <div class="grid grid-cols-2 gap-3">
                                     <div class="relative">
-                                        <span class="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500 text-[11px] font-bold">Desde:</span>
-                                        <input type="text" id="clip-start" placeholder="00:00" class="w-full bg-slate-900/50 border border-white/10 rounded-xl py-3 pl-14 pr-3 text-sm text-slate-200 focus:ring-2 focus:ring-primary outline-none" autocomplete="off">
+                                        <span class="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500 text-[11px] font-semibold">Desde</span>
+                                        <input type="text" id="clip-start" placeholder="00:00" class="field w-full pl-14" autocomplete="off">
                                     </div>
                                     <div class="relative">
-                                        <span class="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500 text-[11px] font-bold">Hasta:</span>
-                                        <input type="text" id="clip-end" placeholder="00:00" class="w-full bg-slate-900/50 border border-white/10 rounded-xl py-3 pl-14 pr-3 text-sm text-slate-200 focus:ring-2 focus:ring-primary outline-none" autocomplete="off">
+                                        <span class="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500 text-[11px] font-semibold">Hasta</span>
+                                        <input type="text" id="clip-end" placeholder="00:00" class="field w-full pl-14" autocomplete="off">
                                     </div>
                                 </div>
                             </div>
-                            <div class="flex flex-col gap-3">
-                                <button id="download-btn" class="glow-button w-full py-4 rounded-xl font-bold flex items-center justify-center gap-3 transition-all">
-                                    <span class="material-symbols-outlined">download</span> Descargar Video
+
+                            <button id="download-btn" class="btn-primary w-full py-3.5">
+                                <span class="material-symbols-outlined">download</span> Descargar video
+                            </button>
+
+                            <div class="space-y-2">
+                                <label class="card-label">Idioma de la transcripción</label>
+                                <div class="grid grid-cols-3 gap-2">
+                                    <button class="lang-btn active" data-lang="es">ES</button>
+                                    <button class="lang-btn" data-lang="en">EN</button>
+                                    <button class="lang-btn" data-lang="original">Original</button>
+                                </div>
+                            </div>
+
+                            <div class="grid grid-cols-2 gap-3">
+                                <button id="show-transcript-btn" class="hidden btn-soft">
+                                    <span class="material-symbols-outlined text-lg">description</span> Transcribir
                                 </button>
-
-                                <div class="space-y-2">
-                                    <label class="text-[10px] font-bold text-slate-500 uppercase tracking-widest">Idioma de salida (IA)</label>
-                                    <div class="grid grid-cols-3 gap-2">
-                                        <button class="lang-btn active py-2 rounded-lg border border-primary/40 bg-primary/10 text-xs font-bold transition-all flex items-center justify-center gap-1" data-lang="es">
-                                            <span class="text-[14px]">🇪🇸</span> ES
-                                        </button>
-                                        <button class="lang-btn py-2 rounded-lg border border-white/10 bg-white/5 text-slate-400 text-xs font-bold transition-all flex items-center justify-center gap-1" data-lang="en">
-                                            <span class="text-[14px]">🇺🇸</span> EN
-                                        </button>
-                                        <button class="lang-btn py-2 rounded-lg border border-white/10 bg-white/5 text-slate-400 text-xs font-bold transition-all flex items-center justify-center gap-1" data-lang="original">
-                                            <span class="text-[14px]">🎬</span> Org.
-                                        </button>
-                                    </div>
-                                </div>
-                                <div class="grid grid-cols-2 gap-3">
-
-                                    <button id="show-transcript-btn" class="hidden bg-white/5 hover:bg-white/10 border border-white/5 py-3 rounded-xl text-slate-300 font-bold text-sm flex items-center justify-center gap-2 transition-all">
-                                        <span class="material-symbols-outlined text-lg">description</span> Transcribir
-                                    </button>
-                                    <button id="download-thumb-btn" class="bg-white/5 hover:bg-white/10 border border-white/5 py-3 rounded-xl text-slate-300 font-bold text-sm flex items-center justify-center gap-2 transition-all">
-                                        <span class="material-symbols-outlined text-lg">image</span> Miniatura
-                                    </button>
-                                </div>
-                                <button id="download-txt-btn" class="hidden bg-white/5 hover:bg-white/10 border border-white/5 py-3 rounded-xl text-slate-300 font-bold text-sm flex items-center justify-center gap-2 transition-all">
-                                    <span class="material-symbols-outlined text-lg">folder_zip</span> Descargar .zip
+                                <button id="download-thumb-btn" class="btn-ghost justify-center">
+                                    <span class="material-symbols-outlined text-lg">image</span> Miniatura
                                 </button>
                             </div>
+                            <button id="download-txt-btn" class="hidden btn-ghost w-full justify-center">
+                                <span class="material-symbols-outlined text-lg">folder_zip</span> Descargar .zip
+                            </button>
                         </div>
-                    </div>
+
+                        <div id="download-progress" class="hidden px-6 pb-6 flex flex-col gap-3">
+                            <div class="flex justify-between items-center text-xs font-semibold">
+                                <span id="progress-text" class="text-slate-400">Descargando...</span>
+                                <span class="text-primary" id="progress-percentage">0%</span>
+                            </div>
+                            <div class="progress-track"><div class="progress-fill bg-primary h-full transition-all duration-300" style="width: 0%"></div></div>
+                        </div>
+                    </section>
                 </div>
 
-                <!-- Progress Bar -->
-                <div id="download-progress" class="hidden p-7 border-t border-white/5 flex flex-col gap-4">
-                    <div class="flex justify-between items-center text-xs font-bold">
-                        <span id="progress-text" class="text-slate-400">Descargando...</span>
-                        <span class="text-accent" id="progress-percentage">0%</span>
-                    </div>
-                    <div class="w-full bg-slate-900 rounded-full h-2.5 overflow-hidden">
-                        <div class="progress-fill bg-accent h-full transition-all duration-300" style="width: 0%"></div>
-                    </div>
-                </div>
-            </section>
-        </div>
+                <!-- Columna derecha -->
+                <div class="app-col-right">
 
-        <!-- ═══ DERECHA (Column 2) ═══ -->
-        <div class="app-col-right lg:col-span-7 space-y-8 h-full">
-            
-            <!-- Estado Vacío del Panel Derecho -->
-            <div id="empty-state-panel" class="glass rounded-3xl p-8 py-16 space-y-8 h-full flex flex-col justify-center items-center text-center fade-in shadow-2xl border border-white/5">
-                <div class="relative flex items-center justify-center">
-                    <div class="absolute inset-0 bg-primary/20 blur-xl rounded-full scale-125 animate-pulse"></div>
-                    <div class="relative w-20 h-20 rounded-2xl bg-primary/10 border border-primary/20 flex items-center justify-center text-primary shadow-lg">
-                        <span class="material-symbols-outlined text-4xl">spatial_audio_off</span>
-                    </div>
-                </div>
-                
-                <div class="space-y-2 max-w-md">
-                    <h3 class="text-2xl font-bold text-white tracking-tight">Listo para procesar</h3>
-                    <p class="text-slate-400 text-sm leading-relaxed">
-                        Ingresá un enlace de YouTube/Redes o subí un archivo de audio/video en el panel izquierdo para comenzar.
-                    </p>
-                </div>
-                
-                <div class="w-full max-w-lg border-t border-white/10 pt-8 grid grid-cols-1 md:grid-cols-3 gap-6 text-left">
-                    <div class="space-y-2">
-                        <div class="flex items-center gap-2 text-xs font-bold text-accent uppercase tracking-wider">
-                            <span class="material-symbols-outlined text-sm bg-accent/10 p-1 rounded">download</span> Descargar
+                    <div id="empty-state-panel" class="glass card empty-state fade-in">
+                        <span class="empty-icon"><span class="material-symbols-outlined text-4xl">spatial_audio_off</span></span>
+                        <div class="space-y-2 max-w-md">
+                            <h3 class="text-xl font-bold text-white">Listo para procesar</h3>
+                            <p class="text-slate-400 text-sm leading-relaxed">Pegá un enlace o subí un archivo en el panel de la izquierda. La transcripción y las herramientas de IA aparecen acá.</p>
                         </div>
-                        <p class="text-[11px] text-slate-500 leading-relaxed">Guarda videos en alta definición o extrae solo el audio en MP3 al instante.</p>
-                    </div>
-                    <div class="space-y-2">
-                        <div class="flex items-center gap-2 text-xs font-bold text-primary uppercase tracking-wider">
-                            <span class="material-symbols-outlined text-sm bg-primary/10 p-1 rounded">description</span> Transcribir
+                        <div class="empty-steps">
+                            <div><span class="step-num">1</span><p class="font-semibold text-white text-sm">Descargar</p><p class="text-xs text-slate-500">Video en HD o solo el audio en MP3.</p></div>
+                            <div><span class="step-num">2</span><p class="font-semibold text-white text-sm">Transcribir</p><p class="text-xs text-slate-500">Texto con tiempos, listo para citar.</p></div>
+                            <div><span class="step-num">3</span><p class="font-semibold text-white text-sm">Analizar</p><p class="text-xs text-slate-500">Resumen, citas, datos y chat con IA.</p></div>
                         </div>
-                        <p class="text-[11px] text-slate-500 leading-relaxed">Convierte voz a texto con Whisper IA en segundos con alta precisión.</p>
                     </div>
-                    <div class="space-y-2">
-                        <div class="flex items-center gap-2 text-xs font-bold text-orange-400 uppercase tracking-wider">
-                            <span class="material-symbols-outlined text-sm bg-orange-500/10 p-1 rounded">smart_toy</span> Consultar
+
+                    <section id="transcript-section" class="hidden glass card transcript-card fade-in">
+                        <div class="flex flex-wrap justify-between items-center gap-3 shrink-0">
+                            <div class="flex items-center gap-3">
+                                <span class="quick-icon bg-primary/10 text-primary"><span class="material-symbols-outlined">translate</span></span>
+                                <h4 class="font-bold text-white text-lg">Transcripción</h4>
+                            </div>
+                            <div class="flex flex-wrap gap-2">
+                                <button id="edit-transcript-btn" class="hidden bg-white/5 hover:bg-white/10 border border-white/10 text-slate-300 px-4 py-2 rounded-lg text-xs font-bold transition-all flex items-center gap-2" title="Editar transcripción">
+                                    <span class="material-symbols-outlined text-sm">edit</span> EDITAR
+                                </button>
+                                <button id="download-docx-btn" class="hidden chip-btn chip-blue"><span class="material-symbols-outlined text-sm">description</span> DOCX</button>
+                                <button id="download-srt-btn" class="hidden chip-btn chip-green"><span class="material-symbols-outlined text-sm">subtitles</span> SRT</button>
+                                <button id="copy-transcript-btn" class="chip-btn chip-primary"><span class="material-symbols-outlined text-sm">content_copy</span> COPIAR</button>
+                            </div>
                         </div>
-                        <p class="text-[11px] text-slate-500 leading-relaxed">Genera resúmenes automáticos, citas destacadas y chatea con la IA.</p>
-                    </div>
+
+                        <div id="journalist-tools-wrapper" class="hidden pb-4 border-b border-white/10 shrink-0"></div>
+
+                        <div id="transcript-content" class="transcript-body text-slate-400 text-sm leading-relaxed flex-1 min-h-[200px]">
+                            <p class="animate-pulse">Cargando transcripción...</p>
+                        </div>
+
+                        <div id="ai-chat-section" class="hidden pt-5 border-t border-white/10 space-y-4 shrink-0">
+                            <div class="flex items-center gap-2">
+                                <span class="material-symbols-outlined text-primary text-lg">smart_toy</span>
+                                <span class="card-label">Preguntale a la IA sobre el video</span>
+                            </div>
+                            <div id="chat-history" class="space-y-3 max-h-[320px] overflow-y-auto pr-1"></div>
+                            <div id="chat-response" class="hidden"></div>
+                            <div class="flex gap-2">
+                                <input type="text" id="chat-input" placeholder="¿Qué dijo sobre...? Hacé una pregunta" class="field flex-1">
+                                <button id="chat-send-btn" class="btn-primary px-4"><span class="material-symbols-outlined">send</span></button>
+                            </div>
+                        </div>
+                    </section>
                 </div>
             </div>
-            
-            <!-- Panel de Transcripción y Herramientas -->
-            <section id="transcript-section" class="hidden glass rounded-3xl p-7 space-y-5 fade-in shadow-2xl h-full flex flex-col">
-                <div class="flex justify-between items-center shrink-0">
-                    <div class="flex items-center gap-3">
-                        <span class="bg-accent/20 text-accent p-1.5 rounded-lg flex items-center"><span class="material-symbols-outlined text-sm">translate</span></span>
-                        <h4 class="font-extrabold text-white text-lg">Transcripción con IA</h4>
-                    </div>
-                    <div class="flex gap-2">
-                        <button id="edit-transcript-btn" class="hidden bg-white/5 hover:bg-white/10 border border-white/10 text-slate-300 px-4 py-2 rounded-lg text-xs font-bold transition-all flex items-center gap-2" title="Editar transcripción">
-                            <span class="material-symbols-outlined text-sm">edit</span> EDITAR
-                        </button>
-                        <button id="download-docx-btn" class="hidden bg-blue-500/20 hover:bg-blue-500/30 text-blue-300 px-4 py-2 rounded-lg text-xs font-bold transition-all flex items-center gap-2">
-                            <span class="material-symbols-outlined text-sm">description</span> DESCARGAR DOCX
-                        </button>
-                        <button id="download-srt-btn" class="hidden bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-300 px-4 py-2 rounded-lg text-xs font-bold transition-all flex items-center gap-2">
-                            <span class="material-symbols-outlined text-sm">subtitles</span> DESCARGAR SRT
-                        </button>
-                        <button id="copy-transcript-btn" class="bg-accent/20 hover:bg-accent/30 text-accent px-4 py-2 rounded-lg text-xs font-bold transition-all flex items-center gap-2">
-                            <span class="material-symbols-outlined text-sm">content_copy</span> COPIAR
-                        </button>
-                    </div>
-                </div>
+        </main>
+    </div>
 
-                <!-- ★ Herramientas Periodísticas — aparecen PRIMERO, destacadas -->
-                <div id="journalist-tools-wrapper" class="hidden pb-4 border-b border-white/10 shrink-0">
-                    <!-- Se inyecta dinámicamente -->
-                </div>
-
-                <!-- Texto de la transcripción -->
-                <div id="transcript-content" class="transcript-body text-slate-400 text-sm leading-relaxed overflow-y-auto pr-2 flex-1 min-h-[200px]">
-                    <p class="animate-pulse">Cargando transcripción...</p>
-                </div>
-
-                <!-- Chat con el video -->
-                <div id="ai-chat-section" class="hidden pt-5 border-t border-white/10 space-y-4 shrink-0">
-                    <div class="flex items-center gap-2">
-                        <span class="material-symbols-outlined text-primary text-lg">smart_toy</span>
-                        <span class="text-xs font-bold text-slate-500 uppercase tracking-widest">Consultar con IA</span>
-                    </div>
-                    <!-- Historial de conversación -->
-                    <div id="chat-history" class="space-y-3 max-h-[320px] overflow-y-auto pr-1"></div>
-                    <!-- Input oculto para compatibilidad con código existente -->
-                    <div id="chat-response" class="hidden"></div>
-                    <div class="flex gap-2">
-                        <input type="text" id="chat-input" placeholder="¿Sobre qué trata el video? Hacé una pregunta..." 
-                            class="flex-1 bg-slate-900/80 border border-white/10 rounded-xl px-4 py-3 text-sm focus:ring-2 focus:ring-primary outline-none">
-                        <button id="chat-send-btn" class="bg-primary hover:bg-primary/90 text-white px-5 rounded-xl transition-all flex items-center justify-center">
-                            <span class="material-symbols-outlined">send</span>
-                        </button>
-                    </div>
-                </div>
-            </section>
-        </div>
-
-    </main>
-
-    <!-- Bottom Nav eliminado ya que se integró en el header -->
-
-    <script src="main.js?v=4.2" defer></script>
+    <script src="main.js?v=5.0" defer></script>
     <script>
         if ('serviceWorker' in navigator) {
             window.addEventListener('load', () => {
-                navigator.serviceWorker.register('./sw.js')
-                    .then(reg => console.log('PWA Ready:', reg.scope))
-                    .catch(err => console.log('PWA Error:', err));
+                navigator.serviceWorker.register('./sw.js').catch(err => console.log('PWA Error:', err));
             });
         }
     </script>

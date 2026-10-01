@@ -60,7 +60,7 @@ document.addEventListener('DOMContentLoaded', () => {
     // UID unico para cada sesion de la pagina (para logs y progreso)
     const uid = Math.random().toString(36).substring(2, 10);
     
-    let currentTab             = 'youtube';
+    let currentTab             = 'home';
     let currentTranscript      = '';
     let currentSrt             = '';
     let currentMaxResThumbnail = '';
@@ -146,6 +146,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // ─── PLATFORM DETECTION ─────────────────────────────────────────────────────
     const PLATFORMS = {
+        home:      { hosts: [],                                       icon: 'space_dashboard', label: 'Inicio',  placeholder: '' },
         youtube:   { hosts: ['youtube.com', 'youtu.be'],             icon: 'subscriptions', label: 'YouTube',   placeholder: 'Pega el enlace de YouTube...' },
         instagram: { hosts: ['instagram.com'],                        icon: 'photo_library', label: 'Instagram', placeholder: 'Pega el enlace del Reel o Video...' },
         tiktok:    { hosts: ['tiktok.com', 'vm.tiktok.com'],          icon: 'movie',         label: 'TikTok',    placeholder: 'Pega el enlace de TikTok...' },
@@ -244,6 +245,7 @@ document.addEventListener('DOMContentLoaded', () => {
             }
         }
         if (currentTab === 'history') renderHistory();
+        if (currentTab === 'home') renderHome();
     }
 
     function renderHistory(filterText = '') {
@@ -380,7 +382,13 @@ document.addEventListener('DOMContentLoaded', () => {
         const histSection = document.getElementById('history-section');
         const configSection = document.getElementById('config-section');
 
-        mainSection?.classList.toggle('hidden', tab === 'whatsapp' || tab === 'video' || tab === 'history' || tab === 'config');
+        const isLinkTab = !['home', 'whatsapp', 'video', 'history', 'config'].includes(tab);
+        document.body.dataset.view = tab;
+        document.getElementById('home-section')?.classList.toggle('hidden', tab !== 'home');
+        document.getElementById('workspace')?.classList.toggle('hidden', tab === 'home');
+        document.body.classList.remove('sidebar-open');
+        document.getElementById('sidebar-backdrop')?.classList.add('hidden');
+        mainSection?.classList.toggle('hidden', !isLinkTab);
         waSection?.classList.toggle('hidden', tab !== 'whatsapp');
         vidSection?.classList.toggle('hidden', tab !== 'video');
         histSection?.classList.toggle('hidden', tab !== 'history');
@@ -427,8 +435,16 @@ document.addEventListener('DOMContentLoaded', () => {
         }
 
         if (cfg) {
-            if (tabTitle)    tabTitle.textContent    = tab === 'history' ? 'Historial de Transcripciones' : tab === 'config' ? 'Configuración General' : `${cfg.label} Transcriptor`;
-            if (appSubtitle) appSubtitle.textContent = tab === 'history' ? 'Historial de transcripciones guardadas en este navegador.' : tab === 'config' ? 'Administración de API Keys, mantenimiento y guías.' : `Transcribi contenido de ${cfg.label} con IA.`;
+            const TITLES = {
+                home:     ['Inicio', 'Tu mesa de trabajo para desgrabar y analizar.'],
+                history:  ['Historial', 'Transcripciones guardadas en este navegador.'],
+                config:   ['Configuración', 'API Key, mantenimiento y diagnóstico.'],
+                whatsapp: ['Audio / WhatsApp', 'Subí una nota de voz o grabación y transcribila con IA.'],
+                video:    ['Video propio', 'Subí una entrevista o conferencia grabada.'],
+            };
+            const [t, sub] = TITLES[tab] || [cfg.label, `Pegá un enlace de ${cfg.label} para descargar, transcribir y analizar.`];
+            if (tabTitle)    tabTitle.textContent    = t;
+            if (appSubtitle) appSubtitle.textContent = sub;
             if (inputIcon)   inputIcon.textContent   = cfg.icon;
             if (videoUrlInput && tab !== 'history' && tab !== 'config') videoUrlInput.placeholder = cfg.placeholder;
         }
@@ -437,6 +453,7 @@ document.addEventListener('DOMContentLoaded', () => {
             if (historySearchInput) historySearchInput.value = '';
             renderHistory();
         }
+        if (tab === 'home') renderHome();
         if (videoUrlInput) videoUrlInput.value = '';
     }
 
@@ -509,6 +526,146 @@ document.addEventListener('DOMContentLoaded', () => {
         deferredPrompt = null;
     });
     window.addEventListener('appinstalled', () => { pwaInstallBtn?.classList.add('hidden'); deferredPrompt = null; });
+
+    // ─── INICIO (DASHBOARD) ──────────────────────────────────────────────────────
+    function fmtDuration(totalSec) {
+        if (!totalSec) return '—';
+        const h = Math.floor(totalSec / 3600), m = Math.round((totalSec % 3600) / 60);
+        return h ? `${h} h ${m} min` : `${m} min`;
+    }
+    function itemDuration(item) {
+        const segs = item.segments || [];
+        return segs.length ? Number(segs[segs.length - 1].end) || 0 : 0;
+    }
+
+    function renderHome() {
+        const history = getHistory();
+        const weekAgo = Date.now() - 7 * 24 * 3600 * 1000;
+        const totalSec = history.reduce((acc, it) => acc + itemDuration(it), 0);
+        const words = history.reduce((acc, it) => acc + (it.transcript ? it.transcript.split(/\s+/).filter(Boolean).length : 0), 0);
+        const setText = (id, val) => { const el = document.getElementById(id); if (el) el.textContent = val; };
+        setText('m-total', history.length);
+        setText('m-week', history.filter(it => new Date(it.date).getTime() >= weekAgo).length);
+        setText('m-hours', totalSec >= 3600 ? `${(totalSec / 3600).toFixed(1)} h` : `${Math.round(totalSec / 60)} min`);
+        setText('m-words', words >= 1000 ? `${(words / 1000).toFixed(words >= 10000 ? 0 : 1)}k` : words);
+
+        const hour = new Date().getHours();
+        setText('home-greeting', hour < 12 ? 'Buen día' : hour < 20 ? 'Buenas tardes' : 'Buenas noches');
+
+        // Últimas transcripciones
+        const recent = document.getElementById('home-recent-list');
+        if (recent) {
+            recent.innerHTML = history.length ? history.slice(0, 6).map(item => {
+                const p = PLATFORMS[item.platform] || { icon: 'link', label: 'Web' };
+                const date = new Date(item.date).toLocaleDateString('es-AR', { day: '2-digit', month: 'short' });
+                return `<div class="recent-row">
+                    <span class="r-title" title="${escapeHtml(item.title || item.url)}">${escapeHtml(item.title || item.url)}</span>
+                    <span class="r-dim flex items-center gap-1.5"><span class="material-symbols-outlined text-base">${p.icon}</span>${escapeHtml(p.label)}</span>
+                    <span class="r-dim">${fmtDuration(itemDuration(item))}</span>
+                    <span class="r-dim">${date}</span>
+                    <button class="r-open" data-open-history="${escapeHtml(item.date)}">Abrir</button>
+                </div>`;
+            }).join('') : `<div class="recent-empty">Todavía no hay transcripciones. Pegá un enlace o subí un audio para empezar.</div>`;
+        }
+
+        // Por fuente
+        const sources = document.getElementById('home-sources');
+        if (sources) {
+            const counts = {};
+            history.forEach(it => { const k = it.platform || 'otros'; counts[k] = (counts[k] || 0) + 1; });
+            const entries = Object.entries(counts).sort((a, b) => b[1] - a[1]);
+            const max = entries.length ? entries[0][1] : 1;
+            sources.innerHTML = entries.length ? entries.map(([k, n]) => {
+                const p = PLATFORMS[k] || { icon: 'link', label: 'Otros' };
+                return `<div class="source-row">
+                    <span class="material-symbols-outlined">${p.icon}</span>
+                    <span class="source-name">${escapeHtml(p.label)}</span>
+                    <div class="source-bar"><div style="width:${Math.max(6, Math.round(n / max * 100))}%"></div></div>
+                    <span class="source-count">${n}</span>
+                </div>`;
+            }).join('') : `<p class="text-sm text-slate-400">Sin datos todavía.</p>`;
+        }
+
+        renderSystemStatus();
+    }
+
+    async function renderSystemStatus() {
+        const list = document.getElementById('home-system');
+        if (!list) return;
+        const row = (ok, label, detail) => `<li class="sys-row">
+            <span class="sys-dot" style="background:${ok === null ? '#94a3b8' : ok ? '#10b981' : '#f59e0b'}"></span>
+            <span>${label}</span><span class="sys-detail">${detail}</span></li>`;
+        const hasKey = !!localStorage.getItem(GROQ_KEY_STORE);
+        try {
+            const r = await fetch(`${API_BASE}/health`);
+            const h = await r.json();
+            list.innerHTML = [
+                row(true, 'Servidor', 'Conectado'),
+                row(hasKey || h.groq_server_key, 'Groq (IA)', hasKey ? 'Key propia' : h.groq_server_key ? 'Key del servidor' : 'Falta configurar'),
+                row(h.ffmpeg, 'FFmpeg', h.ffmpeg ? 'Instalado' : 'No encontrado'),
+                row(h.whisper_local ? true : null, 'Whisper local', h.whisper_local ? 'Disponible' : 'Opcional'),
+                row(null, 'Motor yt-dlp', escapeHtml(h.yt_dlp || '?')),
+            ].join('');
+        } catch {
+            list.innerHTML = row(false, 'Servidor', 'Sin conexión');
+        }
+    }
+
+    document.addEventListener('click', (e) => {
+        const open = e.target.closest('[data-open-history]');
+        if (open) { window._hist.load(open.dataset.openHistory); return; }
+        const go = e.target.closest('[data-goto]');
+        if (go) switchTab(go.dataset.goto);
+    });
+
+    const homeUrlInput = document.getElementById('home-url-input');
+    const startFromHome = () => {
+        const url = homeUrlInput?.value.trim();
+        if (!url) { homeUrlInput?.focus(); showToast('Pegá un enlace primero', 'error'); return; }
+        switchTab(detectPlatformFromUrl(url));
+        if (videoUrlInput) { videoUrlInput.value = url; clearUrlBtn?.classList.remove('hidden'); }
+        homeUrlInput.value = '';
+        fetchBtn?.click();
+    };
+    document.getElementById('home-url-btn')?.addEventListener('click', startFromHome);
+    homeUrlInput?.addEventListener('keydown', e => { if (e.key === 'Enter') startFromHome(); });
+    document.getElementById('home-try-btn')?.addEventListener('click', () => homeUrlInput?.focus());
+
+    // Búsqueda global (barra superior) → Historial filtrado
+    const globalSearch = document.getElementById('global-search-input');
+    globalSearch?.addEventListener('keydown', e => {
+        if (e.key !== 'Enter') return;
+        const q = globalSearch.value.trim();
+        switchTab('history');
+        if (historySearchInput) historySearchInput.value = q;
+        renderHistory(q);
+        globalSearch.value = '';
+    });
+
+    document.getElementById('history-clear-btn')?.addEventListener('click', () => {
+        if (getHistory().length && confirm('¿Borrar todo el historial de transcripciones?')) {
+            localStorage.removeItem(HISTORY_KEY);
+            renderHistory();
+            showToast('Historial borrado', 'success');
+        }
+    });
+
+    // Tema claro / oscuro
+    document.getElementById('theme-toggle-btn')?.addEventListener('click', () => {
+        const dark = document.documentElement.classList.toggle('dark');
+        try { localStorage.setItem('clipadsk_theme', dark ? 'dark' : 'light'); } catch {}
+    });
+
+    // Menú lateral en pantallas chicas
+    const toggleSidebar = (open) => {
+        document.body.classList.toggle('sidebar-open', open);
+        document.getElementById('sidebar-backdrop')?.classList.toggle('hidden', !open);
+    };
+    document.getElementById('sidebar-open-btn')?.addEventListener('click', () => toggleSidebar(true));
+    document.getElementById('sidebar-close-btn')?.addEventListener('click', () => toggleSidebar(false));
+    document.getElementById('sidebar-backdrop')?.addEventListener('click', () => toggleSidebar(false));
+
+    switchTab('home');
 
     // ─── SHARE TARGET ────────────────────────────────────────────────────────────
     (() => {
@@ -1061,7 +1218,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 </div>
                 ${showSelector ? `
                 <div class="flex bg-slate-950/60 p-1 rounded-xl border border-white/5 w-fit">
-                    <button id="view-mode-clean" class="px-3 py-1.5 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 bg-primary text-white">
+                    <button id="view-mode-clean" class="px-3 py-1.5 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 bg-primary text-onaccent">
                         <span class="material-symbols-outlined text-sm">notes</span> Texto Limpio
                     </button>
                     <button id="view-mode-interactive" class="px-3 py-1.5 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 text-slate-400 hover:text-slate-200">
@@ -1084,14 +1241,14 @@ document.addEventListener('DOMContentLoaded', () => {
             renderInlineClipTool();
             
             btnClean?.addEventListener('click', () => {
-                btnClean.className = "px-3 py-1.5 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 bg-primary text-white";
+                btnClean.className = "px-3 py-1.5 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 bg-primary text-onaccent";
                 btnInteractive.className = "px-3 py-1.5 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 text-slate-400 hover:text-slate-200";
                 textContainer.innerHTML = formatCleanTextWithTimestamps(text, currentSegments);
                 document.getElementById('inline-clip-tool')?.classList.add('hidden');
             });
             
             btnInteractive?.addEventListener('click', () => {
-                btnInteractive.className = "px-3 py-1.5 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 bg-primary text-white";
+                btnInteractive.className = "px-3 py-1.5 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 bg-primary text-onaccent";
                 btnClean.className = "px-3 py-1.5 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 text-slate-400 hover:text-slate-200";
                 
                 // Deduplicar segmentos antes de renderizar
@@ -1139,7 +1296,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 </div>
             </div>
             <div class="flex gap-2">
-                <button id="inline-clip-apply-btn" class="flex-1 bg-primary hover:bg-primary/80 text-white font-bold py-2.5 rounded-xl text-sm flex items-center justify-center gap-2 transition-all active:scale-95">
+                <button id="inline-clip-apply-btn" class="flex-1 bg-primary hover:bg-primary/80 text-onaccent font-bold py-2.5 rounded-xl text-sm flex items-center justify-center gap-2 transition-all active:scale-95">
                     <span class="material-symbols-outlined text-base">content_cut</span> Aplicar al descargador
                 </button>
                 <button id="inline-clip-clear-btn" class="bg-white/5 hover:bg-white/10 border border-white/10 text-slate-400 font-bold py-2.5 px-4 rounded-xl text-sm transition-all">
@@ -1959,7 +2116,7 @@ document.addEventListener('DOMContentLoaded', () => {
         const colors = { error: 'bg-red-500/90', success: 'bg-emerald-600/90', info: 'bg-slate-700/90' };
         const icons  = { error: 'error', success: 'check_circle', info: 'info' };
         const toast  = document.createElement('div');
-        toast.className = `fixed bottom-24 lg:bottom-8 left-1/2 -translate-x-1/2 z-[200] flex items-center gap-3 px-5 py-3 rounded-2xl text-white text-sm font-semibold shadow-2xl ${colors[type]} fade-in`;
+        toast.className = `fixed bottom-24 lg:bottom-8 left-1/2 -translate-x-1/2 z-[200] flex items-center gap-3 px-5 py-3 rounded-2xl text-onaccent text-sm font-semibold shadow-2xl ${colors[type]} fade-in`;
         toast.innerHTML = `<span class="material-symbols-outlined text-lg">${icons[type]}</span>`;
         const msg = document.createElement('span');
         msg.textContent = message;   // texto plano: evita inyectar HTML

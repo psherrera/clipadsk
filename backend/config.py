@@ -83,11 +83,26 @@ if not HAS_FFMPEG:
 
 # ─── MODELOS DE IA ───────────────────────────────────────────────────────────
 GROQ_API_KEY = os.environ.get('GROQ_API_KEY', '').strip() or None
-GROQ_MODEL = os.environ.get('GROQ_MODEL', 'llama-3.3-70b-versatile')              # limpieza y análisis
-GROQ_FALLBACK_MODEL = os.environ.get('GROQ_FALLBACK_MODEL', 'llama-3.1-8b-instant')  # si hay rate limit
-GROQ_CHAT_MODEL = os.environ.get('GROQ_CHAT_MODEL', 'llama-3.1-8b-instant')
-GROQ_WHISPER_MODEL = os.environ.get('GROQ_WHISPER_MODEL', 'whisper-large-v3')
-GROQ_VISION_MODEL = os.environ.get('GROQ_VISION_MODEL', 'meta-llama/llama-4-scout-17b-16e-instruct')
+# Groq retira modelos cada tanto (ago-2026: llama-3.x dejó de estar en el plan gratis).
+# Por eso se usan LISTAS en orden de preferencia: la app pregunta a Groq qué modelos tiene
+# la cuenta y usa el primero disponible; si uno falla por "model not found", pasa al siguiente.
+# Se pueden cambiar en .env separando por comas (p. ej. GROQ_TEXT_MODELS=openai/gpt-oss-120b,...).
+def _models(env_list: str, env_single: str, default: list) -> list:
+    raw = os.environ.get(env_list, '')
+    models = [m.strip() for m in raw.split(',') if m.strip()] or list(default)
+    single = os.environ.get(env_single, '').strip()   # compatibilidad con .env viejos
+    if single and single not in models:
+        models.insert(0, single)
+    return models
+
+GROQ_TEXT_MODELS = _models('GROQ_TEXT_MODELS', 'GROQ_MODEL', [
+    'openai/gpt-oss-120b', 'llama-3.3-70b-versatile', 'openai/gpt-oss-20b', 'qwen/qwen3.8-27b', 'llama-3.1-8b-instant'])
+GROQ_CHAT_MODELS = _models('GROQ_CHAT_MODELS', 'GROQ_CHAT_MODEL', [
+    'openai/gpt-oss-20b', 'llama-3.1-8b-instant', 'openai/gpt-oss-120b', 'llama-3.3-70b-versatile', 'qwen/qwen3.8-27b'])
+GROQ_VISION_MODELS = _models('GROQ_VISION_MODELS', 'GROQ_VISION_MODEL', [
+    'qwen/qwen3.8-27b', 'meta-llama/llama-4-scout-17b-16e-instruct', 'meta-llama/llama-4-maverick-17b-128e-instruct'])
+GROQ_WHISPER_MODELS = _models('GROQ_WHISPER_MODELS', 'GROQ_WHISPER_MODEL', [
+    'whisper-large-v3', 'whisper-large-v3-turbo'])
 WHISPER_MODEL_SIZE = os.environ.get('WHISPER_MODEL', 'small')
 
 # Límites para textos largos (en caracteres)

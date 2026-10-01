@@ -3,10 +3,11 @@ Funciones de IA (Groq): limpieza de transcripciones, traducción, análisis
 periodístico, citas, chat y OCR. Todas son bloqueantes: usar run_blocking().
 """
 import re
+import time
 from typing import Optional
 
 from config import (
-    logger, GROQ_API_KEY, GROQ_MODEL, GROQ_FALLBACK_MODEL, GROQ_CHAT_MODEL, GROQ_VISION_MODEL,
+    logger, GROQ_API_KEY, GROQ_TEXT_MODELS, GROQ_CHAT_MODELS, GROQ_VISION_MODELS,
     AI_CHUNK_CHARS, AI_CLEANUP_MAX_CHARS, ANALYSIS_CHUNK_CHARS, CHAT_CONTEXT_CHARS,
 )
 from text_utils import split_text_chunks, pick_relevant_chunks, parse_json_from_llm
@@ -31,6 +32,10 @@ class RateLimitedError(Exception):
     """Todos los modelos devolvieron 'rate limit'."""
 
 
+class NoModelAvailableError(Exception):
+    """Ninguno de los modelos configurados existe para esta cuenta de Groq."""
+
+
 def get_groq_client(api_key: Optional[str] = None):
     """Cliente con la key del usuario (si la mandó el navegador) o la del .env."""
     key = (api_key or "").strip()
@@ -49,26 +54,98 @@ def is_rate_limit(err: Exception) -> bool:
     return "rate_limit_exceeded" in s or "429" in s
 
 
-def chat_completion(client, prompt: str, *, system: str = None, models=None, max_tokens: int = 1500,
-                    temperature: float = 0.3, json_mode: bool = False) -> tuple:
-    """Llama al modelo principal y, si hay rate limit, al de respaldo. Devuelve (texto, modelo)."""
-    models = models or [GROQ_MODEL, GROQ_FALLBACK_MODEL]
-    messages = ([{"role": "system", "content": system}] if system else []) + [{"role": "user", "content": prompt}]
-    last_err = None
-    for model in dict.fromkeys(models):  # sin duplicados, en orden
-        try:
-            kwargs = dict(model=model, messages=messages, max_tokens=max_tokens, temperature=temperature)
-            if json_mode:
-                kwargs["response_format"] = {"type": "json_object"}
-            res = client.chat.completions.create(**kwargs)
-            return (res.choices[0].message.content or "").strip(), model
-        except Exception as e:
-            if is_rate_limit(e):
-                logger.info(f"Rate limit en {model}, probando el siguiente modelo...")
-                last_err = e
-                continue
-            raise
-    raise RateLimitedError(str(last_err))
+def is_model_error(err: Exception) -> bool:
+    """El modelo no existe, fue retirado o la cuenta no tiene acceso."""
+    s = str(err).lower()
+    return any(k in s for k in ("model_not_found", "does not exist", "decommissioned",
+                                "model_decommissioned", "not have access to", "model_terms_required"))
+
+
+# ─── ELECCIÓN DE MODELO ──────────────────────────────────────────────────────
+# Groq retira modelos cada tanto. En vez de nombres fijos, se pregunta a Groq qué
+# modelos tiene la cuenta (se guarda 1 hora) y se usa el primero de la lista de
+# preferencia que esté disponible. Los que fallan por "no existe" se descartan.
+
+_MODELS_TTL = 3600
+_available_cache: dict = {}   # id(cliente) -> (timestamp, set de ids | None)
+_dead_models: set = set()
+
+
+def available_models(client) -> Optional[set]:
+    key = id(client)
+    cached = _available_cache.get(key)
+    if cached and time.time() - cached[0] < _MODELS_TTL:
+        return cached[1]
+    try:
+        ids = {m.id for m in client.models.list().data}
+    except Exception as e:
+        logger.debug(f"No se pudo listar modelos de Groq: {e}")
+        ids = None
+    _available_cache[key] = (time.time(), ids)
+    return ids
+
+
+def pick_models(client, preferences: list) -> list:
+    """Modelos a probar, en orden: los preferidos que la cuenta tiene disponibles."""
+    ordered = [m for m in dict.fromkeys(preferences) if m not in _dead_models]
+    ids = available_models(client)
+    if ids:
+        present = [m for m in ordered if m in ids]
+        if present:
+            return present
+    return ordered or list(dict.fromkeys(preferences))
+
+
+def _clean_output(text: str) -> str:
+    # Algunos modelos (Qwen) devuelven el razonamiento entre <think>...</think>
+    return re.sub(r"<think>.*?</think>", "", text or "", flags=re.DOTALL).strip()
+
+
+def chat_completion(client, prompt: str = "", *, system: str = None, models=None, max_tokens: int = 1500,
+                    temperature: float = 0.3, json_mode: bool = False, messages: list = None) -> tuple:
+    """
+    Llama al primer modelo disponible de la lista. Si da rate limit o el modelo no existe,
+    prueba el siguiente. Devuelve (texto, modelo usado).
+    """
+    if messages is None:
+        messages = ([{"role": "system", "content": system}] if system else []) + [{"role": "user", "content": prompt}]
+    rate_err, model_errs = None, []
+    for model in pick_models(client, models or GROQ_TEXT_MODELS):
+        base = dict(model=model, messages=messages, max_tokens=max_tokens, temperature=temperature)
+        extras = {}
+        if model.startswith("openai/gpt-oss"):
+            # Modelos de razonamiento: poco razonamiento y margen para la respuesta
+            extras["reasoning_effort"] = "low"
+            base["max_tokens"] = max_tokens + 1024
+        if json_mode:
+            extras["response_format"] = {"type": "json_object"}
+        attempts = [{**base, **extras}] + ([base] if extras else [])
+        for i, kwargs in enumerate(attempts):
+            try:
+                res = client.chat.completions.create(**kwargs)
+                text = _clean_output(res.choices[0].message.content)
+                if not text and i + 1 < len(attempts):
+                    continue
+                return text, model
+            except Exception as e:
+                if is_rate_limit(e):
+                    logger.info(f"Rate limit en {model}, probando el siguiente modelo...")
+                    rate_err = e
+                    break
+                if is_model_error(e):
+                    logger.warning(f"Modelo de Groq no disponible: {model} ({str(e)[:120]})")
+                    _dead_models.add(model)
+                    model_errs.append(model)
+                    break
+                if i + 1 < len(attempts):  # parámetro no soportado (p. ej. reasoning_effort): reintentar simple
+                    logger.debug(f"{model} rechazó parámetros extra, reintento simple: {str(e)[:120]}")
+                    continue
+                raise
+    if rate_err:
+        raise RateLimitedError(str(rate_err))
+    raise NoModelAvailableError(
+        "Ninguno de los modelos de IA configurados está disponible en tu cuenta de Groq "
+        f"(probados: {', '.join(model_errs) or 'ninguno'}). Actualizá Clipadsk o definí GROQ_TEXT_MODELS en .env.")
 
 
 # ─── LIMPIEZA DE TRANSCRIPCIONES ─────────────────────────────────────────────
@@ -357,22 +434,19 @@ def chat_about_transcript(client, transcript: str, question: str) -> str:
         partial = (" La transcripción es larga: se incluyen solo los fragmentos más relacionados con la pregunta "
                    "(marcados con [...] los saltos). Si la respuesta podría estar en otra parte, aclaralo.")
     answer, _ = chat_completion(client, question, system=CHAT_SYSTEM.format(partial=partial, transcript=transcript),
-                                models=[GROQ_CHAT_MODEL, GROQ_FALLBACK_MODEL], max_tokens=1024, temperature=0.5)
+                                models=GROQ_CHAT_MODELS, max_tokens=1024, temperature=0.5)
     return answer
 
 
 def ocr_image(client, b64_jpeg: str) -> str:
-    res = client.chat.completions.create(
-        model=GROQ_VISION_MODEL,
-        messages=[{"role": "user", "content": [
-            {"type": "text", "text": "Extract all readable text from this image. Return only the extracted text, keeping logical line breaks. Do not add any introductory or extra conversational text."},
-            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64_jpeg}"}},
-        ]}],
-        temperature=0.1, max_tokens=1024,
-    )
-    return (res.choices[0].message.content or "").strip()
+    messages = [{"role": "user", "content": [
+        {"type": "text", "text": "Extract all readable text from this image. Return only the extracted text, keeping logical line breaks. Do not add any introductory or extra conversational text."},
+        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64_jpeg}"}},
+    ]}]
+    text, _ = chat_completion(client, messages=messages, models=GROQ_VISION_MODELS, max_tokens=1024, temperature=0.1)
+    return text
 
 
 __all__ = ["get_groq_client", "chat_completion", "cleanup_transcript", "translate_texts",
            "analyze_transcript", "extract_quotes", "chat_about_transcript", "ocr_image",
-           "RateLimitedError", "is_rate_limit", "JOURNALIST_PROMPTS"]
+           "RateLimitedError", "NoModelAvailableError", "is_rate_limit", "is_model_error", "JOURNALIST_PROMPTS"]

@@ -518,6 +518,8 @@ def require_groq(api_key: Optional[str]):
 
 
 def ai_error(e: Exception) -> HTTPException:
+    if isinstance(e, ai.NoModelAvailableError):
+        return HTTPException(status_code=503, detail=str(e))
     if isinstance(e, ai.RateLimitedError) or ai.is_rate_limit(e):
         return HTTPException(status_code=429, detail="⚠️ Límite de uso de Groq alcanzado. Podés:\n1. Esperar unos minutos e intentar de nuevo.\n2. Configurar tu propia API key de Groq en Configuración (gratis en console.groq.com).")
     logger.exception("Error de IA")

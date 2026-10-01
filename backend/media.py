@@ -8,7 +8,7 @@ import subprocess
 from typing import Callable, Optional
 
 from config import (
-    logger, FFMPEG_BIN, HAS_FFMPEG, GROQ_WHISPER_MODEL, WHISPER_MODEL_SIZE,
+    logger, FFMPEG_BIN, HAS_FFMPEG, GROQ_WHISPER_MODELS, WHISPER_MODEL_SIZE,
     GROQ_MAX_UPLOAD_MB, AUDIO_CHUNK_SECONDS,
 )
 from text_utils import normalize_segments
@@ -78,16 +78,33 @@ def split_audio(path: str, out_dir: str, chunk_seconds: int = AUDIO_CHUNK_SECOND
 
 # ─── GROQ WHISPER ────────────────────────────────────────────────────────────
 
+_dead_whisper: set = set()
+
+
 def _groq_transcribe_one(client, path: str, lang: str):
+    """Transcribe un archivo. Si Groq retiró el modelo de Whisper, prueba el siguiente de la lista."""
     ext = os.path.splitext(path)[1].lower()
     with open(path, "rb") as f:
-        res = client.audio.transcriptions.create(
-            file=(os.path.basename(path), f.read(), MIME_BY_EXT.get(ext, 'audio/mpeg')),
-            model=GROQ_WHISPER_MODEL,
-            response_format="verbose_json",
-            language=lang if lang in ("es", "en") else None,
-        )
-    return (getattr(res, "text", "") or ""), (getattr(res, "segments", None) or [])
+        data = f.read()
+    last_err = None
+    for model in [m for m in GROQ_WHISPER_MODELS if m not in _dead_whisper] or GROQ_WHISPER_MODELS:
+        try:
+            res = client.audio.transcriptions.create(
+                file=(os.path.basename(path), data, MIME_BY_EXT.get(ext, 'audio/mpeg')),
+                model=model,
+                response_format="verbose_json",
+                language=lang if lang in ("es", "en") else None,
+            )
+            return (getattr(res, "text", "") or ""), (getattr(res, "segments", None) or [])
+        except Exception as e:
+            msg = str(e).lower()
+            if any(k in msg for k in ("model_not_found", "does not exist", "decommissioned", "not have access to")):
+                logger.warning(f"Modelo de Whisper no disponible en Groq: {model}")
+                _dead_whisper.add(model)
+                last_err = e
+                continue
+            raise
+    raise RuntimeError(f"Ningún modelo de Whisper disponible en Groq: {last_err}")
 
 
 def transcribe_with_groq(client, audio_path: str, lang: str, work_dir: str, progress: ProgressCb = None):

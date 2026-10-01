@@ -513,6 +513,8 @@ body[data-view="config"] .app-col-right { display: none; }
 
 .transcript-card { display: flex; flex-direction: column; gap: 20px; }
 .app-col-left { display: flex; flex-direction: column; gap: 24px; min-width: 0; }
+/* Las cards no se achican: si no entran, la columna hace scroll (antes la card del video quedaba cortada) */
+.app-col-left > * { flex-shrink: 0; }
 .app-col-right { min-width: 0; }
 #video-thumbnail[src=""] { visibility: hidden; }
 

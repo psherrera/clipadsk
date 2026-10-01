@@ -158,7 +158,9 @@ Instrucciones de edición:
 
 Preservación absoluta: NO resumas, NO unifiques temas, NO omitas redundancias ni cambies las palabras de quienes hablan. Los periodistas necesitan la desgrabación exacta para extraer sus propias citas.
 
-Corrección de formato: limitate a corregir puntuación (comas, puntos, signos de interrogación), mayúsculas y separar en párrafos (doble salto de línea) para que el texto sea legible.
+Corrección de formato: limitate a corregir puntuación (comas, puntos, signos de interrogación) y mayúsculas.
+
+Párrafos (obligatorio): dividí el texto en párrafos cortos de 2 a 5 oraciones, separados por UNA LÍNEA EN BLANCO (punto y aparte). Empezá un párrafo nuevo cada vez que cambia el tema, cuando alguien hace una pregunta o cuando responde otra persona. Nunca devuelvas todo en un solo bloque.
 
 Limpieza mínima: solo podés quitar tartamudeos o muletillas extremas ("eh...", "este...") si interrumpen gravemente la lectura. No elimines anécdotas, datos repetidos ni interacciones.
 {translate_rule}

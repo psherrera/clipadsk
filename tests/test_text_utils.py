@@ -110,3 +110,21 @@ def test_safe_filename():
 def test_parse_json_from_llm():
     assert parse_json_from_llm('```json\n{"quotes": []}\n```') == {"quotes": []}
     assert parse_json_from_llm('Aquí tienes: {"a": 1} listo') == {"a": 1}
+
+
+def test_ensure_paragraphs_splits_long_block_without_changing_words():
+    from text_utils import ensure_paragraphs
+    block = " ".join(f"Esta es la oración número {i}, con algo de texto." for i in range(60))
+    out = ensure_paragraphs(block)
+    paras = out.split("\n\n")
+    assert len(paras) > 3
+    assert all(len(p) <= 700 for p in paras)
+    assert out.split() == block.split()          # ni una palabra cambiada
+
+
+def test_ensure_paragraphs_keeps_existing_paragraphs_and_short_text():
+    from text_utils import ensure_paragraphs
+    assert ensure_paragraphs("Uno.\n\nDos.") == "Uno.\n\nDos."
+    assert ensure_paragraphs("Hola.\nChau.") == "Hola.\n\nChau."
+    assert ensure_paragraphs("Corto.") == "Corto."
+    assert ensure_paragraphs("") == ""

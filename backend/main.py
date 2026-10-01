@@ -48,7 +48,7 @@ from config import (
 )
 from text_utils import (
     sanitize_url, parse_subtitles_to_segments, generate_srt_from_segments, remove_repetitions,
-    find_segment_times_for_quote, host_matches, is_allowed_thumbnail_url, safe_filename,
+    find_segment_times_for_quote, ensure_paragraphs, host_matches, is_allowed_thumbnail_url, safe_filename,
     YOUTUBE_DOMAINS, INSTAGRAM_DOMAINS, TIKTOK_DOMAINS, TWITTER_DOMAINS, FACEBOOK_DOMAINS,
 )
 import media
@@ -751,7 +751,7 @@ async def get_transcript(req: VideoRequest):
     cached = await run_light(cache_get, cache_key)
     if cached:
         add_log(uid, "Resultado recuperado de la caché local.")
-        return {"transcript": cached.get("transcript", ""), "srt": cached.get("srt", ""),
+        return {"transcript": ensure_paragraphs(cached.get("transcript", "")), "srt": cached.get("srt", ""),
                 "segments": cached.get("segments", []), "method": "cache"}
 
     client = ai.get_groq_client(req.groq_api_key)
@@ -783,6 +783,7 @@ async def get_transcript(req: VideoRequest):
         if client:
             update_progress(uid, 85, f"Aplicando puntuación y párrafos con IA ({lang})...")
             text = await run_blocking(ai.cleanup_transcript, text, client, lang, warnings)
+        text = ensure_paragraphs(text)  # punto y aparte aunque la IA no lo haya hecho
 
         segments = result["segments"]
         payload = {"transcript": text, "srt": generate_srt_from_segments(segments), "segments": segments,
@@ -869,6 +870,7 @@ async def transcript_audio_file(
             if client:
                 update_progress(uid, 80, "Aplicando puntuación y párrafos con IA...")
                 text = await run_blocking(ai.cleanup_transcript, text, client, target_lang, warnings)
+            text = ensure_paragraphs(text)
 
             update_progress(uid, 100, "Completado")
             add_log(uid, "Transcripción de archivo completada.")
@@ -1142,7 +1144,7 @@ async def export_docx(req: ExportDocxRequest):
         r = doc.add_paragraph().add_run("Transcripción:")
         r.bold, r.font.size, r.font.color.rgb = True, Pt(14), RGBColor(0x4f, 0x46, 0xe5)
 
-        for para in req.transcript.split("\n\n"):
+        for para in ensure_paragraphs(req.transcript).split("\n\n"):
             para = para.strip()
             if not para:
                 continue

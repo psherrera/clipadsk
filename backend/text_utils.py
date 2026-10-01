@@ -325,3 +325,47 @@ def safe_filename(name: str, max_len: int = 60) -> str:
     name = re.sub(r'[\\/:*?"<>|\r\n\t]+', ' ', name or "")
     name = re.sub(r'\s+', ' ', name).strip(' .')
     return name[:max_len].strip() or "archivo"
+
+
+# ─── PÁRRAFOS ────────────────────────────────────────────────────────────────
+
+_SENTENCE_RE = re.compile(r'[^.!?…]+(?:[.!?…]+["\'”»)]*|$)\s*')
+
+
+def split_sentences(text: str) -> list:
+    return [s.strip() for s in _SENTENCE_RE.findall(text or "") if s.strip()]
+
+
+def ensure_paragraphs(text: str, target_chars: int = 420, max_chars: int = 700) -> str:
+    """
+    Garantiza "punto y aparte": respeta los párrafos que ya trae el texto y parte
+    los bloques largos (o el texto en un solo bloque) en grupos de oraciones de
+    ~target_chars. No cambia ni una palabra: solo agrega saltos de párrafo.
+    """
+    text = (text or "").strip()
+    if not text:
+        return text
+    if '\n\n' in text:
+        blocks = re.split(r'\n\s*\n', text)
+    elif '\n' in text:
+        blocks = text.split('\n')
+    else:
+        blocks = [text]
+
+    out = []
+    for block in (b.strip() for b in blocks):
+        if not block:
+            continue
+        if len(block) <= max_chars:
+            out.append(block)
+            continue
+        current = ""
+        for sent in split_sentences(block):
+            if current and len(current) + len(sent) + 1 > target_chars:
+                out.append(current)
+                current = sent
+            else:
+                current = f"{current} {sent}".strip()
+        if current:
+            out.append(current)
+    return "\n\n".join(out)

@@ -1155,8 +1155,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
     function formatCleanTextWithTimestamps(text, segments) {
         if (!text) return '';
-        if (!segments || segments.length === 0) return formatAIResponse(text);
-        const paragraphs = text.split("\n\n");
+        if (!segments || segments.length === 0) return formatAIResponse(splitParagraphs(text).join('\n\n'));
+        const paragraphs = splitParagraphs(text);
         const starts = getParagraphTimestamps(paragraphs, segments);
         let html = '';
         for (let i = 0; i < paragraphs.length; i++) {
@@ -1888,36 +1888,36 @@ document.addEventListener('DOMContentLoaded', () => {
      * Devuelve la transcripción con el mismo formato de párrafos que se ve en
      * pantalla pero en texto plano (\n\n entre párrafos), listo para copiar o .txt
      */
+    /**
+     * Divide un texto en párrafos ("punto y aparte") sin cambiar palabras:
+     * respeta los párrafos existentes y parte los bloques largos en grupos de
+     * oraciones de ~420 caracteres. Mismo criterio que ensure_paragraphs() del servidor.
+     */
+    function splitParagraphs(text, target = 420, max = 700) {
+        const t = (text || '').trim();
+        if (!t) return [];
+        const blocks = t.includes('\n\n') ? t.split(/\n\s*\n/) : t.split('\n');
+        const out = [];
+        for (const raw of blocks) {
+            const block = raw.trim();
+            if (!block) continue;
+            if (block.length <= max) { out.push(block); continue; }
+            const sentences = block.match(/[^.!?…]+(?:[.!?…]+["'”»)]*|$)\s*/g) || [block];
+            let current = '';
+            for (const sRaw of sentences) {
+                const sent = sRaw.trim();
+                if (!sent) continue;
+                if (current && current.length + sent.length + 1 > target) { out.push(current); current = sent; }
+                else current = (current + ' ' + sent).trim();
+            }
+            if (current) out.push(current);
+        }
+        return out;
+    }
+
     function getFormattedPlainText() {
         if (!currentTranscript) return '';
-        const t = currentTranscript.trim();
-        // Si ya tiene párrafos explícitos, respetar
-        if (t.includes('\n\n')) return t;
-        // Saltos simples → párrafos
-        if (t.includes('\n')) {
-            return t.split('\n').map(l => l.trim()).filter(l => l).join('\n\n');
-        }
-        // Intentar dividir por oraciones
-        const sentences = t.match(/[^.!?]+[.!?]+["']?\s*/g);
-        if (sentences && sentences.length > 3) {
-            const out = [];
-            for (let i = 0; i < sentences.length; i += 4) {
-                const chunk = sentences.slice(i, i + 4).join('').trim();
-                if (chunk) out.push(chunk);
-            }
-            return out.join('\n\n');
-        }
-        // Último recurso: párrafos de 70 palabras
-        const words = t.split(/\s+/).filter(w => w);
-        if (words.length > 70) {
-            const out = [];
-            for (let i = 0; i < words.length; i += 70) {
-                const chunk = words.slice(i, i + 70).join(' ').trim();
-                if (chunk) out.push(chunk);
-            }
-            return out.join('\n\n');
-        }
-        return t;
+        return splitParagraphs(currentTranscript).join('\n\n');
     }
 
     copyTranscriptBtn?.addEventListener('click', () => {

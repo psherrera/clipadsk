@@ -468,14 +468,23 @@ document.addEventListener('DOMContentLoaded', () => {
             statusText.textContent = 'Offline';
         }
     };
+    // /health es instantáneo; /health/cookies hace una prueba real contra YouTube
+    // (lenta), así que solo se corre una vez al abrir la app.
+    let cookieIssues = false;
     const checkServerStatus = async () => {
         try {
-            const r = await fetch(`${API_BASE}/health/cookies`);
-            if (r.ok) { const d = await r.json(); updateStatusUI(d.status === 'ok' ? 'online' : 'issues'); }
-            else updateStatusUI('offline');
+            const r = await fetch(`${API_BASE}/health`);
+            updateStatusUI(r.ok ? (cookieIssues ? 'issues' : 'online') : 'offline');
         } catch { updateStatusUI('offline'); }
     };
-    setTimeout(checkServerStatus, 1500);
+    const checkCookies = async () => {
+        try {
+            const r = await fetch(`${API_BASE}/health/cookies`);
+            if (r.ok) { const d = await r.json(); cookieIssues = d.status !== 'ok'; checkServerStatus(); }
+        } catch { /* el estado general lo informa checkServerStatus */ }
+    };
+    setTimeout(checkServerStatus, 500);
+    setTimeout(checkCookies, 2500);
     setInterval(checkServerStatus, 60000);
 
     // ─── CLEAR INPUT ─────────────────────────────────────────────────────────────
@@ -803,6 +812,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
             currentTranscript = data.transcript;
             renderTranscript(data.transcript, data.method, data.srt, data.segments);
+            showWarnings(data.warnings);
             downloadTxtBtn?.classList.remove('hidden');
 
             saveToHistory({ url, platform: detectPlatformFromUrl(url), title: titleEl.textContent || url, transcript: data.transcript, srt: data.srt, segments: data.segments });
@@ -1091,7 +1101,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     const timeEnd   = formatTimestamp(seg.end);
                     return `<div class="interactive-segment" data-start="${seg.start}" data-end="${seg.end}" title="Click: fijar inicio/fin del recorte">
                         <span class="interactive-segment-time">${timeLabel}</span>
-                        <span class="interactive-segment-text">${seg.text}</span>
+                        <span class="interactive-segment-text">${escapeHtml(seg.text)}</span>
                     </div>`;
                 }).join('')}</div>`;
 
@@ -1322,7 +1332,8 @@ document.addEventListener('DOMContentLoaded', () => {
             currentSrt = data.srt || '';
             
             // Usar la columna derecha (como YouTube)
-            renderTranscript(data.transcript, 'groq_whisper_v3_file', data.srt, data.segments);
+            renderTranscript(data.transcript, data.method || 'groq_whisper_v3_file', data.srt, data.segments);
+            showWarnings(data.warnings);
             downloadTxtBtn?.classList.remove('hidden');
 
             saveToHistory({ url: `whatsapp:${file.name}`, platform: 'whatsapp', title: file.name, transcript: data.transcript, srt: data.srt, segments: data.segments });
@@ -1330,7 +1341,7 @@ document.addEventListener('DOMContentLoaded', () => {
         } catch (err) {
             clearInterval(localPollInterval);
             showToast(`Error: ${err.message}`, 'error');
-            transcriptContent.innerHTML = `<p class="text-red-400 text-sm">Error al procesar: ${err.message}</p>`;
+            transcriptContent.innerHTML = `<p class="text-red-400 text-sm">Error al procesar: ${escapeHtml(err.message)}</p>`;
         }
     }
 
@@ -1438,7 +1449,8 @@ document.addEventListener('DOMContentLoaded', () => {
             currentTranscript = response.transcript;
             currentSrt = response.srt || '';
 
-            renderTranscript(response.transcript, 'groq_whisper_v3_file', response.srt, response.segments);
+            renderTranscript(response.transcript, response.method || 'groq_whisper_v3_file', response.srt, response.segments);
+            showWarnings(response.warnings);
             downloadTxtBtn?.classList.remove('hidden');
 
             saveToHistory({ url: `video:${file.name}`, platform: 'video', title: file.name, transcript: response.transcript, srt: response.srt, segments: response.segments });
@@ -1446,7 +1458,7 @@ document.addEventListener('DOMContentLoaded', () => {
         } catch (err) {
             clearInterval(serverPollInterval);
             showToast(`Error: ${err.message}`, 'error');
-            transcriptContent.innerHTML = `<p class="text-red-400 text-sm">Error al procesar el video: ${err.message}</p>`;
+            transcriptContent.innerHTML = `<p class="text-red-400 text-sm">Error al procesar el video: ${escapeHtml(err.message)}</p>`;
         }
     }
 
@@ -1552,7 +1564,8 @@ document.addEventListener('DOMContentLoaded', () => {
                         Copiar
                     </button>
                 </div>
-                <div class="ai-result-text text-slate-300 text-sm leading-relaxed">${formatAIResponse(data.result)}</div>`;
+                <div class="ai-result-text text-slate-300 text-sm leading-relaxed">${formatAIResponse(data.result)}</div>
+                ${data.parts > 1 ? `<p class="mt-3 text-[10px] text-slate-500 italic">Transcripción larga: se analizó completa en ${Number(data.parts)} partes.</p>` : ''}`;
 
         } catch (err) {
             renderAnalyzeError(outputEl, err);
@@ -1609,7 +1622,7 @@ document.addEventListener('DOMContentLoaded', () => {
                    </div>`;
 
             const clipBtn = hasTime
-                ? `<button class="quote-clip-btn" data-start="${q.start}" data-end="${q.end}" title="Fijar este recorte">
+                ? `<button class="quote-clip-btn" data-start="${Number(q.start)}" data-end="${Number(q.end)}" title="Fijar este recorte">
                     <span class="material-symbols-outlined text-[13px]">content_cut</span> Recortar
                    </button>`
                 : '';
@@ -1617,13 +1630,13 @@ document.addEventListener('DOMContentLoaded', () => {
             return `
             <div class="quote-card">
                 <div class="quote-index">Cita ${i + 1}</div>
-                <blockquote class="quote-text">&ldquo;${q.quote}&rdquo;</blockquote>
-                <p class="quote-note">${q.note}</p>
+                <blockquote class="quote-text">&ldquo;${escapeHtml(q.quote)}&rdquo;</blockquote>
+                <p class="quote-note">${escapeHtml(q.note)}</p>
                 <div class="quote-actions">
                     ${timeBadge}
                     <div class="quote-buttons">
                         ${clipBtn}
-                        <button class="quote-copy-btn" data-quote="${q.quote.replace(/"/g, '&quot;')}">
+                        <button class="quote-copy-btn" data-quote="${escapeHtml(q.quote)}">
                             <span class="material-symbols-outlined text-[13px]">content_copy</span> Copiar
                         </button>
                     </div>
@@ -1942,14 +1955,22 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     // ─── TOAST ───────────────────────────────────────────────────────────────────
-    function showToast(message, type = 'info') {
+    function showToast(message, type = 'info', duration = 3500) {
         const colors = { error: 'bg-red-500/90', success: 'bg-emerald-600/90', info: 'bg-slate-700/90' };
         const icons  = { error: 'error', success: 'check_circle', info: 'info' };
         const toast  = document.createElement('div');
         toast.className = `fixed bottom-24 lg:bottom-8 left-1/2 -translate-x-1/2 z-[200] flex items-center gap-3 px-5 py-3 rounded-2xl text-white text-sm font-semibold shadow-2xl ${colors[type]} fade-in`;
-        toast.innerHTML = `<span class="material-symbols-outlined text-lg">${icons[type]}</span>${message}`;
+        toast.innerHTML = `<span class="material-symbols-outlined text-lg">${icons[type]}</span>`;
+        const msg = document.createElement('span');
+        msg.textContent = message;   // texto plano: evita inyectar HTML
+        toast.appendChild(msg);
         document.body.appendChild(toast);
-        setTimeout(() => { toast.style.opacity = '0'; setTimeout(() => toast.remove(), 400); }, 3500);
+        setTimeout(() => { toast.style.opacity = '0'; setTimeout(() => toast.remove(), 400); }, duration);
+    }
+
+    // Avisos del servidor (p. ej. "parte de la transcripción quedó sin limpieza IA")
+    function showWarnings(warnings) {
+        (warnings || []).forEach((w, i) => setTimeout(() => showToast(w, 'info', 8000), i * 600));
     }
 
     /**
@@ -1959,9 +1980,8 @@ document.addEventListener('DOMContentLoaded', () => {
     function formatAIResponse(text) {
         if (!text) return "";
 
-        // 0. Pre-limpiar timestamps incrustados del tipo "02:14" que pueden
-        //    filtrarse desde subtítulos VTT de YouTube
-        text = text.replace(/\b\d{1,2}:\d{2}(?::\d{2})?(?:[.,]\d+)?\s*/g, '');
+        // (Los timestamps de subtítulos ya se limpian en el servidor; acá NO se tocan
+        //  horarios como "10:30" porque pueden ser datos de la nota.)
 
         // 1. Escapar HTML básico por seguridad
         let t = text
@@ -2088,7 +2108,7 @@ document.addEventListener('DOMContentLoaded', () => {
         } catch (err) {
             loadingBubble.innerHTML = `
                 <span class="material-symbols-outlined text-red-400 text-base mt-0.5 flex-shrink-0">error</span>
-                <div class="bg-red-500/10 border border-red-500/20 rounded-2xl px-4 py-2.5 text-sm text-red-400">${err.message}</div>`;
+                <div class="bg-red-500/10 border border-red-500/20 rounded-2xl px-4 py-2.5 text-sm text-red-400">${escapeHtml(err.message)}</div>`;
         } finally {
             chatInput.disabled = false;
             chatSendBtn.disabled = false;
@@ -2109,10 +2129,7 @@ document.addEventListener('DOMContentLoaded', () => {
             const r = await fetch(`${API_BASE}/system/${endpoint}`, { method: 'POST' });
             const d = await r.json();
             if (r.ok) {
-                showToast(d.message, 'success');
-                if (endpoint === 'update-app') {
-                    setTimeout(() => window.location.reload(), 2000);
-                }
+                showToast(d.message, 'success', 9000);
             } else {
                 throw new Error(d.error || 'Fallo en la operacion');
             }

@@ -57,6 +57,9 @@ Write-Host "  [+] Actualizando pip..." -ForegroundColor Gray
 & $venvPy -m pip install --upgrade pip --quiet
 Write-Host "  [+] Instalando requirements.txt..." -ForegroundColor Gray
 & $venvPy -m pip install -r (Join-Path $root "backend\requirements.txt")
+if ($LASTEXITCODE -ne 0) { Write-Host "  [ERROR] Fallo la instalacion de dependencias." -ForegroundColor Red; exit 1 }
+# Marca para que iniciar.bat sepa que las dependencias estan al dia
+Copy-Item (Join-Path $root "backend\requirements.txt") (Join-Path $root "backend\venv\.requirements.installed") -Force
 Write-Host "  [OK] Dependencias instaladas." -ForegroundColor Green
 
 # ── 5. Configurar .env ────────────────────────────────────────────────────────

@@ -1,45 +1,58 @@
 """
-YT Downloader Pro - Backend
-Optimized for Render.com deployment.
-Features: 
-- Heavy dependency removal (Whisper/Torch).
-- Groq API & YouTube Subtitle fallback for transcription.
-- Robust Bot-Evasion strategy using mobile client emulation.
-- Automated cleanup of downloaded files.
-"""
-# --- CONFIGURACION DE RUTAS ---
-import os
-import sys
-import subprocess
-import re
+Clipadsk - Backend (FastAPI)
 
-import uuid
+Descarga y transcripción de video/audio para periodistas.
+- Subtítulos de YouTube → Groq Whisper → Whisper local (en cascada)
+- Herramientas periodísticas con IA (resumen, citas con tiempos, datos, ángulos, diarización)
+
+Módulos:
+  config.py      variables de entorno, rutas, logging
+  text_utils.py  funciones puras (subtítulos, SRT, citas, URLs) — con tests
+  media.py       FFmpeg y transcripción (Groq / Whisper local)
+  ai.py          limpieza, traducción y análisis con Groq
+"""
+import os
+import re
+import io
 import json
-import gc
-import tempfile
-import yt_dlp
-import requests
-from typing import Optional, List, Any
-from fastapi import FastAPI, Request, HTTPException, BackgroundTasks, UploadFile, File, Form
-from fastapi.responses import JSONResponse, FileResponse
-from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
-from deep_translator import GoogleTranslator
-from fastapi import Response
-from fastapi.staticfiles import StaticFiles
-import asyncio
+import time
+import uuid
+import hmac
 import base64
 import random
-import time
+import shutil
 import sqlite3
-import logging
-from pathlib import Path
-from concurrent.futures import ThreadPoolExecutor
+import asyncio
+import zipfile
+import tempfile
 import functools
-try:
-    from pydub import AudioSegment
-except ImportError:
-    AudioSegment = None
+import subprocess
+import sys
+import http.cookiejar
+from pathlib import Path
+from typing import Optional, Any, List
+from urllib.parse import quote
+from concurrent.futures import ThreadPoolExecutor
+
+import requests
+import yt_dlp
+from fastapi import FastAPI, Request, HTTPException, BackgroundTasks, UploadFile, File, Form, Response
+from fastapi.responses import JSONResponse, FileResponse, StreamingResponse
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+
+from config import (
+    logger, BASE_DIR, ROOT_DIR, FRONTEND_DIR, DOWNLOAD_FOLDER, DB_FILE, CACHE_FILE,
+    HOST, PORT, ADMIN_TOKEN, ALLOWED_ORIGINS, HAS_FFMPEG, FFMPEG_BIN, IS_RENDER,
+    MAX_WORKERS, MAX_CONCURRENT_JOBS, MAX_UPLOAD_MB, GROQ_MAX_UPLOAD_MB,
+)
+from text_utils import (
+    sanitize_url, parse_subtitles_to_segments, generate_srt_from_segments, remove_repetitions,
+    find_segment_times_for_quote, host_matches, is_allowed_thumbnail_url, safe_filename,
+    YOUTUBE_DOMAINS, INSTAGRAM_DOMAINS, TIKTOK_DOMAINS, TWITTER_DOMAINS, FACEBOOK_DOMAINS,
+)
+import media
+import ai
 
 try:
     import instaloader
@@ -47,695 +60,212 @@ except ImportError:
     instaloader = None
 
 try:
-    from faster_whisper import WhisperModel
-    WHISPER_MODEL_AVAILABLE = True
-except ImportError:
-    WhisperModel = None
-    WHISPER_MODEL_AVAILABLE = False
+    from cachetools import TTLCache
+except ImportError:  # pragma: no cover
+    TTLCache = None
 
-from dotenv import load_dotenv
 
-# --- LOGGING (configured early so other modules can use logger) ---
-LOG_LEVEL = os.environ.get('LOG_LEVEL', 'INFO').upper()
-import logging
-logging.basicConfig(level=LOG_LEVEL, format='[%(asctime)s] %(levelname)s %(name)s: %(message)s')
-logger = logging.getLogger('clipadsk')
+app = FastAPI(title="Clipadsk API")
 
-# --- AÑADIR RAÍZ AL PATH PARA ENCONTRAR FFMPEG SI ESTÁ AHÍ ---
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-ROOT_DIR = os.path.dirname(BASE_DIR)
-FFMPEG_BIN = None
-
-# Buscar en raiz, luego en backend, luego en sistema
-for d in [ROOT_DIR, BASE_DIR]:
-    if os.path.exists(os.path.join(d, "ffmpeg.exe")):
-        FFMPEG_BIN = os.path.join(d, "ffmpeg.exe")
-        os.environ["PATH"] += os.pathsep + d
-        if AudioSegment:
-            AudioSegment.converter = FFMPEG_BIN
-            logger.debug(f"Pydub configurado con FFmpeg en {FFMPEG_BIN}")
-        break
-# -----------------------------------------------------------
-# --- CONFIGURACIÓN DE ENTORNO ---
-load_dotenv() # Cargar variables desde .env
-IS_RENDER = os.environ.get('RENDER') is not None
-GROQ_API_KEY = os.environ.get('GROQ_API_KEY')
-GROQ_MODEL = os.environ.get('GROQ_MODEL', 'llama-3.3-70b-versatile')  # configurable via env
-GROQ_CHAT_MODEL = os.environ.get('GROQ_CHAT_MODEL', 'llama-3.1-8b-instant')
-WHISPER_MODEL_SIZE = os.environ.get('WHISPER_MODEL', 'small')
-WHISPER_MODEL = None
-
-try:
-    from groq import Groq
-    groq_client = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
-except ImportError:
-    groq_client = None
-
-app = FastAPI(title="YT Downloader Pro API")
-
-# --- BACKGROUND EXECUTOR ---
-MAX_WORKERS = int(os.environ.get('MAX_WORKERS', '3'))
-MAX_CONCURRENT_JOBS = int(os.environ.get('MAX_CONCURRENT_JOBS', '2'))
+# ─── EJECUCIÓN EN SEGUNDO PLANO ──────────────────────────────────────────────
+# Todo lo que bloquea (yt-dlp, FFmpeg, Groq, requests) se corre en hilos para que el
+# servidor siga respondiendo (progreso, logs) mientras trabaja.
 EXECUTOR = ThreadPoolExecutor(max_workers=MAX_WORKERS)
-SEMAPHORE = asyncio.Semaphore(MAX_CONCURRENT_JOBS)
-
-# --- RESULT STORE (para recuperar transcripciones si la conexión se corta) ---
-# Guarda resultados por uid durante 1 hora para que el frontend pueda recuperarlos
-RESULT_STORE: dict = {}  # uid -> {"result": ..., "ts": timestamp}
-RESULT_STORE_TTL = 3600  # 1 hora
-
-def store_result(uid: str, result: dict):
-    """Guarda el resultado de una transcripción en memoria."""
-    RESULT_STORE[uid] = {"result": result, "ts": time.time()}
-    # Limpiar entradas viejas
-    cutoff = time.time() - RESULT_STORE_TTL
-    expired = [k for k, v in RESULT_STORE.items() if v["ts"] < cutoff]
-    for k in expired:
-        RESULT_STORE.pop(k, None)
-
-def get_stored_result(uid: str):
-    """Recupera el resultado de una transcripción guardada, si existe."""
-    entry = RESULT_STORE.get(uid)
-    if entry:
-        return entry["result"]
-    return None
+HEAVY_JOBS = asyncio.Semaphore(MAX_CONCURRENT_JOBS)
 
 
 async def run_blocking(fn: Any, *args, **kwargs):
-    """Run a blocking function in a controlled threadpool with semaphore."""
-    async with SEMAPHORE:
+    """Corre una función bloqueante en el pool, limitando trabajos pesados simultáneos."""
+    async with HEAVY_JOBS:
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(EXECUTOR, functools.partial(fn, *args, **kwargs))
 
 
-def extract_info_sync(opts, url):
-    with yt_dlp.YoutubeDL(opts) as ydl:
-        return ydl.extract_info(url, download=False)
+async def run_light(fn: Any, *args, **kwargs):
+    """Corre una función bloqueante liviana (HTTP corto, disco) sin ocupar un cupo pesado."""
+    return await asyncio.to_thread(fn, *args, **kwargs)
 
 
-def ydl_download_sync(opts, url):
-    with yt_dlp.YoutubeDL(opts) as ydl:
-        ydl.download([url])
-
-
-def requests_get_sync(url, **kwargs):
-    return requests.get(url, **kwargs)
-
-# Configuración de CORS
-allowed = os.environ.get('FRONTEND_ALLOWED_ORIGINS')
-if allowed:
-    allow_list = [o.strip() for o in allowed.split(',') if o.strip()]
-else:
-    allow_list = ["*"]
-
+# ─── SEGURIDAD ───────────────────────────────────────────────────────────────
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=allow_list,
+    allow_origins=ALLOWED_ORIGINS,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["Content-Disposition"],
 )
 
-# --- MIDDLEWARE DE LOGGING ---
+
 @app.middleware("http")
-async def log_requests(request: Request, call_next):
-    # Logeamos solo peticiones a la API para no saturar con estáticos
-    if request.url.path.startswith("/api/"):
-        logger.debug(f"API request: {request.method} {request.url.path}")
-    response = await call_next(request)
-    return response
-
-# --- RUTAS DERIVADAS (usan BASE_DIR/ROOT_DIR ya definidos arriba) ---
-# Si se provee FRONTEND_DIR por env (Docker/Render), la usamos prioritariamente
-FRONTEND_DIR = os.environ.get('FRONTEND_DIR') or os.path.join(ROOT_DIR, 'frontend')
-DOWNLOAD_FOLDER = os.path.join(BASE_DIR, 'downloads')
-CACHE_FILE = os.path.join(BASE_DIR, 'transcripts_cache.json')
-
-if not os.path.exists(DOWNLOAD_FOLDER):
-    os.makedirs(DOWNLOAD_FOLDER)
-
-# --- BASE DE DATOS (SQLite) ---
-DB_FILE = os.path.join(BASE_DIR, 'clipadsk.db')
-
-def init_db():
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute('''CREATE TABLE IF NOT EXISTS transcripts 
-                 (url TEXT PRIMARY KEY, transcript TEXT, date_added TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
-    
-    # Migración desde JSON antiguo si existe
-    if os.path.exists(CACHE_FILE):
-        logger.info("Migrando historial de JSON a SQLite...")
-        try:
-            with open(CACHE_FILE, 'r', encoding='utf-8') as f:
-                old_data = json.load(f)
-                for url, text in old_data.items():
-                    c.execute("INSERT OR IGNORE INTO transcripts (url, transcript) VALUES (?, ?)", (url, text))
-            conn.commit()
-            # Renombrar archivo viejo para evitar re-migración
-            os.rename(CACHE_FILE, CACHE_FILE + ".migrated")
-            logger.info("Migración completada con éxito.")
-        except Exception as e:
-            logger.exception("Error en migración de cache JSON a SQLite")
-    conn.close()
-
-# Inicializar DB al arrancar
-init_db()
-
-def load_cache():
-    """Mantiene compatibilidad con el código existente pero lee de SQLite."""
-    try:
-        conn = sqlite3.connect(DB_FILE)
-        c = conn.cursor()
-        c.execute("SELECT url, transcript FROM transcripts")
-        rows = c.fetchall()
-        conn.close()
-        return {row[0]: row[1] for row in rows}
-    except Exception as e:
-        logger.exception("Error leyendo cache desde SQLite")
-        return {}
-
-def save_cache_entry(url, transcript):
-    """Guarda una entrada individual en la DB."""
-    try:
-        conn = sqlite3.connect(DB_FILE)
-        c = conn.cursor()
-        c.execute("INSERT OR REPLACE INTO transcripts (url, transcript) VALUES (?, ?)", (url, transcript))
-        conn.commit()
-        conn.close()
-    except Exception as e:
-        logger.exception("Error guardando entrada en SQLite")
-
-def save_cache(cache):
-    """Mantiene compatibilidad (aunque es menos eficiente que save_cache_entry)."""
-    # En el flujo actual, save_cache se llama con todo el dict.
-    # Para SQLite es mejor guardar solo el nuevo, pero para no romper el flujo:
-    for url, text in cache.items():
-        save_cache_entry(url, text)
-
-
-# --- TRADUCCIÓN ---
-def translate_to_spanish(text):
-    if not text: return ""
-    try:
-        translator = GoogleTranslator(source='auto', target='es')
-        if len(text) > 4000:
-            chunks = [text[i:i+4000] for i in range(0, len(text), 4000)]
-            translated = [translator.translate(c) for c in chunks]
-            return " ".join(translated)
-        return translator.translate(text)
-    except Exception as e:
-        logger.exception("Error en traducción")
-        return text
-
-def get_local_groq(api_key: str = None):
-    if api_key and api_key.strip():
-        try:
-            from groq import Groq
-            return Groq(api_key=api_key.strip())
-        except Exception:
-            return groq_client
-    return groq_client
-
-
-def get_whisper_model():
-    global WHISPER_MODEL
-    if not WHISPER_MODEL_AVAILABLE:
-        return None
-    if WHISPER_MODEL is None:
-        try:
-            logger.info(f"Cargando modelo Whisper local: {WHISPER_MODEL_SIZE}")
-            WHISPER_MODEL = WhisperModel(WHISPER_MODEL_SIZE, device="cpu", compute_type="int8")
-        except Exception as e:
-            logger.exception(f"No se pudo cargar el modelo Whisper local: {e}")
-            WHISPER_MODEL = None
-    return WHISPER_MODEL
-
-
-def parse_time_to_seconds(t_str: str) -> float:
-    t_str = t_str.replace(',', '.')
-    parts = t_str.split(':')
-    if len(parts) == 3:
-        h, m, s = parts
-        return float(h) * 3600 + float(m) * 60 + float(s)
-    elif len(parts) == 2:
-        m, s = parts
-        return float(m) * 60 + float(s)
-    return 0.0
-
-
-def parse_subtitles_to_segments(content: str) -> list:
-    segments = []
-    # Match standard timestamp line: HH:MM:SS.mmm --> HH:MM:SS.mmm or MM:SS.mmm --> MM:SS.mmm
-    pattern = re.compile(r'(\d+(?::\d+)*[\.,]\d{3})\s*-->\s*(\d+(?::\d+)*[\.,]\d{3})')
-    # Pattern to remove leftover inline VTT word-level timestamps (e.g. '02:14' stuck to words)
-    inline_ts = re.compile(r'\b\d{1,2}:\d{2}(?::\d{2})?(?:[.,]\d+)?\s*')
-    
-    lines = content.split('\n')
-    i = 0
-    while i < len(lines):
-        line = lines[i].strip()
-        match = pattern.search(line)
-        if match:
-            start_str, end_str = match.groups()
-            start = parse_time_to_seconds(start_str)
-            end = parse_time_to_seconds(end_str)
-            
-            # Read subsequent lines until we hit an empty line or another timestamp
-            text_lines = []
-            i += 1
-            while i < len(lines):
-                next_line = lines[i].strip()
-                # If we see another timestamp or start of next block, break
-                if pattern.search(next_line) or (next_line.isdigit() and i + 1 < len(lines) and pattern.search(lines[i+1])):
-                    i -= 1 # Step back so outer loop processes it
-                    break
-                if next_line == "" or next_line.startswith("WEBVTT") or next_line.startswith("Kind:") or next_line.startswith("Language:"):
-                    # skip empty or header lines
-                    pass
-                else:
-                    # Pass 1: Clean XML-like tags (e.g. <c.colorWhite>, <00:02:14.000>)
-                    cleaned_line = re.sub(r'<[^>]*>', '', next_line).strip()
-                    # Pass 2: Remove any leftover inline timestamps (e.g. '02:14' stuck to text)
-                    cleaned_line = inline_ts.sub('', cleaned_line).strip()
-                    if cleaned_line:
-                        text_lines.append(cleaned_line)
-                i += 1
-            
-            text = " ".join(text_lines).strip()
-            if text:
-                segments.append({"start": start, "end": end, "text": text})
-        i += 1
-    return segments
-
-
-def format_srt_timestamp(seconds: float) -> str:
-    milliseconds = int(round((seconds % 1) * 1000))
-    total_seconds = int(seconds)
-    if milliseconds >= 1000:
-        milliseconds -= 1000
-        total_seconds += 1
-    hours = total_seconds // 3600
-    minutes = (total_seconds % 3600) // 60
-    secs = total_seconds % 60
-    return f"{hours:02d}:{minutes:02d}:{secs:02d},{milliseconds:03d}"
-
-
-def generate_srt_from_segments(segments) -> str:
-    srt_lines = []
-    for i, segment in enumerate(segments, start=1):
-        if isinstance(segment, dict):
-            start = segment.get("start", 0)
-            end = segment.get("end", 0)
-            text = segment.get("text", "").strip()
-        else:
-            start = getattr(segment, "start", 0)
-            end = getattr(segment, "end", 0)
-            text = getattr(segment, "text", "").strip()
-        
-        start_str = format_srt_timestamp(start)
-        end_str = format_srt_timestamp(end)
-        srt_lines.append(f"{i}")
-        srt_lines.append(f"{start_str} --> {end_str}")
-        srt_lines.append(text)
-        srt_lines.append("")
-    return "\n".join(srt_lines)
-
-
-def transcribe_with_local_whisper(audio_file_path: str, target_lang: str = "es"):
-    model = get_whisper_model()
-    if not model:
-        raise RuntimeError("No hay modelo Whisper local disponible. Instala faster-whisper para usar este modo.")
-
-    logger.info(f"Transcribiendo audio local con Whisper ({target_lang})...")
-    segments, info = model.transcribe(
-        audio_file_path,
-        beam_size=5,
-        vad_filter=True,
-        language=target_lang if target_lang in ["es", "en"] else None
-    )
-    segments = list(segments)
-    transcription = " ".join(segment.text.strip() for segment in segments if segment.text.strip())
-    srt_content = generate_srt_from_segments(segments)
-    logger.info(f"Transcripción local completada. Duración aprox: {getattr(info, 'duration', 'desconocida')}s")
-    return transcription, srt_content
-
-
-
-def remove_repetitions(text: str) -> str:
+async def block_foreign_origins(request: Request, call_next):
     """
-    Elimina repeticiones de frases que Whisper (y subtítulos VTT) generan.
-    Usa un algoritmo de ventana deslizante que no consume tokens de Groq.
-    Ejemplo de entrada:  "Cómo andan tanto tiempo Cómo andan tanto tiempo los extrañé"
-    Ejemplo de salida:   "Cómo andan tanto tiempo los extrañé"
+    CORS no frena los POST "simples" (formularios) de otras páginas: igual llegan al
+    servidor. Rechazamos cualquier petición a /api/ que venga con un Origin ajeno.
     """
-    if not text or len(text) < 30:
-        return text
-
-    words = text.split()
-    if len(words) < 6:
-        return text
-
-    result = []
-    i = 0
-    MAX_PHRASE = min(30, len(words) // 2)
-
-    while i < len(words):
-        found_repeat = False
-        # Probar ventanas desde las más grandes a las más pequeñas
-        for phrase_len in range(MAX_PHRASE, 3, -1):
-            if i + phrase_len * 2 > len(words):
-                continue
-            phrase = words[i:i + phrase_len]
-            next_phrase = words[i + phrase_len:i + phrase_len * 2]
-            if phrase == next_phrase:
-                result.extend(phrase)
-                i += phrase_len
-                # Colapsar repeticiones consecutivas adicionales del mismo fragmento
-                while i + phrase_len <= len(words) and words[i:i + phrase_len] == phrase:
-                    i += phrase_len
-                found_repeat = True
-                break
-        if not found_repeat:
-            result.append(words[i])
-            i += 1
-
-    cleaned = ' '.join(result)
-    logger.debug(f"remove_repetitions: {len(words)} palabras → {len(result)} palabras")
-    return cleaned
+    if request.url.path.startswith("/api/") and request.method not in ("GET", "HEAD", "OPTIONS"):
+        origin = request.headers.get("origin")
+        if origin and "*" not in ALLOWED_ORIGINS and origin not in ALLOWED_ORIGINS:
+            # Mismo host que sirve la app (p. ej. acceso por IP en la red con HOST=0.0.0.0)
+            if origin.split("://", 1)[-1] != request.headers.get("host", ""):
+                logger.warning(f"Petición bloqueada desde origen no permitido: {origin}")
+                return JSONResponse(status_code=403, content={"detail": "Origen no permitido."})
+    return await call_next(request)
 
 
-def cleanup_transcript_with_ai(text: str, client=None, target_lang="es", is_local_video=False) -> str:
-    """Usa la IA para limpiar repeticiones, corregir puntuación y añadir párrafos en el idioma elegido."""
-    actual_client = client or groq_client
-    if not actual_client or len(text) < 50:
-        return text
-
-    if len(text) > 40000:
-        logger.info(f"Transcripción muy larga ({len(text)} caracteres). Omitiendo limpieza IA para evitar límites de API.")
-        return text
-    
-    lang_name = "Español" if target_lang == "es" else ("Inglés" if target_lang == "en" else "el idioma original del video")
-    
-    try:
-        max_chunk_length = 6000
-        if len(text) > max_chunk_length:
-            chunks = [text[i:i+max_chunk_length] for i in range(0, len(text), max_chunk_length)]
-            cleaned_chunks = []
-            for chunk in chunks:
-                if is_local_video:
-                    prompt = f"""Actúa como un corrector de estilo estricto. Tu único objetivo es tomar esta transcripción cruda y aplicar correcciones ortotipográficas para facilitar su lectura, manteniendo el 100% del contenido original hablado.
-
-Instrucciones de edición:
-
-Preservación absoluta: NO resumas, NO unifiques temas, NO omitas redundancias ni cambies las palabras del entrevistado o entrevistador. Los periodistas necesitan la desgrabación exacta para extraer sus propias citas.
-
-Corrección de formato: Limítate a corregir puntuación (comas, puntos, signos de interrogación), uso de mayúsculas y separar correctamente los párrafos para que el bloque de texto sea legible.
-
-Limpieza mínima: Solo puedes limpiar tartamudeos o muletillas extremas (ej. "eh...", "este...") si interrumpen gravemente la lectura, pero no debes eliminar ninguna anécdotas, dato repetido o interacción de la mesa.
-
-Regla estricta de formato (Cero Artefactos):
-Tu respuesta debe contener ÚNICAMENTE la desgrabación procesada. Está estrictamente prohibido incluir saludos, introducciones (como "Aquí tienes la desgrabación" o "Texto corregido:"), viñetas explicativas o conclusiones al final. Empieza directamente con la primera palabra de la entrevista y termina con el último punto.
-
-Procesa el texto que se encuentra a continuación entre las etiquetas [INICIO DEL TEXTO] y [FIN DEL TEXTO]:
-
-[INICIO DEL TEXTO]
-{chunk}
-[FIN DEL TEXTO]"""
-                else:
-                    prompt = f"""Sos un editor experto. Tu tarea es LIMPIAR y FORMATEAR esta parte de una transcripción.
-                    1. ELIMINÁ repeticiones de frases.
-                    2. AGREGÁ puntuación (comas, puntos).
-                    3. DIVIDÍ en párrafos con doble salto de línea.
-                    4. EL IDIOMA DE SALIDA DEBE SER: {lang_name}.
-                    5. NO RESUMAS, mantené el contenido original.
-                    TEXTO:
-                    {chunk}"""
-                completion = actual_client.chat.completions.create(
-                    model=GROQ_MODEL,
-                    messages=[{"role": "user", "content": prompt}],
-                    temperature=0.3,
-                    max_tokens=4000,
-                )
-                cleaned_chunks.append(completion.choices[0].message.content.strip())
-            return "\n\n".join(cleaned_chunks)
-        else:
-            if is_local_video:
-                prompt = f"""Actúa como un corrector de estilo estricto. Tu único objetivo es tomar esta transcripción cruda y aplicar correcciones ortotipográficas para facilitar su lectura, manteniendo el 100% del contenido original hablado.
-
-Instrucciones de edición:
-
-Preservación absoluta: NO resumas, NO unifiques temas, NO omitas redundancias ni cambies las palabras del entrevistado o entrevistador. Los periodistas necesitan la desgrabación exacta para extraer sus propias citas.
-
-Corrección de formato: Limítate a corregir puntuación (comas, puntos, signos de interrogación), uso de mayúsculas y separar correctamente los párrafos para que el bloque de texto sea legible.
-
-Limpieza mínima: Solo puedes limpiar tartamudeos o muletillas extremas (ej. "eh...", "este...") si interrumpen gravemente la lectura, pero no debes eliminar ninguna anécdotas, dato repetido o interacción de la mesa.
-
-Regla estricta de formato (Cero Artefactos):
-Tu respuesta debe contener ÚNICAMENTE la desgrabación procesada. Está estrictamente prohibido incluir saludos, introducciones (como "Aquí tienes la desgrabación" o "Texto corregido:"), viñetas explicativas o conclusiones al final. Empieza directamente con la primera palabra de la entrevista y termina con el último punto.
-
-Procesa el texto que se encuentra a continuación entre las etiquetas [INICIO DEL TEXTO] y [FIN DEL TEXTO]:
-
-[INICIO DEL TEXTO]
-{text}
-[FIN DEL TEXTO]"""
-            else:
-                prompt = f"""Sos un editor experto. Tu tarea es LIMPIAR y FORMATEAR la siguiente transcripción de un video.
-                1. ELIMINÁ repeticiones de frases.
-                2. AGREGÁ puntuación correcta (comas, puntos).
-                3. DIVIDÍ el texto en párrafos lógicos con doble salto de línea.
-                4. EL IDIOMA DE SALIDA DEBE SER: {lang_name}.
-                5. NO RESUMAS, mantené el contenido original.
-                TRANSCRIPCIÓN:
-                {text}"""
-            completion = actual_client.chat.completions.create(
-                model=GROQ_MODEL,
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.3,
-                max_tokens=4000,
-            )
-            return completion.choices[0].message.content.strip()
-    except Exception as e:
-        logger.exception("Error limpiando transcripción con IA")
-        return text
+def require_admin(request: Request):
+    """Si ADMIN_TOKEN está definido, exige el header X-ADMIN-TOKEN."""
+    if ADMIN_TOKEN:
+        provided = request.headers.get('X-ADMIN-TOKEN', '')
+        if not hmac.compare_digest(provided, ADMIN_TOKEN):
+            raise HTTPException(status_code=403, detail="Se requiere token de administrador para esta operación.")
 
 
-# --- PROGRESO GLOBAL (TTLCache: auto-limpia entradas > 2h para evitar memory leak) ---
-try:
-    from cachetools import TTLCache
+# ─── PROGRESO, LOGS Y RESULTADOS (memoria, con vencimiento) ──────────────────
+if TTLCache:
     progress_store = TTLCache(maxsize=500, ttl=7200)
-    log_store      = TTLCache(maxsize=500, ttl=7200)
-except ImportError:
-    # cachetools no instalado — fallback a dict simple
-    progress_store = {}
-    log_store = {}
-    logger.warning("cachetools no disponible. progress_store y log_store usarán dict simple (sin TTL).")
+    log_store = TTLCache(maxsize=500, ttl=7200)
+    result_store = TTLCache(maxsize=100, ttl=3600)
+else:  # pragma: no cover
+    progress_store, log_store, result_store = {}, {}, {}
 
-def update_progress(uid: str, progress: int, text: str):
+
+def update_progress(uid: Optional[str], progress: int, text: str):
     if uid:
         progress_store[uid] = {"progress": progress, "text": text}
         add_log(uid, f"Progreso {progress}%: {text}")
 
-def add_log(uid: str, message: str):
-    if not uid: return
-    if uid not in log_store: log_store[uid] = []
-    timestamp = time.strftime("%H:%M:%S")
-    log_store[uid].append(f"[{timestamp}] {message}")
-    logger.debug(f"LOG [{uid}]: {message}")
 
-def get_session_logs(uid: str) -> str:
-    return "\n".join(log_store.get(uid, ["No hay logs disponibles para esta sesion."]))
+def add_log(uid: Optional[str], message: str):
+    logger.debug(f"[{uid}] {message}")
+    if not uid:
+        return
+    log_store.setdefault(uid, []).append(f"[{time.strftime('%H:%M:%S')}] {message}")
+
+
+def store_result(uid: Optional[str], result: dict):
+    if uid:
+        result_store[uid] = result
+
 
 @app.get("/api/progress/{uid}")
 async def get_progress(uid: str):
     return progress_store.get(uid, {"progress": 0, "text": "Procesando en el servidor..."})
 
-# --- MODELOS DE DATOS ---
-class VideoRequest(BaseModel):
-    url: str
-    format_id: Optional[str] = "best"
-    start_time: Optional[str] = None
-    end_time: Optional[str] = None
-    groq_api_key: Optional[str] = None
-    uid: Optional[str] = None
-    target_lang: Optional[str] = "es" # es, en, original
 
 @app.get("/api/logs/{uid}")
 async def get_logs(uid: str):
-    return JSONResponse(content={"logs": get_session_logs(uid)})
+    return {"logs": "\n".join(log_store.get(uid, ["No hay logs disponibles para esta sesion."]))}
 
 
+@app.get("/api/result/{uid}")
+async def get_transcript_result(uid: str):
+    """Recupera una transcripción terminada si la conexión del navegador se cortó."""
+    result = result_store.get(uid)
+    if result is None:
+        raise HTTPException(status_code=404, detail="Resultado no disponible. La transcripción puede no haber terminado o el UID es incorrecto.")
+    return result
 
 
-# --- ENDPOINTS ---
+# ─── CACHÉ DE TRANSCRIPCIONES (SQLite) ───────────────────────────────────────
+
+def db_connect():
+    return sqlite3.connect(DB_FILE, timeout=10)
 
 
-# --- DETECCIÓN DE BUNNY STREAM EMBEBIDO EN PÁGINAS WEB ---
-def detect_bunny_embed(page_url: str) -> str | None:
-    """
-    Descarga el HTML de una página y busca iframes de Bunny Stream
-    (iframe.mediadelivery.net) o playlists HLS de Bunny CDN (b-cdn.net).
-    
-    Retorna la URL del iframe de Bunny si se encuentra, o None.
-    Esta URL es compatible con el extractor [BunnyCdn] de yt-dlp.
-    """
-    # Si ya es una URL de Bunny directa, no hacer scraping
-    if 'mediadelivery.net' in page_url or 'b-cdn.net' in page_url:
-        return None  # Ya es Bunny, no necesita resolución
-    
-    # Solo analizar páginas web normales (no YouTube, Instagram, etc.)
-    known_platforms = [
-        'youtube.com', 'youtu.be', 'instagram.com', 'tiktok.com',
-        'twitter.com', 'x.com', 'facebook.com', 'fb.watch', 'fb.com',
-        'vm.tiktok.com', 't.co'
-    ]
-    if any(p in page_url for p in known_platforms):
-        return None
-
-    try:
-        logger.debug(f"Buscando embed Bunny en: {page_url}")
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-            'Accept-Language': 'es-419,es;q=0.9,en;q=0.8',
-        }
-        
-        # Intentar con cookies del sitio si están disponibles
-        cookie_path = os.path.join(BASE_DIR, 'cookies.txt')
-        session_cookies = {}
-        if os.path.exists(cookie_path):
+def init_db():
+    with db_connect() as conn:
+        conn.execute('''CREATE TABLE IF NOT EXISTS transcripts
+                        (url TEXT PRIMARY KEY, transcript TEXT, date_added TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+        if os.path.exists(CACHE_FILE):  # migración del formato JSON viejo
+            logger.info("Migrando historial de JSON a SQLite...")
             try:
-                import http.cookiejar
-                cj = http.cookiejar.MozillaCookieJar(cookie_path)
-                cj.load(ignore_discard=True, ignore_expires=True)
-                for c in cj:
-                    session_cookies[c.name] = c.value
+                with open(CACHE_FILE, 'r', encoding='utf-8') as f:
+                    for url, text in json.load(f).items():
+                        conn.execute("INSERT OR IGNORE INTO transcripts (url, transcript) VALUES (?, ?)", (url, text))
+                conn.commit()
+                os.replace(CACHE_FILE, CACHE_FILE + ".migrated")
             except Exception:
-                pass
-        
-        resp = requests.get(page_url, headers=headers, cookies=session_cookies, timeout=15, allow_redirects=True)
-        if resp.status_code != 200:
-            logger.debug(f"detect_bunny_embed: HTTP {resp.status_code} para {page_url}")
-            return None
-        
-        html = resp.text
-        
-        # Patrón 1: iframe de Bunny Stream
-        # <iframe src="https://iframe.mediadelivery.net/embed/745929/VIDEO-ID" ...>
-        iframe_pattern = re.search(
-            r'["\']?(https?://iframe\.mediadelivery\.net/embed/[\d]+/[a-f0-9\-]+)["\'\s]',
-            html, re.IGNORECASE
-        )
-        if iframe_pattern:
-            embed_url = iframe_pattern.group(1).strip().strip("\"'")
-            logger.info(f"Bunny iframe detectado: {embed_url}")
-            return embed_url
-        
-        # Patrón 2: src del player de Bunny con el video ID
-        # src="https://player.mediadelivery.net/.../VIDEO-ID/..."
-        player_pattern = re.search(
-            r'mediadelivery\.net[^"\']*?/embed/[\d]+/([a-f0-9\-]{36})',
-            html, re.IGNORECASE
-        )
-        if player_pattern:
-            video_id = player_pattern.group(1)
-            # Necesitamos el library ID también
-            lib_pattern = re.search(
-                r'mediadelivery\.net[^"\']*?/embed/([\d]+)/' + re.escape(video_id),
-                html, re.IGNORECASE
-            )
-            if lib_pattern:
-                library_id = lib_pattern.group(1)
-                embed_url = f"https://iframe.mediadelivery.net/embed/{library_id}/{video_id}"
-                logger.info(f"Bunny player detectado, embed URL: {embed_url}")
-                return embed_url
-
-        # Patrón 3: playlist HLS de Bunny CDN directo en el HTML
-        # src="https://vz-XXXX.b-cdn.net/VIDEO-ID/playlist.m3u8"
-        m3u8_pattern = re.search(
-            r'["\']?(https?://[a-z0-9\-]+\.b-cdn\.net/[a-f0-9\-]+/playlist\.m3u8)["\']?',
-            html, re.IGNORECASE
-        )
-        if m3u8_pattern:
-            m3u8_url = m3u8_pattern.group(1).strip().strip("\"'")
-            logger.info(f"Bunny m3u8 detectado: {m3u8_url} (necesita Referer: {page_url})")
-            # Para el m3u8 necesitamos el referer; devolvemos una tupla especial
-            # Pero como solo podemos retornar str|None, retornamos el m3u8 URL
-            # y el Referer se agrega en get_robust_opts al detectar b-cdn.net
-            return m3u8_url
-
-        logger.debug(f"No se encontró embed Bunny en {page_url}")
-        return None
-
-    except Exception as e:
-        logger.debug(f"detect_bunny_embed error para {page_url}: {e}")
-        return None
+                logger.exception("Error en migración de cache JSON a SQLite")
 
 
-# --- SANITIZACIÓN DE URLS ---
-def sanitize_url(url: str) -> str:
-    """
-    Normaliza URLs de video antes de pasarlas a yt-dlp.
-    Problemas que resuelve:
-    - youtu.be/ID?si=... → youtube.com/watch?v=ID
-    - watch?v=ID&feature=youtu.be → watch?v=ID
-    - Elimina parámetros de tracking/referral que confunden a yt-dlp
-    - Pasa URLs de Bunny CDN / MediaDelivery sin modificar
-    """
-    from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
-    url = url.strip()
-
+def cache_get(key: str) -> Optional[dict]:
     try:
-        parsed = urlparse(url)
-
-        # URLs de Bunny CDN / MediaDelivery: pasar sin modificar
-        if 'mediadelivery.net' in parsed.netloc or 'b-cdn.net' in parsed.netloc:
-            logger.debug(f"URL Bunny CDN, sin modificar → {url}")
-            return url
-
-        # Convertir youtu.be → youtube.com/watch?v=
-        if parsed.netloc in ('youtu.be', 'www.youtu.be'):
-            video_id = parsed.path.lstrip('/')
-            if video_id:
-                url = f"https://www.youtube.com/watch?v={video_id}"
-                parsed = urlparse(url)
-        
-        # Para URLs de YouTube, limpiar parámetros no esenciales
-        if 'youtube.com' in parsed.netloc:
-            qs = parse_qs(parsed.query, keep_blank_values=False)
-            # Solo conservar v, list, index, t (tiempo)
-            clean_params = {k: v for k, v in qs.items() if k in ('v', 'list', 'index', 't')}
-            new_query = urlencode({k: v[0] for k, v in clean_params.items()})
-            url = urlunparse(parsed._replace(query=new_query))
-    except Exception as e:
-        logger.debug(f"sanitize_url error, usando original: {e}")
-
-    logger.debug(f"URL sanitizada → {url}")
-    return url
+        with db_connect() as conn:
+            row = conn.execute("SELECT transcript FROM transcripts WHERE url = ?", (key,)).fetchone()
+    except Exception:
+        logger.exception("Error leyendo cache")
+        return None
+    if not row:
+        return None
+    try:
+        parsed = json.loads(row[0])
+        if isinstance(parsed, dict) and "transcript" in parsed:
+            return parsed
+    except (TypeError, ValueError):
+        pass
+    return {"transcript": row[0], "srt": "", "segments": []}  # entradas viejas (solo texto)
 
 
-def get_robust_opts(target_url, extra={}):
-    """Genera opciones unificadas para yt-dlp con soporte para cookies locales y de entorno."""
-    USER_AGENTS = [
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/122.0.0.0 Safari/537.36',
-        'Mozilla/5.0 (Macintosh; Intel Mac OS X 14_3_1) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-        'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36 Edg/121.0.0.0',
-        'Mozilla/5.0 (iPhone; CPU iPhone OS 17_3_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.3.1 Mobile/15E148 Safari/604.1'
-    ]
+def cache_set(key: str, data: dict):
+    try:
+        with db_connect() as conn:
+            conn.execute("INSERT OR REPLACE INTO transcripts (url, transcript) VALUES (?, ?)", (key, json.dumps(data)))
+    except Exception:
+        logger.exception("Error guardando en cache")
 
-    is_instagram = 'instagram.com' in target_url
-    is_youtube = 'youtube.com' in target_url or 'youtu.be' in target_url
-    is_tiktok = 'tiktok.com' in target_url or 'vm.tiktok.com' in target_url
-    is_twitter = 'twitter.com' in target_url or 'x.com' in target_url or 't.co' in target_url
-    is_facebook = 'facebook.com' in target_url or 'fb.watch' in target_url or 'fb.com' in target_url
 
-    cookie_path = os.path.join(BASE_DIR, 'cookies.txt')
-    ig_cookie_path = os.path.join(BASE_DIR, 'cookies_ig.txt')
-    # Soporte para modo portable (.exe): el launcher inyecta COOKIES_PATH
-    # apuntando al archivo al lado del .exe
-    portable_cookie_path = os.environ.get('COOKIES_PATH', '')
+init_db()
 
+
+# ─── YT-DLP ──────────────────────────────────────────────────────────────────
+
+USER_AGENTS = [
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 14_3_1) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36 Edg/124.0.0.0',
+]
+DESKTOP_UA = USER_AGENTS[0]
+MOBILE_UA = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_3_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.3.1 Mobile/15E148 Safari/604.1'
+
+_env_cookie_files: dict = {}
+
+
+def _cookie_file_from_env(var_names) -> Optional[str]:
+    """Cookies en base64 por variable de entorno (Render/Docker). Se escriben una sola vez."""
+    for var in var_names:
+        b64 = os.environ.get(var)
+        if not b64:
+            continue
+        if var not in _env_cookie_files:
+            try:
+                tmp = tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False, encoding='utf-8')
+                tmp.write(base64.b64decode(b64).decode())
+                tmp.close()
+                _env_cookie_files[var] = tmp.name
+            except Exception:
+                logger.exception(f"Cookies inválidas en {var}")
+                continue
+        return _env_cookie_files[var]
+    return None
+
+
+def find_cookie_file(url: str) -> Optional[str]:
+    is_instagram = host_matches(url, INSTAGRAM_DOMAINS)
+    env_vars = ['INSTAGRAM_COOKIES_B64', 'COOKIES_B64'] if is_instagram else ['COOKIES_B64']
+    env_file = _cookie_file_from_env(env_vars)
+    if env_file:
+        return env_file
+    names = ['cookies_ig.txt', 'cookies.txt'] if is_instagram else ['cookies.txt']
+    candidates = [os.environ.get('COOKIES_PATH', '')]
+    for name in names:
+        candidates += [f'/etc/secrets/{name}', os.path.join(BASE_DIR, name), os.path.join(ROOT_DIR, name)]
+    return next((p for p in candidates if p and os.path.exists(p)), None)
+
+
+def get_robust_opts(target_url: str, extra: Optional[dict] = None) -> dict:
+    """Opciones base de yt-dlp: cookies, user-agent y headers por plataforma."""
     opts = {
-        'quiet': False,
+        'quiet': True,
         'no_warnings': False,
         'cachedir': False,
         'noplaylist': True,
@@ -744,129 +274,156 @@ def get_robust_opts(target_url, extra={}):
         'user_agent': random.choice(USER_AGENTS),
         'js_runtimes': {'deno': {}, 'node': {}},
         'remote_components': ['ejs:github'],
-        **extra
     }
+    if FFMPEG_BIN:
+        opts['ffmpeg_location'] = FFMPEG_BIN
+    cookie = find_cookie_file(target_url)
+    if cookie:
+        opts['cookiefile'] = cookie
 
-    # Seleccionar cookies según plataforma
-    if is_instagram:
-        cookie_b64 = os.environ.get('INSTAGRAM_COOKIES_B64') or os.environ.get('COOKIES_B64')
-        # Buscar primero cookies_ig.txt y usar cookies.txt como fallback
-        local_paths = ['/etc/secrets/cookies_ig.txt', ig_cookie_path, '/etc/secrets/cookies.txt', cookie_path]
-        if portable_cookie_path:
-            local_paths.insert(0, portable_cookie_path)
-    else:
-        cookie_b64 = os.environ.get('COOKIES_B64')
-        local_paths = ['/etc/secrets/cookies.txt', cookie_path]
-        if portable_cookie_path:
-            local_paths.insert(0, portable_cookie_path)
+    if host_matches(target_url, TIKTOK_DOMAINS):
+        opts['user_agent'] = MOBILE_UA
+        opts['http_headers'] = {'Referer': 'https://www.tiktok.com/', 'Accept-Language': 'es-419,es;q=0.9,en;q=0.8'}
+    elif host_matches(target_url, YOUTUBE_DOMAINS + TWITTER_DOMAINS + FACEBOOK_DOMAINS) or 'mediadelivery.net' in target_url:
+        opts['user_agent'] = DESKTOP_UA
+    elif 'b-cdn.net' in target_url and 'playlist.m3u8' in target_url:
+        referer = os.environ.get('BUNNY_REFERER', '')
+        if referer:
+            opts['http_headers'] = {'Referer': referer}
 
-    # Cargar cookies desde variable de entorno
-    if cookie_b64:
-        try:
-            cookie_data = base64.b64decode(cookie_b64).decode()
-            temp_cookie = tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False)
-            temp_cookie.write(cookie_data)
-            temp_cookie.close()
-            opts['cookiefile'] = temp_cookie.name
-            platform = 'Instagram' if is_instagram else 'YouTube'
-            logger.debug(f"Cargando cookies [{platform}] desde variable de entorno (Temp: {temp_cookie.name})")
-        except Exception as e:
-            logger.exception("Error cargando cookies desde variable de entorno")
-
-    # Fallback a archivo local
-    if 'cookiefile' not in opts:
-        for path_candidate in local_paths:
-            if os.path.exists(path_candidate):
-                logger.debug(f"Cargando cookies desde archivo {path_candidate}")
-                opts['cookiefile'] = path_candidate
-                break
-
-    # Estrategia específica por plataforma
-    if is_youtube:
-        # Usamos un User-Agent de Desktop reciente para que no restrinja los formatos
-        opts['user_agent'] = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/124.0.0.0 Safari/537.36'
-        logger.debug(f"Estrategia YouTube optimizada (Cookies: {'Si' if 'cookiefile' in opts else 'No'})")
-
-    elif is_tiktok:
-        # TikTok requiere user-agent móvil y headers específicos
-        opts['user_agent'] = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_3_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.3.1 Mobile/15E148 Safari/604.1'
-        opts['http_headers'] = {
-            'Referer': 'https://www.tiktok.com/',
-            'Accept-Language': 'es-419,es;q=0.9,en;q=0.8',
-        }
-
-    elif is_twitter:
-        # Twitter/X funciona mejor con user-agent desktop Chrome reciente
-        opts['user_agent'] = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
-
-    elif is_facebook:
-        # Facebook requiere cookies para la mayoría del contenido público
-        opts['user_agent'] = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
-
-    # Bunny CDN: m3u8 directo requiere Referer para evitar 403
-    # Para iframe.mediadelivery.net no hace falta (yt-dlp tiene extractor nativo)
-    is_bunny_m3u8 = 'b-cdn.net' in target_url and 'playlist.m3u8' in target_url
-    is_bunny_iframe = 'mediadelivery.net' in target_url
-    if is_bunny_m3u8:
-        # Intentar extraer el dominio referer del entorno, o usar un genérico
-        bunny_referer = os.environ.get('BUNNY_REFERER', '')
-        if bunny_referer:
-            opts['http_headers'] = {'Referer': bunny_referer}
-            logger.debug(f"Bunny m3u8: usando Referer {bunny_referer}")
-        else:
-            logger.debug("Bunny m3u8: sin Referer configurado (puede fallar con 403)")
-    elif is_bunny_iframe:
-        opts['user_agent'] = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
-        logger.debug("Bunny iframe MediaDelivery: usando extractor nativo BunnyCdn")
-
+    opts.update(extra or {})
     return opts
 
-# --- INSTAGRAM CON INSTALOADER ---
 
-def get_instagram_info(url):
-    """Extrae info de un Reel/Video de Instagram usando instaloader."""
+def _strategies(url: str) -> list:
+    """Estrategias en orden: normal (con cookies), móvil sin cookies, solo iOS."""
+    def no_cookies(clients):
+        def apply(opts):
+            opts.pop('cookiefile', None)
+            opts['extractor_args'] = {'youtube': {'player_client': clients}}
+        return apply
+    strategies = [("normal", lambda o: None)]
+    if host_matches(url, YOUTUBE_DOMAINS):
+        strategies += [("móvil sin cookies", no_cookies(['android', 'ios'])), ("solo iOS", no_cookies(['ios']))]
+    return strategies
+
+
+def ytdlp_extract(url: str, extra: Optional[dict] = None) -> dict:
+    """extract_info con reintentos (bloqueante)."""
+    errors = []
+    for name, tweak in _strategies(url):
+        opts = get_robust_opts(url, extra)
+        tweak(opts)
+        try:
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                info = ydl.extract_info(url, download=False)
+            if info:
+                return info
+        except Exception as e:
+            errors.append(f"{name}: {str(e)[:150]}")
+            logger.debug(f"extract_info ({name}) falló: {e}")
+    raise RuntimeError(" | ".join(errors) or "Sin información")
+
+
+def ytdlp_download(url: str, extra: dict, done_check, on_attempt=None):
+    """
+    Descarga con reintentos (bloqueante). done_check() decide si el intento
+    produjo lo esperado (yt-dlp a veces "termina bien" sin bajar nada).
+    """
+    errors = []
+    for n, (name, tweak) in enumerate(_strategies(url), start=1):
+        if on_attempt:
+            on_attempt(n, name)
+        opts = get_robust_opts(url, extra)
+        tweak(opts)
+        try:
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                ydl.download([url])
+        except Exception as e:
+            errors.append(f"{name}: {str(e)[:150]}")
+            logger.debug(f"Descarga ({name}) falló: {e}")
+        if done_check():
+            return
+    raise RuntimeError(" | ".join(errors) or "yt-dlp no descargó ningún archivo")
+
+
+# ─── BUNNY STREAM (videos embebidos en páginas web) ──────────────────────────
+
+KNOWN_PLATFORMS = YOUTUBE_DOMAINS + INSTAGRAM_DOMAINS + TIKTOK_DOMAINS + TWITTER_DOMAINS + FACEBOOK_DOMAINS
+
+
+def detect_bunny_embed(page_url: str) -> Optional[str]:
+    """Busca un iframe de Bunny Stream o un m3u8 de Bunny CDN en una página web."""
+    if 'mediadelivery.net' in page_url or 'b-cdn.net' in page_url:
+        return None
+    if host_matches(page_url, KNOWN_PLATFORMS) or not page_url.startswith(('http://', 'https://')):
+        return None
+    try:
+        cookies = {}
+        cookie_path = os.path.join(BASE_DIR, 'cookies.txt')
+        if os.path.exists(cookie_path):
+            try:
+                cj = http.cookiejar.MozillaCookieJar(cookie_path)
+                cj.load(ignore_discard=True, ignore_expires=True)
+                cookies = {c.name: c.value for c in cj}
+            except Exception:
+                pass
+        resp = requests.get(page_url, headers={'User-Agent': DESKTOP_UA, 'Accept-Language': 'es-419,es;q=0.9,en;q=0.8'},
+                            cookies=cookies, timeout=15)
+        if resp.status_code != 200:
+            return None
+        html = resp.text
+        m = re.search(r'(https?://iframe\.mediadelivery\.net/embed/\d+/[a-f0-9\-]+)', html, re.I)
+        if m:
+            return m.group(1)
+        m = re.search(r'mediadelivery\.net[^"\']*?/embed/(\d+)/([a-f0-9\-]{36})', html, re.I)
+        if m:
+            return f"https://iframe.mediadelivery.net/embed/{m.group(1)}/{m.group(2)}"
+        m = re.search(r'(https?://[a-z0-9\-]+\.b-cdn\.net/[a-f0-9\-]+/playlist\.m3u8)', html, re.I)
+        if m:
+            return m.group(1)
+    except Exception as e:
+        logger.debug(f"detect_bunny_embed error para {page_url}: {e}")
+    return None
+
+
+async def resolve_url(raw_url: str) -> str:
+    url = sanitize_url(raw_url)
+    if not url.startswith(('http://', 'https://')):
+        raise HTTPException(status_code=400, detail="La URL debe empezar con http:// o https://")
+    bunny = await run_light(detect_bunny_embed, url)
+    if bunny:
+        logger.info(f"Bunny embed encontrado en {url} → {bunny}")
+        return bunny
+    return url
+
+
+# ─── INSTAGRAM ───────────────────────────────────────────────────────────────
+
+def get_instagram_info(url: str) -> dict:
+    """Info de un Reel/Post de Instagram con instaloader (bloqueante)."""
     if not instaloader:
-        raise Exception("instaloader no está instalado")
-
-    ig_user = os.environ.get('IG_USER', '')
-    ig_pass = os.environ.get('IG_PASS', '')
-
-    L = instaloader.Instaloader(
-        download_videos=True,
-        download_video_thumbnails=True,
-        download_geotags=False,
-        download_comments=False,
-        save_metadata=False,
-        compress_json=False,
-        quiet=True,
-    )
-
+        raise RuntimeError("instaloader no está instalado")
+    L = instaloader.Instaloader(download_videos=True, download_video_thumbnails=True, download_geotags=False,
+                                download_comments=False, save_metadata=False, compress_json=False, quiet=True)
+    ig_user, ig_pass = os.environ.get('IG_USER', ''), os.environ.get('IG_PASS', '')
     if ig_user and ig_pass:
         try:
             L.login(ig_user, ig_pass)
-            logger.debug(f"Instaloader login OK como {ig_user}")
         except Exception as e:
             logger.debug(f"Instaloader login falló: {e}")
-
-    match = re.search(r'/(reel|p|tv)/([A-Za-z0-9_-]+)', url)
+    match = re.search(r'/(reel|reels|p|tv)/([A-Za-z0-9_-]+)', url)
     if not match:
-        raise Exception("No se pudo extraer el shortcode del URL de Instagram")
-
+        raise RuntimeError("No se pudo extraer el código del post de Instagram")
     shortcode = match.group(2)
-    logger.debug(f"Instaloader extrayendo shortcode: {shortcode}")
-
     post = instaloader.Post.from_shortcode(L.context, shortcode)
-
-    title = post.caption[:100] if post.caption else f"Instagram Reel {shortcode}"
-
     try:
         thumbnail = post.url
-    except:
+    except Exception:
         thumbnail = None
-
     return {
         'shortcode': shortcode,
-        'title': title,
+        'title': post.caption[:100] if post.caption else f"Instagram Reel {shortcode}",
         'thumbnail': thumbnail,
         'duration': int(post.video_duration) if post.is_video and post.video_duration else None,
         'uploader': post.owner_username,
@@ -874,1517 +431,75 @@ def get_instagram_info(url):
         'video_url': post.video_url if post.is_video else None,
     }
 
-def get_instagram_carousel_info(url, cookies_path=None):
-    """Extrae la lista de imágenes/videos de un carrusel de Instagram usando gallery-dl."""
-    venv_dir = os.path.join(ROOT_DIR, "backend", "venv")
-    gallery_dl_bin = os.path.join(venv_dir, "Scripts", "gallery-dl.exe")
-    if not os.path.exists(gallery_dl_bin):
-        gallery_dl_bin = "gallery-dl" # fallback al path del sistema
-        
-    cmd = [gallery_dl_bin, "-j"]
+
+def get_instagram_carousel_info(url: str, cookies_path: Optional[str] = None) -> Optional[list]:
+    """Lista de imágenes/videos de un carrusel usando gallery-dl (bloqueante)."""
+    candidates = [
+        os.path.join(os.path.dirname(sys.executable), "gallery-dl.exe"),
+        os.path.join(os.path.dirname(sys.executable), "gallery-dl"),
+        os.path.join(BASE_DIR, "venv", "Scripts", "gallery-dl.exe"),
+    ]
+    gallery_dl = next((c for c in candidates if os.path.exists(c)), None) or shutil.which("gallery-dl")
+    if not gallery_dl:
+        logger.warning("gallery-dl no está instalado (pip install gallery-dl)")
+        return None
+    cmd = [gallery_dl, "-j"]
     if cookies_path and os.path.exists(cookies_path):
-        cmd.extend(["--cookies", cookies_path])
+        cmd += ["--cookies", cookies_path]
     cmd.append(url)
-    
-    logger.info(f"Ejecutando gallery-dl: {cmd}")
     try:
-        res = subprocess.run(cmd, capture_output=True, text=True, encoding='utf-8')
+        res = subprocess.run(cmd, capture_output=True, text=True, encoding='utf-8', timeout=120)
         if res.returncode != 0:
-            logger.warning(f"gallery-dl falló con código {res.returncode}: {res.stderr}")
+            logger.warning(f"gallery-dl falló ({res.returncode}): {res.stderr[:300]}")
             return None
-        
-        data = json.loads(res.stdout)
-        files = []
-        for item in data:
-            if isinstance(item, list) and len(item) >= 3 and item[0] == 3:
-                files.append({
-                    "url": item[1],
-                    "metadata": item[2]
-                })
-        return files
-    except Exception as e:
-        logger.exception(f"Error extrayendo carrusel con gallery-dl: {e}")
+        return [{"url": item[1], "metadata": item[2]} for item in json.loads(res.stdout)
+                if isinstance(item, list) and len(item) >= 3 and item[0] == 3]
+    except Exception:
+        logger.exception("Error extrayendo carrusel con gallery-dl")
         return None
 
-# --- ENDPOINTS ---
 
-@app.post("/api/video-info")
-async def get_video_info(req: VideoRequest, request: Request):
-    url = sanitize_url(req.url)
-
-    # --- BUNNY STREAM: detectar iframe embebido en páginas web ---
-    # Si la URL es de una página web normal (no una plataforma conocida),
-    # intentamos extraer el embed de Bunny Stream que pueda tener
-    bunny_url = await asyncio.to_thread(detect_bunny_embed, url)
-    if bunny_url:
-        logger.info(f"Bunny embed encontrado en {url} → {bunny_url}")
-        url = bunny_url
-
-    is_instagram = 'instagram.com' in url
-
-    # --- INSTAGRAM: usar instaloader ---
-    if is_instagram and instaloader:
-
-        try:
-            ig_info = await asyncio.to_thread(get_instagram_info, url)
-            if ig_info['is_video']:
-                formats = [
-                    {'format_id': 'best', 'ext': 'mp4', 'resolution': 'Mejor calidad', 'filesize': None, 'label': 'Mejor calidad (.mp4)'},
-                    {'format_id': 'mp3',  'ext': 'mp3', 'resolution': 'Solo audio',    'filesize': None, 'label': 'Solo audio (.mp3)'},
-                ]
-            else:
-                formats = [{'format_id': 'best', 'ext': 'jpg', 'resolution': 'Imagen original', 'filesize': None, 'label': 'Imagen original (.jpg)'}]
-
-            thumbnail = ig_info.get('thumbnail')
-            if thumbnail:
-                from urllib.parse import quote
-                thumbnail = f"/api/proxy-thumbnail?url={quote(thumbnail, safe='')}"
-
-            return {
-                'title': ig_info['title'],
-                'thumbnail': thumbnail,
-                'max_res_thumbnail': thumbnail,
-                'duration': ig_info.get('duration'),
-                'uploader': ig_info.get('uploader', 'Instagram'),
-                'description': ig_info['title'],
-                'formats': formats,
-                'has_ffmpeg': True,
-                'has_subtitles': False,
-            }
-        except Exception as e:
-            logger.debug(f"Instaloader falló, intentando con yt-dlp: {e}")
-
-    is_youtube = 'youtube.com' in url or 'youtu.be' in url
-
-    info = None
-    last_error = ""
-    
-    # --- INTENTO 1: Estrategia Optimizada (Basada en get_robust_opts) ---
-    try:
-        logger.debug("Intento 1 - Estrategia optimizada...")
-        opts = get_robust_opts(url)
-        info = await run_blocking(extract_info_sync, opts, url)
-    except Exception as e:
-        last_error = str(e)
-        logger.debug(f"Intento 1 falló: {last_error[:100]}")
-
-    # --- INTENTO 2: Forzar Móvil SIN COOKIES (Para saltar n-challenge) ---
-    if not info and is_youtube:
-        try:
-            logger.debug("Intento 2 - Forzando móvil SIN cookies...")
-            opts = get_robust_opts(url)
-            opts.pop('cookiefile', None) # Quitamos cookies para que no las ignore
-            opts['extractor_args'] = {'youtube': {'player_client': ['android', 'ios']}}
-            info = await run_blocking(extract_info_sync, opts, url)
-        except Exception as e:
-            last_error += f" | Intento 2: {str(e)[:100]}"
-            logger.debug(f"Intento 2 falló: {str(e)[:100]}")
-
-    # --- INTENTO 3: Forzar iOS (Último recurso) ---
-    if not info and is_youtube:
-        try:
-            logger.debug("Intento 3 - Forzando solo iOS...")
-            opts = get_robust_opts(url)
-            opts.pop('cookiefile', None)
-            opts['extractor_args'] = {'youtube': {'player_client': ['ios']}}
-            info = await run_blocking(extract_info_sync, opts, url)
-        except Exception as e:
-            last_error += f" | Intento 3: {str(e)[:100]}"
-            logger.debug(f"Intento 3 falló: {str(e)[:100]}")
-
-    if not info:
-        logger.error(f"EXTRACT_INFO FAILED for {url}.")
-        if is_instagram:
-            cookie_file = get_robust_opts(url).get('cookiefile')
-            files = await run_blocking(get_instagram_carousel_info, url, cookie_file)
-            if files:
-                first_file = files[0]
-                metadata = first_file.get("metadata", {})
-                title = metadata.get("description") or f"Instagram Post {metadata.get('post_shortcode', '')}"
-                if len(title) > 100:
-                    title = title[:100] + "..."
-                uploader = metadata.get("username") or "Instagram User"
-                
-                thumbnail = first_file.get("url")
-                if thumbnail:
-                    from urllib.parse import quote
-                    thumbnail = f"/api/proxy-thumbnail?url={quote(thumbnail, safe='')}"
-                
-                formats = [{
-                    'format_id': 'carousel_images',
-                    'ext': 'zip',
-                    'resolution': 'Imágenes (ZIP)',
-                    'filesize': None,
-                    'label': f"Conjunto de {len(files)} imágenes (.zip)"
-                }]
-                
-                return {
-                    'title': title,
-                    'thumbnail': thumbnail,
-                    'max_res_thumbnail': thumbnail,
-                    'duration': None,
-                    'uploader': uploader,
-                    'description': metadata.get("description") or "",
-                    'formats': formats,
-                    'has_ffmpeg': True,
-                    'has_subtitles': False,
-                    'can_transcribe': True,
-                }
-
-        if is_instagram and "No video formats found" in last_error:
-            raise HTTPException(
-                status_code=400,
-                detail="Este post de Instagram no contiene video (es una publicación de fotos/imágenes). Clipadsk solo puede descargar o transcribir videos y audios."
-            )
-        raise HTTPException(
-            status_code=400, 
-            detail=f"No pudimos procesar este video. Puede ser privado o YouTube bloqueó la conexión. Errores: {last_error[:200]}"
-        )
-
-    # Procesar formatos
-    formats = []
-    seen_res = set()
-    all_formats = info.get('formats', [])
-    useful_formats = [f for f in all_formats if f.get('vcodec') != 'none']
-    useful_formats.sort(key=lambda x: (x.get('height') or 0), reverse=True)
-
-    for f in useful_formats:
-        height = f.get('height')
-        # Si no tiene height pero tiene resolution con formato WxH, extraer height
-        resolution_str = f.get('resolution')
-        if not height and resolution_str and 'x' in resolution_str:
-            try:
-                parts = resolution_str.split('x')
-                if len(parts) == 2:
-                    height = int(parts[1])
-            except ValueError:
-                pass
-
-        if height:
-            if height >= 2160:
-                res = "2160p (4K UHD)"
-            elif height >= 1440:
-                res = "1440p (2K QHD)"
-            elif height >= 1080:
-                res = "1080p (Full HD)"
-            elif height >= 720:
-                res = "720p (HD)"
-            elif height >= 480:
-                res = "480p (SD)"
-            elif height >= 360:
-                res = "360p (SD)"
-            else:
-                res = f"{height}p"
-        else:
-            note = f.get('format_note')
-            if note and not re.search(r'\d+x\d+', note) and len(note) < 15:
-                res = note
-            else:
-                res = "Calidad estándar"
-
-        ext = f.get('ext', 'mp4')
-        res_key = f"{res}_{ext}"
-        if res_key not in seen_res:
-            formats.append({
-                'format_id': f.get('format_id'),
-                'ext': ext,
-                'resolution': res,
-                'filesize': f.get('filesize') or f.get('filesize_approx'),
-                'label': f"{res} (.{ext})"
-            })
-            seen_res.add(res_key)
-
-    # Si no hay formatos (Shorts, videos con DRM, etc.), agregar opción genérica
-    if not formats:
-        formats.append({
-            'format_id': 'best',
-            'ext': 'mp4',
-            'resolution': 'Mejor calidad',
-            'filesize': None,
-            'label': 'Mejor calidad (.mp4)'
-        })
-
-    # Agregar la opción de descarga como MP3 para YouTube e Instagram (cualquier plataforma con audio)
-    if is_instagram or is_youtube:
-        formats.append({
-            'format_id': 'mp3',
-            'ext': 'mp3',
-            'resolution': 'Solo audio',
-            'filesize': None,
-            'label': 'Solo audio (.mp3)'
-        })
-
-    # Proxy para miniaturas de Instagram
-    # Se añade encoding y el prefijo /api/ para resolver problemas de carga en el frontend
-    thumbnail = info.get('thumbnail')
-    if 'instagram.com' in url and thumbnail:
-        from urllib.parse import quote
-        thumbnail = f"/api/proxy-thumbnail?url={quote(thumbnail, safe='')}"
-        logger.debug(f"Instagram Thumbnail proxied (with encoding): {thumbnail}")
-
-    return {
-        'title': info.get('title'),
-        'thumbnail': thumbnail,
-        'max_res_thumbnail': thumbnail,
-        'duration': info.get('duration'),
-        'uploader': info.get('uploader') or "Desconocido",
-        'description': (info.get('description') or 'Sin descripción')[:200] + '...',
-        'formats': formats,
-        'has_ffmpeg': True, # En Docker siempre tenemos FFmpeg
-        'has_subtitles': bool(info.get('subtitles') or info.get('automatic_captions'))
-    }
-
-@app.get("/api/result/{uid}")
-async def get_transcript_result(uid: str):
-    """
-    Recupera el resultado de una transcripción previamente completada por su UID.
-    Útil cuando la conexión HTTP se cortó durante un video largo pero el servidor
-    terminó el proceso correctamente.
-    """
-    result = get_stored_result(uid)
-    if result is None:
-        raise HTTPException(status_code=404, detail="Resultado no disponible. La transcripción puede no haber terminado o el UID es incorrecto.")
-    return result
+def proxied_thumbnail(url: Optional[str]) -> Optional[str]:
+    return f"/api/proxy-thumbnail?url={quote(url, safe='')}" if url else None
 
 
-@app.post("/api/transcript")
-async def get_transcript(req: VideoRequest):
-    url = sanitize_url(req.url)
-    uid = req.uid
-    lang = req.target_lang or "es"
+def http_download(url: str, dest: str, headers: dict, timeout: int = 60):
+    with requests.get(url, headers=headers, stream=True, timeout=timeout) as r:
+        r.raise_for_status()
+        with open(dest, 'wb') as f:
+            for chunk in r.iter_content(chunk_size=65536):
+                f.write(chunk)
 
-    # --- BUNNY STREAM: detectar embed en páginas web ---
-    bunny_url = await asyncio.to_thread(detect_bunny_embed, url)
-    if bunny_url:
-        logger.info(f"Bunny embed encontrado para transcripción: {bunny_url}")
-        url = bunny_url
 
-    add_log(uid, f"Iniciando transcripcion para: {url} | Idioma: {lang}")
+# ─── MODELOS ─────────────────────────────────────────────────────────────────
 
-    is_youtube = 'youtube.com' in url or 'youtu.be' in url
+class VideoRequest(BaseModel):
+    url: str
+    format_id: Optional[str] = "best"
+    start_time: Optional[str] = None
+    end_time: Optional[str] = None
+    groq_api_key: Optional[str] = None
+    uid: Optional[str] = None
+    target_lang: Optional[str] = "es"  # es, en, original
 
-    
-    # Cache por URL e Idioma
-    cache_key = f"{url}_{lang}"
-    cache = load_cache()
-    if cache_key in cache:
-        add_log(uid, "Resultado recuperado de cache local.")
-        cached_val = cache[cache_key]
-        try:
-            parsed = json.loads(cached_val)
-            if isinstance(parsed, dict) and "transcript" in parsed:
-                return {
-                    "transcript": parsed.get("transcript", ""),
-                    "srt": parsed.get("srt", ""),
-                    "segments": parsed.get("segments", []),
-                    "method": "cache"
-                }
-        except Exception:
-            pass
-        return {"transcript": cached_val, "method": "cache"}
-
-    # --- INSTAGRAM CAROUSEL OCR FALLBACK ---
-    is_instagram = 'instagram.com' in url
-    local_groq = get_local_groq(req.groq_api_key)
-    if is_instagram:
-        cookie_file = get_robust_opts(url).get('cookiefile')
-        files = await run_blocking(get_instagram_carousel_info, url, cookie_file)
-        if files:
-            only_images = True
-            for f in files:
-                meta = f.get("metadata", {})
-                ext = meta.get("extension") or ""
-                video_url = meta.get("video_url")
-                if video_url or ext.lower() in ('mp4', 'mov', 'avi', 'mkv', 'webm'):
-                    only_images = False
-                    break
-            
-            if only_images:
-                if not local_groq:
-                    raise HTTPException(
-                        status_code=400, 
-                        detail="Para extraer texto de imágenes (OCR), necesitás configurar la API Key de Groq en Configuración."
-                    )
-                add_log(uid, f"Detectado carrusel de imágenes ({len(files)} diapositivas). Iniciando OCR con Groq Vision...")
-                ocr_text = ""
-                total_files = len(files)
-                for idx, file_item in enumerate(files):
-                    img_url = file_item["url"]
-                    update_progress(req.uid, int((idx / total_files) * 90) + 5, f"Analizando diapositiva {idx+1}/{total_files}...")
-                    
-                    try:
-                        headers = {'User-Agent': 'Mozilla/5.0'}
-                        img_res = requests.get(img_url, headers=headers, timeout=20)
-                        if img_res.status_code == 200:
-                            b64_img = base64.b64encode(img_res.content).decode('utf-8')
-                            
-                            chat_completion = local_groq.chat.completions.create(
-                                messages=[
-                                    {
-                                        "role": "user",
-                                        "content": [
-                                            {
-                                                "type": "text",
-                                                "text": "Extract all readable text from this image. Return only the extracted text, keeping logical line breaks. Do not add any introductory or extra conversational text."
-                                            },
-                                            {
-                                                "type": "image_url",
-                                                "image_url": {
-                                                    "url": f"data:image/jpeg;base64,{b64_img}"
-                                                }
-                                            }
-                                        ]
-                                    }
-                                ],
-                                model="meta-llama/llama-4-scout-17b-16e-instruct",
-                                temperature=0.1,
-                                max_tokens=1024
-                            )
-                            extracted = chat_completion.choices[0].message.content.strip()
-                            ocr_text += f"--- DIAPOSITIVA {idx+1} ---\n{extracted}\n\n"
-                            add_log(uid, f"Diapositiva {idx+1}/{total_files} procesada exitosamente.")
-                        else:
-                            ocr_text += f"--- DIAPOSITIVA {idx+1} ---\n[Error al descargar la imagen: Código {img_res.status_code}]\n\n"
-                            add_log(uid, f"Error al descargar diapositiva {idx+1}: código {img_res.status_code}")
-                    except Exception as ocr_err:
-                        logger.warning(f"Error en OCR diapositiva {idx+1}: {ocr_err}")
-                        ocr_text += f"--- DIAPOSITIVA {idx+1} ---\n[Error de extracción: {str(ocr_err)}]\n\n"
-                        add_log(uid, f"Error al procesar OCR de diapositiva {idx+1}: {str(ocr_err)}")
-                
-                update_progress(req.uid, 95, "Guardando resultado...")
-                ocr_text = ocr_text.strip()
-                
-                cache_data = {
-                    "transcript": ocr_text,
-                    "srt": "",
-                    "segments": []
-                }
-                save_cache_entry(cache_key, json.dumps(cache_data))
-                update_progress(req.uid, 100, "¡Extracción de texto completa!")
-                
-                result_payload = {
-                    "transcript": ocr_text,
-                    "srt": "",
-                    "segments": [],
-                    "method": "groq_vision_ocr"
-                }
-                if uid:
-                    store_result(uid, result_payload)
-                return result_payload
-
-    with tempfile.TemporaryDirectory() as tmpdir:
-        try:
-            local_groq = get_local_groq(req.groq_api_key)
-            if is_youtube:
-                add_log(uid, "Intentando extraer subtitulos de YouTube...")
-                # --- INTENTO DE SUBS CON 3 ESTRATEGIAS ---
-                sub_extracted = False
-
-                # 1. Con cookies (Navegador)
-                try:
-                    update_progress(req.uid, 10, "Buscando subtítulos (1/2)...")
-                    opts = get_robust_opts(url, {'skip_download': True, 'writesubtitles': True, 'writeautomaticsub': True, 'subtitleslangs': ['es.*', 'en.*'], 'outtmpl': os.path.join(tmpdir, 'sub.%(ext)s'), 'ignoreerrors': True})
-                    await run_blocking(ydl_download_sync, opts, url)
-                    sub_extracted = True
-                except: pass
-
-                # 2. Celular sin cookies
-                if not sub_extracted:
-                    try:
-                        update_progress(req.uid, 20, "Buscando subtítulos (2/2)...")
-                        opts = get_robust_opts(url, {'skip_download': True, 'writesubtitles': True, 'writeautomaticsub': True, 'subtitleslangs': ['es.*', 'en.*'], 'outtmpl': os.path.join(tmpdir, 'sub.%(ext)s'), 'ignoreerrors': True})
-                        opts.pop('cookiefile', None)
-                        opts['extractor_args'] = {'youtube': {'player_client': ['android', 'ios']}}
-                        await run_blocking(ydl_download_sync, opts, url)
-                        sub_extracted = True
-                    except: pass
-
-                sub_file = None
-                is_english = False
-                for f in os.listdir(tmpdir):
-                    if f.startswith('sub.') and ('.es' in f or '.es-419' in f):
-                        sub_file = os.path.join(tmpdir, f)
-                        break
-                if not sub_file:
-                    for f in os.listdir(tmpdir):
-                        if f.startswith('sub.') and ('.en' in f or '.en-US' in f):
-                            sub_file = os.path.join(tmpdir, f)
-                            is_english = True
-                            break
-                
-                if sub_file:
-                    with open(sub_file, 'r', encoding='utf-8') as f:
-                        raw_content = f.read()
-                    
-                    segments = parse_subtitles_to_segments(raw_content)
-                    
-                    # Traducir y limpiar cada segmento
-                    for seg in segments:
-                        if is_english and lang == "es":
-                            seg["text"] = translate_to_spanish(seg["text"])
-                        seg["text"] = remove_repetitions(seg["text"])
-                    
-                    # Generar texto plano completo y SRT
-                    raw_full_text = ' '.join([seg["text"] for seg in segments])
-                    srt_content = generate_srt_from_segments(segments)
-                    
-                    # Paso 2: Limpieza con IA para puntuación y párrafos
-                    update_progress(req.uid, 80, f"Aplicando limpieza con IA ({lang})...")
-                    final_text = cleanup_transcript_with_ai(raw_full_text, local_groq, lang)
-                    
-                    cache_data = {
-                        "transcript": final_text,
-                        "srt": srt_content,
-                        "segments": segments
-                    }
-                    save_cache_entry(cache_key, json.dumps(cache_data))
-                    add_log(uid, "Transcripcion via subtitulos completada.")
-                    update_progress(req.uid, 100, "¡Transcripción lista!")
-                    result_payload = {
-                        "transcript": final_text,
-                        "srt": srt_content,
-                        "segments": segments,
-                        "method": "subtitles"
-                    }
-                    if uid:
-                        store_result(uid, result_payload)
-                    return result_payload
-
-            raise Exception("No direct subtitles")
-
-        except Exception as e:
-            add_log(uid, f"Fallo extraccion de subtitulos: {str(e)}")
-            # 2. Descargar audio y usar Whisper con 3 estrategias
-            audio_downloaded = False
-            audio_file = None
-            
-            add_log(uid, "Iniciando descarga de audio para Whisper...")
-
-            # Estrategia 1: Con cookies (Navegador)
-            try:
-                audio_opts = get_robust_opts(url, {'format': 'bestaudio/best', 'outtmpl': os.path.join(tmpdir, 'audio.%(ext)s'), 'postprocessors': [{'key': 'FFmpegExtractAudio','preferredcodec': 'mp3','preferredquality': '64'}]})
-                await run_blocking(ydl_download_sync, audio_opts, url)
-                for f in os.listdir(tmpdir):
-                    if f.startswith('audio.'):
-                        audio_file = os.path.join(tmpdir, f)
-                        audio_downloaded = True
-                        break
-            except: pass
-
-            # Estrategia 2: Móvil sin cookies
-            if not audio_downloaded:
-                try:
-                    audio_opts = get_robust_opts(url, {'format': 'bestaudio/best', 'outtmpl': os.path.join(tmpdir, 'audio.%(ext)s'), 'postprocessors': [{'key': 'FFmpegExtractAudio','preferredcodec': 'mp3','preferredquality': '64'}]})
-                    audio_opts.pop('cookiefile', None)
-                    audio_opts['extractor_args'] = {'youtube': {'player_client': ['android', 'ios']}}
-                    await run_blocking(ydl_download_sync, audio_opts, url)
-                    for f in os.listdir(tmpdir):
-                        if f.startswith('audio.'):
-                            audio_file = os.path.join(tmpdir, f)
-                            audio_downloaded = True
-                            break
-                except: pass
-
-            if audio_downloaded and audio_file:
-                # 2.1 Intentar con Groq API (Más rápido y ligero)
-                transcription = ""
-                srt_content = ""
-                all_segments = []
-                method = "groq_whisper_v3_file"
-
-                if local_groq:
-                    try:
-                        file_size_mb = os.path.getsize(audio_file) / (1024 * 1024)
-                        if AudioSegment:
-                            # Lógica de troceado si es necesario
-                            if file_size_mb >= 20:
-                                 add_log(uid, f"Audio grande ({file_size_mb:.1f}MB). Dividiendo en trozos de 20 min...")
-                                 audio = AudioSegment.from_file(audio_file)
-                                 chunk_length_ms = 20 * 60 * 1000 # 20 minutos por trozo
-                                 chunks = []
-                                 for i in range(0, len(audio), chunk_length_ms):
-                                     chunks.append(audio[i:i + chunk_length_ms])
-                                 
-                                 for idx, chunk in enumerate(chunks):
-                                     with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as c_file:
-                                         chunk.export(c_file.name, format="mp3", bitrate="64k")
-                                         add_log(uid, f"Transcribiendo parte {idx+1}/{len(chunks)}...")
-                                         with open(c_file.name, "rb") as f:
-                                             part_res = local_groq.audio.transcriptions.create(
-                                                 file=(c_file.name, f.read(), "audio/mpeg"),
-                                                 model="whisper-large-v3",
-                                                 response_format="verbose_json",
-                                                 language=lang if lang in ["es", "en"] else None
-                                             )
-                                             transcription += getattr(part_res, "text", "") + " "
-                                             
-                                             # Adjust segments timestamps for chunk index
-                                             offset = idx * 20 * 60
-                                             part_segments = getattr(part_res, "segments", []) or []
-                                             for segment in part_segments:
-                                                 if isinstance(segment, dict):
-                                                     s_start = segment.get("start", 0) + offset
-                                                     s_end = segment.get("end", 0) + offset
-                                                     s_text = segment.get("text", "").strip()
-                                                 else:
-                                                     s_start = getattr(segment, "start", 0) + offset
-                                                     s_end = getattr(segment, "end", 0) + offset
-                                                     s_text = getattr(segment, "text", "").strip()
-                                                 all_segments.append({"start": s_start, "end": s_end, "text": s_text})
-                                         os.remove(c_file.name)
-                                 srt_content = generate_srt_from_segments(all_segments)
-
-                            else:
-                                update_progress(req.uid, 40, "Enviando a Whisper (IA)...")
-                                with open(audio_file, "rb") as f:
-                                    trans_res = local_groq.audio.transcriptions.create(
-                                        file=(audio_file, f.read(), "audio/mpeg"),
-                                        model="whisper-large-v3",
-                                        response_format="verbose_json",
-                                        language=lang if lang in ["es", "en"] else None
-                                    )
-                                transcription = getattr(trans_res, "text", "")
-                                part_segments = getattr(trans_res, "segments", []) or []
-                                for segment in part_segments:
-                                    if isinstance(segment, dict):
-                                         s_start = segment.get("start", 0)
-                                         s_end = segment.get("end", 0)
-                                         s_text = segment.get("text", "").strip()
-                                    else:
-                                         s_start = getattr(segment, "start", 0)
-                                         s_end = getattr(segment, "end", 0)
-                                         s_text = getattr(segment, "text", "").strip()
-                                    all_segments.append({"start": s_start, "end": s_end, "text": s_text})
-                                srt_content = generate_srt_from_segments(all_segments)
-                        else:
-                            add_log(uid, "Enviando audio completo a Whisper (IA)...")
-                            with open(audio_file, "rb") as f:
-                                trans_res = local_groq.audio.transcriptions.create(
-                                    file=(audio_file, f.read(), "audio/mpeg"),
-                                    model="whisper-large-v3",
-                                    response_format="verbose_json",
-                                    language=lang if lang in ["es", "en"] else None
-                                )
-                            transcription = getattr(trans_res, "text", "")
-                            part_segments = getattr(trans_res, "segments", []) or []
-                            for segment in part_segments:
-                                if isinstance(segment, dict):
-                                     s_start = segment.get("start", 0)
-                                     s_end = segment.get("end", 0)
-                                     s_text = segment.get("text", "").strip()
-                                else:
-                                     s_start = getattr(segment, "start", 0)
-                                     s_end = getattr(segment, "end", 0)
-                                     s_text = getattr(segment, "text", "").strip()
-                                all_segments.append({"start": s_start, "end": s_end, "text": s_text})
-                            srt_content = generate_srt_from_segments(all_segments)
-                        
-                        add_log(uid, "Procesando texto crudo de Whisper...")
-                        transcription = remove_repetitions(str(transcription).strip())
-                        
-                        # Paso 2: Limpieza con IA para puntuación y párrafos
-                        add_log(uid, f"Aplicando limpieza y formato IA ({lang})...")
-                        transcription = cleanup_transcript_with_ai(transcription, local_groq, lang)
-                        
-                        cache_data = {
-                            "transcript": transcription,
-                            "srt": srt_content,
-                            "segments": all_segments
-                        }
-                        save_cache_entry(cache_key, json.dumps(cache_data))
-                        add_log(uid, "Transcripcion de archivo completada.")
-                        update_progress(req.uid, 100, "¡Transcripción lista!")
-                        result_payload = {
-                            "transcript": transcription,
-                            "srt": srt_content,
-                            "segments": all_segments,
-                            "method": "groq_whisper_v3_file"
-                        }
-                        if uid:
-                            store_result(uid, result_payload)
-                        return result_payload
-                    except Exception as ge:
-                        add_log(uid, f"Error en Groq Whisper, intentando local: {str(ge)}")
-                        if not WHISPER_MODEL_AVAILABLE:
-                            raise Exception(f"Error en Groq API: {str(ge)}")
-                
-                # 2.2 Intentar con local whisper (Fallback o si no hay Groq)
-                if WHISPER_MODEL_AVAILABLE:
-                    try:
-                        add_log(uid, "Iniciando transcripcion local con faster-whisper...")
-                        update_progress(req.uid, 40, "Transcribiendo en local (Whisper)...")
-                        transcription, srt_content = transcribe_with_local_whisper(audio_file, lang)
-                        all_segments = parse_subtitles_to_segments(srt_content)
-                        method = "local_whisper"
-                        
-                        add_log(uid, "Procesando texto crudo...")
-                        transcription = remove_repetitions(transcription.strip())
-                        
-                        # Limpieza IA si está configurada
-                        if local_groq:
-                            add_log(uid, f"Aplicando limpieza IA...")
-                            transcription = cleanup_transcript_with_ai(transcription, local_groq, lang)
-                        
-                        cache_data = {
-                            "transcript": transcription,
-                            "srt": srt_content,
-                            "segments": all_segments
-                        }
-                        save_cache_entry(cache_key, json.dumps(cache_data))
-                        add_log(uid, "Transcripcion local completada.")
-                        update_progress(req.uid, 100, "¡Transcripción lista!")
-                        result_payload = {
-                            "transcript": transcription,
-                            "srt": srt_content,
-                            "segments": all_segments,
-                            "method": "local_whisper"
-                        }
-                        if uid:
-                            store_result(uid, result_payload)
-                        return result_payload
-                    except Exception as le:
-                        add_log(uid, f"Error en transcripcion local: {str(le)}")
-                        raise le
-                else:
-                    raise Exception("Groq API no configurada o falló, y no hay modelo Whisper local disponible.")
-
-            raise Exception("No se pudo descargar el audio para la transcripción por ningún medio.")
-        except Exception as final_e:
-            return JSONResponse(status_code=500, content={"error": str(final_e)})
 
 class ChatRequest(BaseModel):
-    url: str
+    url: Optional[str] = ""
     question: str
     transcript: str
     groq_api_key: Optional[str] = None
 
-@app.post("/api/chat")
-async def chat_with_transcript(req: ChatRequest):
-    local_groq = get_local_groq(req.groq_api_key)
-    if not local_groq:
-        raise HTTPException(status_code=500, detail="Groq API no configurada")
-    
-    # --- RECORTE DE SEGURIDAD PARA RATE LIMITS (6000 TPM) ---
-    # Si la transcripcion es muy larga, la recortamos para que quepa en el limite gratuito de Groq.
-    # 20,000 caracteres son aprox 5,000 tokens, lo que deja margen para la respuesta.
-    transcript_safe = req.transcript
-    if len(transcript_safe) > 12000:
-        logger.warning(f"Transcripcion muy larga ({len(transcript_safe)} chars). Recortando para evitar error 413.")
-        transcript_safe = transcript_safe[:6000] + "\n\n[...] [Parte omitida por longitud] [...] \n\n" + transcript_safe[-6000:]
-
-    try:
-        system_prompt = f"""
-        Eres un asistente experto que analiza transcripciones de videos. 
-        Tu objetivo es responder preguntas del usuario basándote únicamente en la siguiente transcripción (puede estar recortada por longitud):
-        
-        --- TRANSCRIPCIÓN ---
-        {transcript_safe}
-        --- FIN ---
-        
-        Responde de forma concisa, útil y en español. 
-        
-        REGLAS DE FORMATO:
-        1. Usá **negritas** para nombres de productos, marcas o conceptos clave.
-        2. Usá "punto y aparte" (doble salto de línea) entre párrafos o puntos de una lista para que el texto "respire" y sea fácil de leer.
-        3. Si hacés una lista, que cada ítem esté separado por una línea en blanco.
-        
-        Si la respuesta no está en la transcripción, dilo amablemente.
-        """
-        
-        completion = local_groq.chat.completions.create(
-            model=GROQ_CHAT_MODEL,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": req.question}
-            ],
-            temperature=0.7,
-            max_tokens=1024,
-        )
-        
-        return {"answer": completion.choices[0].message.content}
-    except Exception as e:
-        logger.exception("Error en Chat")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.post("/api/download")
-async def download_video(req: VideoRequest, background_tasks: BackgroundTasks):
-    url = sanitize_url(req.url)
-    format_id = req.format_id
-    uid = str(uuid.uuid4())
-
-    # --- BUNNY STREAM: detectar embed en páginas web ---
-    bunny_url = await asyncio.to_thread(detect_bunny_embed, url)
-    if bunny_url:
-        logger.info(f"Bunny embed encontrado para descarga: {bunny_url}")
-        url = bunny_url
-
-    # --- CARRUSEL DE IMÁGENES (gallery-dl) ---
-    if format_id == 'carousel_images':
-        cookie_file = get_robust_opts(url).get('cookiefile')
-        files = await run_blocking(get_instagram_carousel_info, url, cookie_file)
-        if not files:
-            raise HTTPException(status_code=400, detail="No se pudieron extraer las imágenes del carrusel.")
-            
-        import zipfile
-        zip_filename = f"instagram_carousel_{uid}.zip"
-        zip_path = os.path.join(DOWNLOAD_FOLDER, zip_filename)
-        
-        def create_zip():
-            headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
-            with zipfile.ZipFile(zip_path, 'w') as zipf:
-                for idx, file_item in enumerate(files):
-                    file_url = file_item["url"]
-                    meta = file_item.get("metadata", {})
-                    ext = meta.get("extension") or "jpg"
-                    try:
-                        r = requests.get(file_url, headers=headers, timeout=30)
-                        if r.status_code == 200:
-                            zipf.writestr(f"imagen_{idx+1}.{ext}", r.content)
-                    except Exception as download_err:
-                        logger.warning(f"Error descargando imagen {idx+1} para zip: {download_err}")
-                        
-        await run_blocking(create_zip)
-        
-        def remove_file(path):
-            try:
-                if os.path.exists(path): os.remove(path)
-            except: pass
-            
-        background_tasks.add_task(remove_file, zip_path)
-        
-        username_safe = "".join([c for c in files[0]["metadata"].get("username", "instagram") if c.isalnum() or c==' ']).strip() or "carrusel"
-        filename = f"carrusel_{username_safe}_{uid[:6]}.zip"
-        return FileResponse(zip_path, filename=filename, media_type='application/zip')
-
-    # --- INSTAGRAM: usar instaloader para descarga ---
-    if 'instagram.com' in url and instaloader:
-        try:
-            ig_info = await asyncio.to_thread(get_instagram_info, url)
-            if not ig_info['is_video']:
-                raise HTTPException(status_code=400, detail="Este post de Instagram no tiene video.")
-
-            # --- Descarga como MP3 (extracción de audio) ---
-            if format_id == 'mp3':
-                video_url = ig_info['video_url']
-                headers_dl = {'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_3_1 like Mac OS X) AppleWebKit/605.1.15'}
-                r = await run_blocking(requests_get_sync, video_url, headers=headers_dl, stream=True, timeout=60)
-                r.raise_for_status()
-
-                tmp_mp4 = os.path.join(DOWNLOAD_FOLDER, f'instagram_{uid}_tmp.mp4')
-                with open(tmp_mp4, 'wb') as f:
-                    for chunk in r.iter_content(chunk_size=8192):
-                        f.write(chunk)
-
-                mp3_path = os.path.join(DOWNLOAD_FOLDER, f'instagram_{uid}.mp3')
-                ffmpeg_exe = os.path.join(BASE_DIR, '..', 'ffmpeg.exe')
-                if not os.path.exists(ffmpeg_exe):
-                    ffmpeg_exe = 'ffmpeg'
-                import subprocess
-                subprocess.run(
-                    [ffmpeg_exe, '-y', '-i', tmp_mp4, '-vn', '-acodec', 'libmp3lame', '-q:a', '2', mp3_path],
-                    check=True, capture_output=True
-                )
-                os.remove(tmp_mp4)
-
-                def remove_file_mp3(path):
-                    try:
-                        if os.path.exists(path): os.remove(path)
-                    except: pass
-
-                background_tasks.add_task(remove_file_mp3, mp3_path)
-                filename = f"{ig_info['title'][:30].strip()}_{uid}.mp3"
-                return FileResponse(mp3_path, filename=filename, media_type='audio/mpeg')
-
-            # --- Descarga normal como MP4 ---
-            video_url = ig_info['video_url']
-            headers = {'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_3_1 like Mac OS X) AppleWebKit/605.1.15'}
-            r = await run_blocking(requests_get_sync, video_url, headers=headers, stream=True, timeout=60)
-            r.raise_for_status()
-
-            file_path = os.path.join(DOWNLOAD_FOLDER, f'instagram_{uid}.mp4')
-            with open(file_path, 'wb') as f:
-                for chunk in r.iter_content(chunk_size=8192):
-                    f.write(chunk)
-
-            def remove_file(path):
-                try:
-                    if os.path.exists(path): os.remove(path)
-                except: pass
-
-            background_tasks.add_task(remove_file, file_path)
-            filename = f"{ig_info['title'][:30].strip()}_{uid}.mp4"
-            return FileResponse(file_path, filename=filename, media_type='video/mp4')
-
-        except HTTPException:
-            raise
-        except Exception as e:
-            logger.debug(f"Instaloader download falló, intentando con yt-dlp: {e}")
-
-    output_template = os.path.join(DOWNLOAD_FOLDER, f'%(title)s_{uid}.%(ext)s')
-
-    # --- Formato MP3: extraer solo audio ---
-    if format_id == 'mp3':
-        extra_opts = {
-            'format': 'bestaudio/best',
-            'outtmpl': output_template,
-            'postprocessors': [{
-                'key': 'FFmpegExtractAudio',
-                'preferredcodec': 'mp3',
-                'preferredquality': '192',
-            }],
-        }
-    else:
-        # Detectar si ffmpeg está disponible para muxing
-        ffmpeg_available = bool(FFMPEG_BIN) or bool(
-            subprocess.run(['ffmpeg', '-version'], capture_output=True).returncode == 0
-            if not FFMPEG_BIN else True
-        )
-
-        if not ffmpeg_available:
-            # Sin ffmpeg no podemos muxear; usar best (stream ya mezclado)
-            logger.warning("FFmpeg no encontrado. Forzando formato 'best' para evitar muxing.")
-            fmt = 'best[ext=mp4]/best'
-        elif format_id and format_id not in ('best', 'bestvideo+bestaudio', None):
-            # El format_id específico primero, luego fallbacks que no requieren ese ID
-            fmt = f"{format_id}+bestaudio[ext=m4a]/bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best[ext=mp4]/best"
-        else:
-            fmt = 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best[ext=mp4]/best'
-
-        extra_opts = {
-            'format': fmt,
-            'outtmpl': output_template,
-            'merge_output_format': 'mp4',
-        }
-    
-    def my_hook(d):
-        if d['status'] == 'downloading':
-            p = d.get('_percent_str', '0%').replace('\x1b[0;94m','').replace('\x1b[0m','').strip()
-            # extract number
-            try:
-                p_val = float(p.replace('%',''))
-                update_progress(req.uid, int(p_val * 0.9), f"Descargando video: {p}")
-            except: pass
-        elif d['status'] == 'finished':
-            update_progress(req.uid, 90, "Descarga completada, procesando con FFmpeg...")
-
-    extra_opts['progress_hooks'] = [my_hook]
-
-    if req.start_time or req.end_time:
-        from yt_dlp.utils import parse_duration, download_range_func
-        start_sec = parse_duration(req.start_time) if req.start_time else 0
-        end_sec = parse_duration(req.end_time) if req.end_time else float('inf')
-        extra_opts['download_ranges'] = download_range_func(None, [(start_sec, end_sec)])
-        extra_opts['force_keyframes_at_cuts'] = True
-
-    # Intentar descarga con 3 estrategias
-    downloaded = False
-    last_err = ""
-    update_progress(req.uid, 5, "Iniciando proceso...")
-
-    # --- ESTRATEGIA 1: Navegador con Cookies (Más robusto para todas las calidades) ---
-    try:
-        logger.debug("Descarga Intento 1 - Con cookies...")
-        update_progress(req.uid, 10, "Conectando al servidor (1/3)...")
-        opts = get_robust_opts(url, extra_opts)
-        await run_blocking(ydl_download_sync, opts, url)
-        downloaded = True
-    except Exception as e:
-        last_err = str(e)
-        logger.debug(f"Descarga Intento 1 falló: {last_err[:100]}")
-
-    # --- ESTRATEGIA 2: Celular sin cookies ---
-    if not downloaded:
-        try:
-            logger.debug("Descarga Intento 2 - Celular sin cookies...")
-            update_progress(req.uid, 15, "Reintentando modo móvil (2/3)...")
-            opts = get_robust_opts(url, extra_opts)
-            opts.pop('cookiefile', None)
-            opts['extractor_args'] = {'youtube': {'player_client': ['android', 'ios']}}
-            await run_blocking(ydl_download_sync, opts, url)
-            downloaded = True
-        except Exception as e:
-            last_err += f" | Intento 2: {str(e)[:100]}"
-            logger.debug(f"Descarga Intento 2 falló: {str(e)[:100]}")
-
-    # --- ESTRATEGIA 3: Forzar iOS ---
-    if not downloaded:
-        try:
-            logger.debug("Descarga Intento 3 - Forzando iOS...")
-            update_progress(req.uid, 20, "Forzando modo iOS (3/3)...")
-            opts = get_robust_opts(url, extra_opts)
-            opts.pop('cookiefile', None)
-            opts['extractor_args'] = {'youtube': {'player_client': ['ios']}}
-            await run_blocking(ydl_download_sync, opts, url)
-            downloaded = True
-        except Exception as e:
-            last_err += f" | Intento 3: {str(e)[:100]}"
-            logger.debug(f"Descarga Intento 3 falló: {str(e)[:100]}")
-
-    if downloaded:
-        update_progress(req.uid, 100, "¡Archivo listo!")
-        # Encontrar archivo
-        for f in os.listdir(DOWNLOAD_FOLDER):
-            if uid in f:
-                file_path = os.path.join(DOWNLOAD_FOLDER, f)
-                def remove_file(path: str):
-                    try:
-                        if os.path.exists(path):
-                            os.remove(path)
-                            logger.debug(f"Archivo borrado: {file_path}")
-                    except Exception as e:
-                        logger.exception("Error borrando archivo")
-                
-                background_tasks.add_task(remove_file, file_path)
-                return FileResponse(file_path, filename=f)
-        raise Exception("Archivo no encontrado tras descarga exitosa")
-    else:
-        raise HTTPException(status_code=500, detail=f"No se pudo descargar: {last_err[:200]}")
-
-@app.get("/api/proxy-thumbnail")
-async def proxy_thumbnail(url: str):
-    logger.debug(f"Proxy request for: {url}")
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
-        'Referer': 'https://www.instagram.com/'
-    }
-    try:
-        resp = await run_blocking(requests_get_sync, url, headers=headers, timeout=10, allow_redirects=True)
-        resp.raise_for_status()
-        logger.debug(f"Proxy success, Content-Type: {resp.headers.get('Content-Type')}")
-        return Response(content=resp.content, media_type=resp.headers.get('Content-Type', 'image/jpeg'))
-    except Exception as e:
-        logger.exception("Proxy FAILED")
-        return Response(status_code=500)
-
-# --- HEALTHCHECKS ---
-@app.get("/api/health/cookies")
-async def check_cookies():
-    """Verifica si las cookies actuales siguen siendo válidas con un video de prueba."""
-    test_url = "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
-    try:
-        opts = get_robust_opts(test_url)
-        info = await run_blocking(extract_info_sync, opts, test_url)
-        return {
-            "status": "ok", 
-            "cookie_valid": True, 
-            "video_title": info.get('title'),
-            "server_time": time.strftime("%Y-%m-%d %H:%M:%S")
-        }
-    except Exception as e:
-        return {
-            "status": "error", 
-            "cookie_valid": False, 
-            "error": str(e),
-            "server_time": time.strftime("%Y-%m-%d %H:%M:%S")
-        }
-
-# --- TRANSCRIPCIÓN DE ARCHIVO DE AUDIO (WhatsApp, grabaciones, etc.) ---
-
-ALLOWED_AUDIO_EXTENSIONS = {'.ogg', '.opus', '.mp3', '.m4a', '.wav', '.mp4', '.aac', '.weba', '.webm', '.mov', '.avi', '.mkv'}
-MAX_AUDIO_SIZE_MB = 200
-
-@app.post("/api/transcript-file")
-async def transcript_audio_file(
-    file: UploadFile = File(...),
-    target_lang: str = Form(default="es"),
-    uid: str = Form(default=None),
-    groq_api_key: str = Form(default=None),
-    is_local_video: Optional[str] = Form(default=None)
-):
-
-    """
-    Transcribe un archivo de audio subido directamente.
-    Soporta WhatsApp (.ogg/.opus), grabaciones de voz (.m4a/.mp3), y más.
-    """
-    local_groq = get_local_groq(groq_api_key)
-    if not local_groq and not WHISPER_MODEL_AVAILABLE:
-        raise HTTPException(
-            status_code=503,
-            detail="Groq API no configurada. Configura tu API Key en la interfaz o instala faster-whisper para transcribir localmente."
-        )
-    if not local_groq:
-        add_log(uid, "Groq API no configurada. Usando transcripción local si está disponible.")
-
-    # Validar extensión
-    ext = os.path.splitext(file.filename or '')[1].lower()
-    if ext not in ALLOWED_AUDIO_EXTENSIONS:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Formato no soportado: '{ext}'. Formatos válidos: {', '.join(ALLOWED_AUDIO_EXTENSIONS)}"
-        )
-
-    is_video = False
-    if is_local_video == "true":
-        is_video = True
-    else:
-        VIDEO_EXTS = {'.mp4', '.mov', '.avi', '.mkv', '.webm', '.weba'}
-        if ext in VIDEO_EXTS:
-            is_video = True
-
-    with tempfile.TemporaryDirectory() as tmpdir:
-        # Guardar archivo subido
-        input_path = os.path.join(tmpdir, f"input{ext}")
-        content = await file.read()
-
-        # Validar tamaño
-        size_mb = len(content) / (1024 * 1024)
-        if size_mb > MAX_AUDIO_SIZE_MB:
-            raise HTTPException(status_code=413, detail=f"El archivo es demasiado grande ({size_mb:.1f} MB). Máximo: {MAX_AUDIO_SIZE_MB} MB.")
-
-        with open(input_path, 'wb') as f:
-            f.write(content)
-        
-        update_progress(uid, 5, "Archivo recibido en el servidor...")
-        add_log(uid, f"Archivo recibido para transcribir: {file.filename} ({size_mb:.2f} MB)")
-
-
-        # Convertir a MP3 si es necesario usando pydub (audio y video)
-        audio_path = input_path
-        conversion_done = False
-        VIDEO_EXTS = {'.mp4', '.mov', '.avi', '.mkv', '.webm', '.weba'}
-        AUDIO_EXTS = {'.ogg', '.opus', '.m4a', '.wav', '.aac'}
-        
-        if ext in AUDIO_EXTS | VIDEO_EXTS:
-            converted_path = os.path.join(tmpdir, "converted.mp3")
-            try:
-                update_progress(uid, 10, "Convirtiendo formato de audio/video...")
-                if AudioSegment:
-                    logger.debug("Intentando conversion con pydub...")
-                    audio = AudioSegment.from_file(input_path)
-                    audio = audio.set_frame_rate(16000).set_channels(1)
-                    audio.export(converted_path, format="mp3", bitrate="32k")
-                    if os.path.exists(converted_path) and os.path.getsize(converted_path) > 0:
-                        audio_path = converted_path
-                        conversion_done = True
-                        logger.debug(f"Pydub exitoso. Tamaño: {os.path.getsize(audio_path)/1024/1024:.2f} MB")
-                
-                if not conversion_done:
-                    logger.debug("Pydub no disponible o fallo, intentando ffmpeg directo...")
-                    import subprocess
-                    # Usar el binario encontrado o solo 'ffmpeg' si no hay binario local
-                    exe = FFMPEG_BIN if FFMPEG_BIN else 'ffmpeg'
-                    subprocess.run(
-                        [exe, '-y', '-i', input_path, '-vn', '-ar', '16000', '-ac', '1', '-ab', '32k', '-f', 'mp3', converted_path],
-                        capture_output=True, check=True
-                    )
-                    if os.path.exists(converted_path) and os.path.getsize(converted_path) > 0:
-                        audio_path = converted_path
-                        conversion_done = True
-                        logger.debug(f"FFmpeg directo exitoso. Tamaño: {os.path.getsize(audio_path)/1024/1024:.2f} MB")
-            except Exception as e:
-                logger.exception(f"Error en conversion: {e}")
-
-        try:
-            file_size_mb = os.path.getsize(audio_path) / (1024 * 1024)
-            
-            # VALIDACION CRITICA: Límite de Groq (25MB)
-            if file_size_mb > 25 and not WHISPER_MODEL_AVAILABLE:
-                if not conversion_done:
-                    raise HTTPException(status_code=400, detail="El archivo es demasiado grande (o es un video) y no se pudo convertir porque FFmpeg no está instalado en el sistema. Por favor, instala FFmpeg o sube un archivo de audio comprimido.")
-                else:
-                    raise HTTPException(status_code=400, detail=f"El archivo es demasiado largo ({file_size_mb:.1f}MB) incluso tras comprimirlo. El limite de Groq es 25MB, pero puedes instalar faster-whisper para transcribir localmente.")
-
-            transcription = ""
-            srt_content = ""
-            method = "groq_whisper_v3_file" if local_groq else "local_whisper"
-
-            update_progress(uid, 20, "Iniciando transcripción del audio...")
-
-            if local_groq:
-                try:
-                    all_segments = []
-                    if AudioSegment and file_size_mb >= 20:
-                        # Archivos grandes: trocear en partes de 20 minutos
-                        update_progress(uid, 22, "Dividiendo audio grande en partes...")
-                        add_log(uid, f"Dividiendo audio de {file_size_mb:.1f}MB en partes...")
-                        audio = AudioSegment.from_file(audio_path)
-                        chunk_length_ms = 20 * 60 * 1000
-                        chunks = [audio[i:i + chunk_length_ms] for i in range(0, len(audio), chunk_length_ms)]
-
-                        for idx, chunk in enumerate(chunks):
-                            with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as c_file:
-                                chunk.export(c_file.name, format="mp3", bitrate="64k")
-                                progress_pct = 25 + int((idx / len(chunks)) * 55)
-                                update_progress(uid, progress_pct, f"Transcribiendo parte {idx+1}/{len(chunks)} con Groq Whisper...")
-                                add_log(uid, f"Transcribiendo parte {idx+1}/{len(chunks)}...")
-                                with open(c_file.name, "rb") as cf:
-                                    part_res = local_groq.audio.transcriptions.create(
-                                        file=(c_file.name, cf.read(), "audio/mpeg"),
-                                        model="whisper-large-v3",
-                                        response_format="verbose_json",
-                                        language=target_lang if target_lang in ["es", "en"] else None
-                                    )
-                                    transcription += getattr(part_res, "text", "") + " "
-                                    
-                                    # Adjust segments timestamps for chunk index
-                                    offset = idx * 20 * 60
-                                    part_segments = getattr(part_res, "segments", []) or []
-                                    for segment in part_segments:
-                                        if isinstance(segment, dict):
-                                            s_start = segment.get("start", 0) + offset
-                                            s_end = segment.get("end", 0) + offset
-                                            s_text = segment.get("text", "").strip()
-                                        else:
-                                            s_start = getattr(segment, "start", 0) + offset
-                                            s_end = getattr(segment, "end", 0) + offset
-                                            s_text = getattr(segment, "text", "").strip()
-                                        all_segments.append({"start": s_start, "end": s_end, "text": s_text})
-
-                                os.remove(c_file.name)
-                        srt_content = generate_srt_from_segments(all_segments)
-                    else:
-                        if audio_path.endswith('.mp3'):
-                            mime_type = "audio/mpeg"
-                        elif audio_path.endswith('.wav'):
-                            mime_type = "audio/wav"
-                        elif audio_path.endswith('.mp4'):
-                            mime_type = "video/mp4"
-                        elif audio_path.endswith('.m4a'):
-                            mime_type = "audio/mp4"
-                        elif audio_path.endswith('.webm'):
-                            mime_type = "audio/webm"
-                        else:
-                            mime_type = "audio/ogg"
-
-                        update_progress(uid, 35, "Transcribiendo con Groq Whisper...")
-                        with open(audio_path, "rb") as f:
-                            trans_res = local_groq.audio.transcriptions.create(
-                                file=(os.path.basename(audio_path), f.read(), mime_type),
-                                model="whisper-large-v3",
-                                response_format="verbose_json",
-                                language=target_lang if target_lang in ["es", "en"] else None
-                            )
-                        transcription = getattr(trans_res, "text", "")
-                        segments = getattr(trans_res, "segments", []) or []
-                        srt_content = generate_srt_from_segments(segments)
-                    
-                    transcription = str(transcription)
-                except Exception as ge:
-                    add_log(uid, f"Error critico en Groq Whisper: {str(ge)}")
-                    if not WHISPER_MODEL_AVAILABLE:
-                        raise Exception(f"Error en Groq API: {str(ge)}")
-                    update_progress(uid, 40, "Groq falló. Usando transcripción local con Whisper...")
-                    add_log(uid, "Groq falló o la API Key es inválida. Intentando transcripción local con Whisper...")
-                    transcription, srt_content = transcribe_with_local_whisper(audio_path, target_lang)
-                    method = "local_whisper"
-            else:
-                update_progress(uid, 30, "Transcribiendo localmente con Whisper...")
-                transcription, srt_content = transcribe_with_local_whisper(audio_path, target_lang)
-
-            # Unificar segmentos para retornar
-            if method == "local_whisper":
-                segments_to_return = parse_subtitles_to_segments(srt_content)
-            else:
-                # Groq
-                if 'segments' in locals() and segments:
-                    segments_to_return = []
-                    for s in segments:
-                        if isinstance(s, dict):
-                            s_start = s.get("start", 0)
-                            s_end = s.get("end", 0)
-                            s_text = s.get("text", "").strip()
-                        else:
-                            s_start = getattr(s, "start", 0)
-                            s_end = getattr(s, "end", 0)
-                            s_text = getattr(s, "text", "").strip()
-                        segments_to_return.append({"start": s_start, "end": s_end, "text": s_text})
-                else:
-                    segments_to_return = all_segments
-
-            transcript_text = str(transcription).strip()
-            # Limpieza con IA
-            update_progress(uid, 80, "Aplicando limpieza y formato con IA...")
-            add_log(uid, f"Aplicando limpieza y formato IA ({target_lang})...")
-            transcript_text = cleanup_transcript_with_ai(transcript_text, local_groq, target_lang, is_local_video=is_video)
-            
-            update_progress(uid, 100, "Completado")
-            add_log(uid, "Transcripcion de archivo completada con exito.")
-            return {
-                "transcript": transcript_text,
-                "srt": srt_content,
-                "segments": segments_to_return,
-                "method": method,
-                "filename": file.filename,
-                "size_mb": round(size_mb, 2)
-            }
-
-        except Exception as e:
-            add_log(uid, f"Error en transcripcion de archivo: {str(e)}")
-            raise HTTPException(status_code=500, detail=f"Error al transcribir: {str(e)}")
-
-
-# --- LIMPIEZA DE DESCARGAS ---
-@app.delete("/api/clear-downloads")
-async def clear_downloads():
-    try:
-        import shutil
-        if os.path.exists(DOWNLOAD_FOLDER):
-            shutil.rmtree(DOWNLOAD_FOLDER)
-        os.makedirs(DOWNLOAD_FOLDER, exist_ok=True)
-        return {"status": "success", "message": "Descargas locales eliminadas correctamente."}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-# --- HERRAMIENTAS PERIODÍSTICAS (IA) ---
 
 class AnalyzeRequest(BaseModel):
     transcript: str
-    mode: str  # "summary" | "quotes" | "data" | "angle" | "diarization"
+    mode: str  # summary | data | angle | diarization
     groq_api_key: Optional[str] = None
+
 
 class QuotesRequest(BaseModel):
     transcript: str
-    segments: list = []   # lista de {start, end, text} para ubicar tiempos
+    segments: list = []
     groq_api_key: Optional[str] = None
-
-def find_segment_times_for_quote(search_phrase: str, segments: list) -> dict:
-    """Busca la frase en los segmentos y devuelve el start/end del segmento más cercano."""
-    if not segments or not search_phrase:
-        return {}
-    
-    search_lower = search_phrase.lower().strip()
-    search_words = set(search_lower.split())
-    
-    best_score = 0
-    best_seg = None
-    best_idx = -1
-    
-    for i, seg in enumerate(segments):
-        seg_text = seg.get('text', '').lower()
-        # Exact substring match — perfect
-        if search_lower in seg_text:
-            return {"start": seg["start"], "end": seg["end"], "seg_idx": i}
-        # Word overlap score
-        seg_words = set(seg_text.split())
-        overlap = len(search_words & seg_words)
-        if overlap > best_score:
-            best_score = overlap
-            best_seg = seg
-            best_idx = i
-    
-    if best_seg and best_score >= max(2, len(search_words) // 2):
-        # Expand the window: take from this segment to 2 segments later for context
-        end_idx = min(best_idx + 2, len(segments) - 1)
-        return {"start": best_seg["start"], "end": segments[end_idx]["end"], "seg_idx": best_idx}
-    
-    return {}
-
-JOURNALIST_PROMPTS = {
-    "summary": """Sos un asistente para periodistas especializados en comunicación política e imagen pública.
-Dado el siguiente texto transcripto, generá un RESUMEN EJECUTIVO periodístico de máximo 5 oraciones.
-Incluí: tema central, postura del hablante, y punto más relevante para una nota periodística.
-Respondé solo con el resumen, sin encabezados ni explicaciones.
-
-TRANSCRIPCIÓN:
-{transcript}""",
-
-    "quotes": """¡IMPORTANTE! Respondé EXCLUSIVAMENTE con un objeto JSON válido que contenga un array bajo la clave "quotes", sin ningún texto antes ni después.
-
-Sos un asistente para periodistas. Dado el siguiente texto transcripto, extraé las 5 CITAS TEXTUALES más noticiosas, llamativas o reveladoras.
-
-Para cada cita devolvé un objeto JSON con estos campos exactos:
-- "quote": la cita textual exacta del hablante (sin comillas dobles internas, usa simples si es necesario)
-- "note": una o dos oraciones sobre por qué es relevante para una nota periodística
-- "search": una frase corta única de 4-8 palabras que esté dentro de la cita, para poder ubicarla en el texto
-
-Formato de respuesta (solo el JSON, nada más):
-{
-  "quotes": [
-    {"quote": "...", "note": "...", "search": "..."}
-  ]
-}
-
-TRANSCRIPCIÓN:
-{transcript}""",
-
-    "data": """Sos un asistente para periodistas especializados en comunicación política e imagen pública.
-Dado el siguiente texto transcripto, extraé todos los DATOS DUROS mencionados:
-- Fechas y plazos
-- Cifras, porcentajes, montos
-- Nombres de personas y sus cargos
-- Instituciones y organizaciones
-- Lugares geográficos relevantes
-
-Organizalos en una lista clara. Si no hay datos duros, indicalo.
-Respondé solo con los datos, sin introducción.
-
-TRANSCRIPCIÓN:
-{transcript}""",
-
-    "angle": """Sos un editor de medios con experiencia en periodismo político y comunicación institucional.
-Dado el siguiente texto transcripto, sugerí 3 ÁNGULOS PERIODÍSTICOS posibles para cubrir este contenido.
-
-Para cada ángulo incluí:
-• **Título sugerido**
-• **Justificación**: Por qué es el ángulo más relevante.
-
-Separá cada propuesta con un DOBLE SALTO DE LÍNEA.
-Respondé directamente con los 3 ángulos, sin introducción.
-
-TRANSCRIPCIÓN:
-{transcript}""",
-
-    "diarization": """Sos un asistente para periodistas experto en análisis de diálogos.
-Dado el siguiente texto transcripto, tu tarea es analizar la conversación y dividirla en un diálogo estructurado, identificando a los diferentes hablantes.
-
-Instrucciones críticas:
-1. DETERMINA LOS NOMBRES REALES: Analiza detenidamente el texto para deducir los nombres reales de los hablantes si se presentan, se saludan, se llaman por su nombre o se infiere por el contexto. Si los detectas, usa sus nombres reales como etiquetas (por ejemplo: **Juan**, **María**, **Entrevistador**, etc.) en lugar de "Hablante A" o "Hablante B".
-2. Identificá los cambios de turno de palabra basándote en la coherencia y las preguntas/respuestas.
-3. Formateá la salida como un diálogo claro, precediendo cada intervención con el nombre del hablante o su etiqueta en negrita, por ejemplo:
-**Nombre del Hablante**: [texto original hablado en este turno]
-
-4. Preservación absoluta: No resumas, no edites ni elimines contenido. Mantené el 100% de las palabras originales habladas.
-5. Respondé ÚNICAMENTE con el diálogo formateado. Está prohibido incluir saludos, introducciones, explicaciones o conclusiones.
-
-TRANSCRIPCIÓN:
-{transcript}"""
-}
-
-@app.post("/api/analyze")
-async def analyze_transcript(req: AnalyzeRequest):
-    """
-    Analiza una transcripción con IA para uso periodístico.
-    Modos: summary (resumen), quotes (citas), data (datos duros), angle (ángulos de nota)
-    """
-    local_groq = get_local_groq(req.groq_api_key)
-    if not local_groq:
-        raise HTTPException(status_code=503, detail="Groq API no configurada.")
-
-    if req.mode not in JOURNALIST_PROMPTS:
-        raise HTTPException(status_code=400, detail=f"Modo inválido. Opciones: {list(JOURNALIST_PROMPTS.keys())}")
-
-    if len(req.transcript.strip()) < 50:
-        raise HTTPException(status_code=400, detail="La transcripción es demasiado corta para analizar.")
-
-    # Truncar si es muy larga (Groq tiene límite de tokens)
-    transcript = req.transcript
-    # Diarization necesita más contexto para detectar nombres al principio y al final
-    max_chars = 16000 if req.mode == "diarization" else 12000
-    if len(transcript) > max_chars:
-        half = max_chars // 2
-        transcript = transcript[:half] + "\n\n[...] [Parte omitida por longitud] [...] \n\n" + transcript[-half:]
-
-    prompt = JOURNALIST_PROMPTS[req.mode].replace("{transcript}", transcript)
-
-    # Modelos a intentar en orden: el grande primero, el liviano como fallback
-    MODELS_TO_TRY = ["llama-3.3-70b-versatile", "llama-3.1-8b-instant"]
-
-    last_error = None
-    for model in MODELS_TO_TRY:
-        try:
-            response = local_groq.chat.completions.create(
-                model=model,
-                messages=[{"role": "user", "content": prompt}],
-                max_tokens=6000 if req.mode == "diarization" else 1500,
-                temperature=0.3
-            )
-            result = response.choices[0].message.content.strip()
-            return {"result": result, "mode": req.mode, "model_used": model}
-
-        except Exception as e:
-            err_str = str(e)
-            logger.exception(f"Error con modelo {model}: {err_str}")
-
-            # Rate limit (429): intentar con el siguiente modelo
-            if "rate_limit_exceeded" in err_str or "429" in err_str:
-                last_error = e
-                logger.info(f"Rate limit en {model}, intentando con el siguiente modelo...")
-                continue
-            else:
-                # Error distinto al rate limit: falla inmediata con mensaje claro
-                raise HTTPException(status_code=500, detail=f"Error al analizar: {err_str}")
-
-    # Si todos los modelos fallaron por rate limit
-    raise HTTPException(
-        status_code=429,
-        detail="⚠️ Límite de uso de Groq alcanzado por hoy. Podés:\n1. Esperá unos minutos e intentá de nuevo.\n2. Configurar tu propia API key de Groq en Configuración (gratis en console.groq.com)."
-    )
-
-
-@app.post("/api/quotes")
-async def extract_quotes_with_times(req: QuotesRequest):
-    """
-    Extrae citas textuales de la transcripción con sus tiempos de entrada/salida,
-    buscándolas en los segmentos del video.
-    """
-    local_groq = get_local_groq(req.groq_api_key)
-    if not local_groq:
-        raise HTTPException(status_code=503, detail="Groq API no configurada.")
-
-    if len(req.transcript.strip()) < 50:
-        raise HTTPException(status_code=400, detail="La transcripción es demasiado corta.")
-
-    # Usar el prompt de citas (que ahora pide JSON)
-    transcript = req.transcript
-    if len(transcript) > 12000:
-        transcript = transcript[:6000] + "\n\n[...]\n\n" + transcript[-6000:]
-
-    prompt = JOURNALIST_PROMPTS["quotes"].replace("{transcript}", transcript)
-
-    MODELS_TO_TRY = ["llama-3.3-70b-versatile", "llama-3.1-8b-instant"]
-    raw_result = None
-
-    for model in MODELS_TO_TRY:
-        try:
-            response = local_groq.chat.completions.create(
-                model=model,
-                messages=[{"role": "user", "content": prompt}],
-                max_tokens=2000,
-                temperature=0.3,
-                response_format={"type": "json_object"} if "70b" in model else None,
-            )
-            raw_result = response.choices[0].message.content.strip()
-            break
-        except Exception as e:
-            err_str = str(e)
-            if "rate_limit_exceeded" in err_str or "429" in err_str:
-                continue
-            raise HTTPException(status_code=500, detail=f"Error al analizar: {err_str}")
-
-    if not raw_result:
-        raise HTTPException(status_code=429, detail="Límite de Groq alcanzado. Esperá unos minutos.")
-
-    # Parsear el JSON de la IA (puede venir envuelto en ```json ... ```)
-    try:
-        clean = re.sub(r'^```(?:json)?\s*', '', raw_result.strip(), flags=re.MULTILINE)
-        clean = re.sub(r'```\s*$', '', clean.strip(), flags=re.MULTILINE).strip()
-        # La IA a veces devuelve {"quotes": [...]} en vez de [...]
-        parsed = json.loads(clean)
-        if isinstance(parsed, dict):
-            # Buscar la primera lista en los valores
-            for v in parsed.values():
-                if isinstance(v, list):
-                    parsed = v
-                    break
-        quotes_list = parsed if isinstance(parsed, list) else []
-    except Exception as parse_err:
-        logger.warning(f"No se pudo parsear JSON de citas: {parse_err}. Raw: {raw_result[:300]}")
-        raise HTTPException(
-            status_code=500,
-            detail=f"No se pudo parsear el formato de citas generado por la IA. Por favor, reintentá. Error: {str(parse_err)}"
-        )
-
-    # Enriquecer cada cita con tiempos buscando en los segmentos
-    enriched = []
-    for item in quotes_list:
-        if not isinstance(item, dict):
-            continue
-        quote_text = item.get("quote", "").strip()
-        note_text  = item.get("note", "").strip()
-        search_kw  = item.get("search", quote_text[:40]).strip()
-
-        times = find_segment_times_for_quote(search_kw, req.segments)
-
-        enriched.append({
-            "quote":  quote_text,
-            "note":   note_text,
-            "search": search_kw,
-            "start":  times.get("start"),
-            "end":    times.get("end"),
-            "has_time": bool(times),
-        })
-
-    return {"quotes": enriched, "total": len(enriched)}
 
 
 class ExportDocxRequest(BaseModel):
@@ -2394,279 +509,800 @@ class ExportDocxRequest(BaseModel):
     description: Optional[str] = ""
     transcript: str
 
+
+def require_groq(api_key: Optional[str]):
+    client = ai.get_groq_client(api_key)
+    if not client:
+        raise HTTPException(status_code=503, detail="Groq API no configurada. Cargá tu API Key en Configuración.")
+    return client
+
+
+def ai_error(e: Exception) -> HTTPException:
+    if isinstance(e, ai.RateLimitedError) or ai.is_rate_limit(e):
+        return HTTPException(status_code=429, detail="⚠️ Límite de uso de Groq alcanzado. Podés:\n1. Esperar unos minutos e intentar de nuevo.\n2. Configurar tu propia API key de Groq en Configuración (gratis en console.groq.com).")
+    logger.exception("Error de IA")
+    return HTTPException(status_code=500, detail=f"Error al analizar: {e}")
+
+
+# ─── ENDPOINTS: SALUD ────────────────────────────────────────────────────────
+
+@app.get("/api/health")
+async def health():
+    """Chequeo rápido (no sale a internet)."""
+    return {"status": "ok", "ffmpeg": HAS_FFMPEG, "whisper_local": media.WHISPER_MODEL_AVAILABLE,
+            "groq_server_key": ai.get_groq_client() is not None, "yt_dlp": yt_dlp.version.__version__}
+
+
+@app.get("/api/health/cookies")
+async def check_cookies():
+    """Verifica si las cookies de YouTube siguen funcionando (prueba real, tarda unos segundos)."""
+    test_url = "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+    try:
+        info = await run_light(lambda: yt_dlp.YoutubeDL(get_robust_opts(test_url)).extract_info(test_url, download=False))
+        return {"status": "ok", "cookie_valid": True, "video_title": info.get('title'),
+                "server_time": time.strftime("%Y-%m-%d %H:%M:%S")}
+    except Exception as e:
+        return {"status": "error", "cookie_valid": False, "error": str(e)[:300],
+                "server_time": time.strftime("%Y-%m-%d %H:%M:%S")}
+
+
+# ─── ENDPOINTS: INFO DE VIDEO ────────────────────────────────────────────────
+
+def _resolution_label(height: Optional[int], fmt: dict) -> str:
+    if height:
+        for min_h, label in ((2160, "2160p (4K UHD)"), (1440, "1440p (2K QHD)"), (1080, "1080p (Full HD)"),
+                             (720, "720p (HD)"), (480, "480p (SD)"), (360, "360p (SD)")):
+            if height >= min_h:
+                return label
+        return f"{height}p"
+    note = fmt.get('format_note')
+    if note and not re.search(r'\d+x\d+', note) and len(note) < 15:
+        return note
+    return "Calidad estándar"
+
+
+MP3_FORMAT = {'format_id': 'mp3', 'ext': 'mp3', 'resolution': 'Solo audio', 'filesize': None, 'label': 'Solo audio (.mp3)'}
+BEST_FORMAT = {'format_id': 'best', 'ext': 'mp4', 'resolution': 'Mejor calidad', 'filesize': None, 'label': 'Mejor calidad (.mp4)'}
+
+
+@app.post("/api/video-info")
+async def get_video_info(req: VideoRequest):
+    url = await resolve_url(req.url)
+    is_instagram = host_matches(url, INSTAGRAM_DOMAINS)
+
+    if is_instagram and instaloader:
+        try:
+            ig = await run_light(get_instagram_info, url)
+            formats = [BEST_FORMAT, MP3_FORMAT] if ig['is_video'] else [
+                {'format_id': 'best', 'ext': 'jpg', 'resolution': 'Imagen original', 'filesize': None, 'label': 'Imagen original (.jpg)'}]
+            thumb = proxied_thumbnail(ig.get('thumbnail'))
+            return {'title': ig['title'], 'thumbnail': thumb, 'max_res_thumbnail': thumb, 'duration': ig.get('duration'),
+                    'uploader': ig.get('uploader') or 'Instagram', 'description': ig['title'], 'formats': formats,
+                    'has_ffmpeg': HAS_FFMPEG, 'has_subtitles': False}
+        except Exception as e:
+            logger.debug(f"Instaloader falló, intentando con yt-dlp: {e}")
+
+    try:
+        info = await run_blocking(ytdlp_extract, url)
+    except Exception as e:
+        last_error = str(e)
+        logger.error(f"No se pudo obtener info de {url}: {last_error[:300]}")
+        if is_instagram:
+            files = await run_blocking(get_instagram_carousel_info, url, find_cookie_file(url))
+            if files:
+                meta = files[0].get("metadata", {})
+                title = meta.get("description") or f"Instagram Post {meta.get('post_shortcode', '')}"
+                thumb = proxied_thumbnail(files[0].get("url"))
+                return {'title': title[:100] + ("..." if len(title) > 100 else ""), 'thumbnail': thumb,
+                        'max_res_thumbnail': thumb, 'duration': None,
+                        'uploader': meta.get("username") or "Instagram User", 'description': meta.get("description") or "",
+                        'formats': [{'format_id': 'carousel_images', 'ext': 'zip', 'resolution': 'Imágenes (ZIP)',
+                                     'filesize': None, 'label': f"Conjunto de {len(files)} imágenes (.zip)"}],
+                        'has_ffmpeg': HAS_FFMPEG, 'has_subtitles': False, 'can_transcribe': True}
+            if "No video formats found" in last_error:
+                raise HTTPException(status_code=400, detail="Este post de Instagram no contiene video (es una publicación de fotos). Clipadsk solo puede descargar o transcribir videos y audios.")
+        raise HTTPException(status_code=400, detail=f"No pudimos procesar este video. Puede ser privado o la plataforma bloqueó la conexión. Errores: {last_error[:200]}")
+
+    formats, seen = [], set()
+    useful = sorted((f for f in info.get('formats') or [] if f.get('vcodec') != 'none'),
+                    key=lambda f: f.get('height') or 0, reverse=True)
+    for f in useful:
+        height = f.get('height')
+        res_str = f.get('resolution') or ''
+        if not height and 'x' in res_str:
+            try:
+                height = int(res_str.split('x')[1])
+            except (ValueError, IndexError):
+                pass
+        res = _resolution_label(height, f)
+        ext = f.get('ext', 'mp4')
+        if f"{res}_{ext}" in seen:
+            continue
+        seen.add(f"{res}_{ext}")
+        formats.append({'format_id': f.get('format_id'), 'ext': ext, 'resolution': res,
+                        'filesize': f.get('filesize') or f.get('filesize_approx'), 'label': f"{res} (.{ext})"})
+    if not formats:
+        formats.append(BEST_FORMAT)
+    if HAS_FFMPEG:
+        formats.append(MP3_FORMAT)
+
+    thumbnail = info.get('thumbnail')
+    if is_instagram:
+        thumbnail = proxied_thumbnail(thumbnail)
+    return {
+        'title': info.get('title'),
+        'thumbnail': thumbnail,
+        'max_res_thumbnail': thumbnail,
+        'duration': info.get('duration'),
+        'uploader': info.get('uploader') or "Desconocido",
+        'description': (info.get('description') or 'Sin descripción')[:200] + '...',
+        'formats': formats,
+        'has_ffmpeg': HAS_FFMPEG,
+        'has_subtitles': bool(info.get('subtitles') or info.get('automatic_captions')),
+    }
+
+
+# ─── ENDPOINTS: TRANSCRIPCIÓN DE URL ─────────────────────────────────────────
+
+def _find_file(folder: str, prefix: str, contains=()) -> Optional[str]:
+    for f in sorted(os.listdir(folder)):
+        if f.startswith(prefix) and (not contains or any(c in f for c in contains)):
+            return os.path.join(folder, f)
+    return None
+
+
+def transcribe_from_subtitles(url: str, lang: str, tmpdir: str, uid: Optional[str]) -> Optional[dict]:
+    """Intenta usar los subtítulos de YouTube (sin descargar audio). Bloqueante."""
+    def has_subs():
+        return any(f.startswith('sub.') for f in os.listdir(tmpdir))
+
+    extra = {'skip_download': True, 'writesubtitles': True, 'writeautomaticsub': True,
+             'subtitleslangs': ['es.*', 'en.*'], 'subtitlesformat': 'vtt/srt/best',
+             'outtmpl': os.path.join(tmpdir, 'sub.%(ext)s')}
+    try:
+        ytdlp_download(url, extra, has_subs,
+                       on_attempt=lambda n, name: update_progress(uid, 5 + n * 5, f"Buscando subtítulos ({name})..."))
+    except Exception as e:
+        add_log(uid, f"Sin subtítulos: {str(e)[:200]}")
+        return None
+
+    sub_file = _find_file(tmpdir, 'sub.', ('.es',))
+    is_english = False
+    if not sub_file:
+        sub_file = _find_file(tmpdir, 'sub.', ('.en',))
+        is_english = sub_file is not None
+    if not sub_file:
+        return None
+
+    with open(sub_file, 'r', encoding='utf-8', errors='replace') as f:
+        segments = parse_subtitles_to_segments(f.read())
+    if not segments:
+        return None
+
+    # Los subtítulos automáticos repiten texto entre segmentos: limpiar
+    for seg in segments:
+        seg["text"] = remove_repetitions(seg["text"])
+    if is_english and lang == "es":
+        update_progress(uid, 50, "Traduciendo subtítulos al español...")
+        for seg, t in zip(segments, ai.translate_texts([s["text"] for s in segments], "es")):
+            seg["text"] = t
+    raw_text = remove_repetitions(' '.join(s["text"] for s in segments))
+    return {"raw": raw_text, "segments": segments, "method": "subtitles"}
+
+
+def transcribe_from_audio(url: str, lang: str, tmpdir: str, uid: Optional[str], client) -> dict:
+    """Descarga el audio y lo transcribe (Groq → Whisper local). Bloqueante."""
+    add_log(uid, "Descargando audio para transcribir...")
+    extra = {'format': 'bestaudio/best', 'outtmpl': os.path.join(tmpdir, 'audio.%(ext)s')}
+
+    def has_audio():
+        return _find_file(tmpdir, 'audio.') is not None
+
+    ytdlp_download(url, extra, has_audio,
+                   on_attempt=lambda n, name: update_progress(uid, 20 + n * 3, f"Descargando audio ({name})..."))
+    audio_file = _find_file(tmpdir, 'audio.')
+    if HAS_FFMPEG:
+        update_progress(uid, 30, "Preparando audio...")
+        audio_file = media.to_speech_mp3(audio_file, os.path.join(tmpdir, 'speech.mp3'))
+
+    text, segments, method = media.transcribe_audio(
+        audio_file, lang, client, tmpdir,
+        progress=lambda p, t: update_progress(uid, p, t), log=lambda m: add_log(uid, m))
+    return {"raw": remove_repetitions(text.strip()), "segments": segments, "method": method}
+
+
+def transcribe_instagram_carousel(files: list, client, uid: Optional[str]) -> str:
+    """OCR de un carrusel de imágenes con Groq Vision. Bloqueante."""
+    parts = []
+    for idx, item in enumerate(files):
+        update_progress(uid, int(idx / len(files) * 90) + 5, f"Analizando diapositiva {idx + 1}/{len(files)}...")
+        try:
+            r = requests.get(item["url"], headers={'User-Agent': DESKTOP_UA}, timeout=20)
+            r.raise_for_status()
+            text = ai.ocr_image(client, base64.b64encode(r.content).decode('utf-8'))
+        except Exception as e:
+            logger.warning(f"OCR diapositiva {idx + 1} falló: {e}")
+            text = f"[Error de extracción: {e}]"
+        parts.append(f"--- DIAPOSITIVA {idx + 1} ---\n{text}")
+    return "\n\n".join(parts)
+
+
+def _only_images(files: list) -> bool:
+    for f in files:
+        meta = f.get("metadata", {})
+        if meta.get("video_url") or (meta.get("extension") or "").lower() in ('mp4', 'mov', 'avi', 'mkv', 'webm'):
+            return False
+    return True
+
+
+@app.post("/api/transcript")
+async def get_transcript(req: VideoRequest):
+    uid = req.uid
+    lang = req.target_lang or "es"
+    try:
+        url = await resolve_url(req.url)
+    except HTTPException as e:
+        return JSONResponse(status_code=e.status_code, content={"error": e.detail})
+    add_log(uid, f"Iniciando transcripción para: {url} | Idioma: {lang}")
+
+    cache_key = f"{url}_{lang}"
+    cached = await run_light(cache_get, cache_key)
+    if cached:
+        add_log(uid, "Resultado recuperado de la caché local.")
+        return {"transcript": cached.get("transcript", ""), "srt": cached.get("srt", ""),
+                "segments": cached.get("segments", []), "method": "cache"}
+
+    client = ai.get_groq_client(req.groq_api_key)
+    warnings: List[str] = []
+    try:
+        # Carrusel de Instagram solo con imágenes → OCR
+        if host_matches(url, INSTAGRAM_DOMAINS):
+            files = await run_blocking(get_instagram_carousel_info, url, find_cookie_file(url))
+            if files and _only_images(files):
+                if not client:
+                    return JSONResponse(status_code=400, content={"error": "Para extraer texto de imágenes (OCR) necesitás configurar la API Key de Groq en Configuración."})
+                add_log(uid, f"Carrusel de {len(files)} imágenes: OCR con Groq Vision")
+                text = await run_blocking(transcribe_instagram_carousel, files, client, uid)
+                payload = {"transcript": text, "srt": "", "segments": [], "method": "groq_vision_ocr"}
+                await run_light(cache_set, cache_key, payload)
+                update_progress(uid, 100, "¡Extracción de texto completa!")
+                store_result(uid, payload)
+                return payload
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            result = None
+            if host_matches(url, YOUTUBE_DOMAINS):
+                add_log(uid, "Buscando subtítulos de YouTube...")
+                result = await run_blocking(transcribe_from_subtitles, url, lang, tmpdir, uid)
+            if not result:
+                result = await run_blocking(transcribe_from_audio, url, lang, tmpdir, uid, client)
+
+        text = result["raw"]
+        if client:
+            update_progress(uid, 85, f"Aplicando puntuación y párrafos con IA ({lang})...")
+            text = await run_blocking(ai.cleanup_transcript, text, client, lang, warnings)
+
+        segments = result["segments"]
+        payload = {"transcript": text, "srt": generate_srt_from_segments(segments), "segments": segments,
+                   "method": result["method"]}
+        if warnings:
+            payload["warnings"] = warnings  # no se cachea: la próxima vez se reintenta la limpieza
+        else:
+            await run_light(cache_set, cache_key, payload)
+        update_progress(uid, 100, "¡Transcripción lista!")
+        add_log(uid, f"Transcripción completada ({result['method']}).")
+        store_result(uid, payload)
+        return payload
+    except Exception as e:
+        logger.exception("Error en transcripción")
+        add_log(uid, f"Error: {e}")
+        return JSONResponse(status_code=500, content={"error": str(e)[:500]})
+
+
+# ─── ENDPOINTS: TRANSCRIPCIÓN DE ARCHIVO ─────────────────────────────────────
+
+ALLOWED_AUDIO_EXTENSIONS = {'.ogg', '.opus', '.mp3', '.m4a', '.wav', '.mp4', '.aac', '.weba', '.webm',
+                            '.mov', '.avi', '.mkv', '.flac'}
+VIDEO_EXTS = {'.mp4', '.mov', '.avi', '.mkv', '.webm'}
+
+
+async def save_upload(file: UploadFile, dest: str, max_mb: int) -> float:
+    """Guarda el archivo subido en disco por partes (sin cargarlo entero en memoria)."""
+    size = 0
+    limit = max_mb * 1024 * 1024
+    with open(dest, 'wb') as out:
+        while True:
+            chunk = await file.read(1024 * 1024)
+            if not chunk:
+                break
+            size += len(chunk)
+            if size > limit:
+                raise HTTPException(status_code=413, detail=f"El archivo es demasiado grande. Máximo: {max_mb} MB.")
+            await run_light(out.write, chunk)
+    return size / (1024 * 1024)
+
+
+@app.post("/api/transcript-file")
+async def transcript_audio_file(
+    file: UploadFile = File(...),
+    target_lang: str = Form(default="es"),
+    uid: str = Form(default=None),
+    groq_api_key: str = Form(default=None),
+    is_local_video: Optional[str] = Form(default=None),
+):
+    """Transcribe un archivo subido (WhatsApp .ogg/.opus, grabaciones, videos)."""
+    client = ai.get_groq_client(groq_api_key)
+    if not client and not media.WHISPER_MODEL_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Groq API no configurada. Configurá tu API Key en la interfaz o instalá faster-whisper para transcribir localmente.")
+
+    ext = os.path.splitext(file.filename or '')[1].lower()
+    if ext not in ALLOWED_AUDIO_EXTENSIONS:
+        raise HTTPException(status_code=400, detail=f"Formato no soportado: '{ext}'. Formatos válidos: {', '.join(sorted(ALLOWED_AUDIO_EXTENSIONS))}")
+
+    warnings: List[str] = []
+    with tempfile.TemporaryDirectory() as tmpdir:
+        input_path = os.path.join(tmpdir, f"input{ext}")
+        size_mb = await save_upload(file, input_path, MAX_UPLOAD_MB)
+        update_progress(uid, 5, "Archivo recibido en el servidor...")
+        add_log(uid, f"Archivo recibido: {file.filename} ({size_mb:.2f} MB)")
+
+        try:
+            audio_path = input_path
+            if HAS_FFMPEG or media.AudioSegment:
+                update_progress(uid, 10, "Convirtiendo audio...")
+                try:
+                    audio_path = await run_blocking(media.to_speech_mp3, input_path, os.path.join(tmpdir, "speech.mp3"))
+                except Exception as e:
+                    logger.warning(f"Conversión falló, se usa el archivo original: {e}")
+            converted_mb = os.path.getsize(audio_path) / (1024 * 1024)
+            if converted_mb >= GROQ_MAX_UPLOAD_MB and not HAS_FFMPEG and not media.WHISPER_MODEL_AVAILABLE:
+                raise HTTPException(status_code=400, detail="El archivo es demasiado grande para Groq y no se puede dividir porque FFmpeg no está instalado. Instalá FFmpeg o subí un audio más corto.")
+
+            update_progress(uid, 20, "Iniciando transcripción del audio...")
+            text, segments, method = await run_blocking(
+                media.transcribe_audio, audio_path, target_lang, client, tmpdir,
+                progress=lambda p, t: update_progress(uid, p, t), log=lambda m: add_log(uid, m))
+            text = remove_repetitions(text.strip())
+
+            if client:
+                update_progress(uid, 80, "Aplicando puntuación y párrafos con IA...")
+                text = await run_blocking(ai.cleanup_transcript, text, client, target_lang, warnings)
+
+            update_progress(uid, 100, "Completado")
+            add_log(uid, "Transcripción de archivo completada.")
+            payload = {"transcript": text, "srt": generate_srt_from_segments(segments), "segments": segments,
+                       "method": method, "filename": file.filename, "size_mb": round(size_mb, 2)}
+            if warnings:
+                payload["warnings"] = warnings
+            store_result(uid, payload)
+            return payload
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.exception("Error transcribiendo archivo")
+            add_log(uid, f"Error en transcripción de archivo: {e}")
+            raise HTTPException(status_code=500, detail=f"Error al transcribir: {e}")
+
+
+# ─── ENDPOINTS: DESCARGA ─────────────────────────────────────────────────────
+
+def _remove_later(background_tasks: BackgroundTasks, *paths):
+    def remove():
+        for p in paths:
+            try:
+                if p and os.path.exists(p):
+                    os.remove(p)
+            except OSError:
+                logger.warning(f"No se pudo borrar {p}")
+    background_tasks.add_task(remove)
+
+
+def _build_carousel_zip(files: list, zip_path: str):
+    with zipfile.ZipFile(zip_path, 'w') as zf:
+        for idx, item in enumerate(files):
+            ext = item.get("metadata", {}).get("extension") or "jpg"
+            try:
+                r = requests.get(item["url"], headers={'User-Agent': DESKTOP_UA}, timeout=30)
+                if r.status_code == 200:
+                    zf.writestr(f"imagen_{idx + 1}.{ext}", r.content)
+            except Exception as e:
+                logger.warning(f"Error descargando imagen {idx + 1} para zip: {e}")
+
+
+def _instagram_download(ig: dict, uid: str, as_mp3: bool) -> str:
+    tmp_mp4 = os.path.join(DOWNLOAD_FOLDER, f'instagram_{uid}.mp4')
+    http_download(ig['video_url'], tmp_mp4, {'User-Agent': MOBILE_UA})
+    if not as_mp3:
+        return tmp_mp4
+    mp3_path = os.path.join(DOWNLOAD_FOLDER, f'instagram_{uid}.mp3')
+    try:
+        media.run_ffmpeg(['-i', tmp_mp4, '-vn', '-acodec', 'libmp3lame', '-q:a', '2', mp3_path])
+    finally:
+        os.remove(tmp_mp4)
+    return mp3_path
+
+
+@app.post("/api/download")
+async def download_video(req: VideoRequest, background_tasks: BackgroundTasks):
+    url = await resolve_url(req.url)
+    format_id = req.format_id
+    file_uid = uuid.uuid4().hex
+
+    # Carrusel de imágenes (gallery-dl) → ZIP
+    if format_id == 'carousel_images':
+        files = await run_blocking(get_instagram_carousel_info, url, find_cookie_file(url))
+        if not files:
+            raise HTTPException(status_code=400, detail="No se pudieron extraer las imágenes del carrusel.")
+        zip_path = os.path.join(DOWNLOAD_FOLDER, f"instagram_carousel_{file_uid}.zip")
+        await run_blocking(_build_carousel_zip, files, zip_path)
+        _remove_later(background_tasks, zip_path)
+        user = safe_filename(files[0]["metadata"].get("username", "instagram"), 30)
+        return FileResponse(zip_path, filename=f"carrusel_{user}_{file_uid[:6]}.zip", media_type='application/zip')
+
+    # Instagram con instaloader
+    if host_matches(url, INSTAGRAM_DOMAINS) and instaloader:
+        try:
+            ig = await run_light(get_instagram_info, url)
+            if not ig['is_video']:
+                raise HTTPException(status_code=400, detail="Este post de Instagram no tiene video.")
+            as_mp3 = format_id == 'mp3'
+            if as_mp3 and not HAS_FFMPEG:
+                raise HTTPException(status_code=400, detail="Para descargar como MP3 hace falta FFmpeg.")
+            path = await run_blocking(_instagram_download, ig, file_uid, as_mp3)
+            _remove_later(background_tasks, path)
+            ext = 'mp3' if as_mp3 else 'mp4'
+            return FileResponse(path, filename=f"{safe_filename(ig['title'], 30)}_{file_uid[:6]}.{ext}",
+                                media_type='audio/mpeg' if as_mp3 else 'video/mp4')
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.debug(f"Instaloader falló, intentando con yt-dlp: {e}")
+
+    output_template = os.path.join(DOWNLOAD_FOLDER, f'%(title).80B_{file_uid}.%(ext)s')
+    if format_id == 'mp3':
+        if not HAS_FFMPEG:
+            raise HTTPException(status_code=400, detail="Para descargar como MP3 hace falta FFmpeg.")
+        extra = {'format': 'bestaudio/best', 'outtmpl': output_template,
+                 'postprocessors': [{'key': 'FFmpegExtractAudio', 'preferredcodec': 'mp3', 'preferredquality': '192'}]}
+    else:
+        if not HAS_FFMPEG:
+            fmt = 'best[ext=mp4]/best'  # sin FFmpeg no se puede unir video+audio
+        elif format_id and format_id not in ('best', 'bestvideo+bestaudio'):
+            fmt = f"{format_id}+bestaudio[ext=m4a]/{format_id}+bestaudio/bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best[ext=mp4]/best"
+        else:
+            fmt = 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best[ext=mp4]/best'
+        extra = {'format': fmt, 'outtmpl': output_template, 'merge_output_format': 'mp4'}
+
+    def hook(d):
+        if d.get('status') == 'downloading':
+            total = d.get('total_bytes') or d.get('total_bytes_estimate')
+            if total:
+                pct = d.get('downloaded_bytes', 0) / total * 100
+                update_progress(req.uid, 20 + int(pct * 0.7), f"Descargando: {pct:.0f}%")
+        elif d.get('status') == 'finished':
+            update_progress(req.uid, 90, "Descarga completada, procesando con FFmpeg...")
+    extra['progress_hooks'] = [hook]
+
+    if req.start_time or req.end_time:
+        from yt_dlp.utils import parse_duration, download_range_func
+        start_sec = parse_duration(req.start_time) if req.start_time else 0
+        end_sec = parse_duration(req.end_time) if req.end_time else float('inf')
+        if start_sec is None or end_sec is None or end_sec <= start_sec:
+            raise HTTPException(status_code=400, detail="Rango de tiempo inválido.")
+        extra['download_ranges'] = download_range_func(None, [(start_sec, end_sec)])
+        extra['force_keyframes_at_cuts'] = True
+
+    def find_output():
+        for f in os.listdir(DOWNLOAD_FOLDER):
+            if file_uid in f and not f.endswith(('.part', '.ytdl')) and '.temp.' not in f:
+                return os.path.join(DOWNLOAD_FOLDER, f)
+        return None
+
+    update_progress(req.uid, 5, "Iniciando proceso...")
+    try:
+        await run_blocking(ytdlp_download, url, extra, lambda: find_output() is not None,
+                           on_attempt=lambda n, name: update_progress(req.uid, 5 + n * 5, f"Conectando ({name})..."))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"No se pudo descargar: {str(e)[:300]}")
+
+    path = find_output()
+    if not path:
+        raise HTTPException(status_code=500, detail="El archivo no apareció después de la descarga.")
+    update_progress(req.uid, 100, "¡Archivo listo!")
+    _remove_later(background_tasks, path)
+    name = os.path.basename(path).replace(f"_{file_uid}", "")
+    return FileResponse(path, filename=name)
+
+
+@app.get("/api/proxy-thumbnail")
+async def proxy_thumbnail(url: str):
+    """Proxy de miniaturas de Instagram (solo dominios de Instagram/Facebook CDN)."""
+    if not is_allowed_thumbnail_url(url):
+        raise HTTPException(status_code=400, detail="URL de miniatura no permitida.")
+    headers = {'User-Agent': DESKTOP_UA, 'Referer': 'https://www.instagram.com/'}
+    try:
+        resp = await run_light(requests.get, url, headers=headers, timeout=10)
+        resp.raise_for_status()
+        ctype = resp.headers.get('Content-Type', 'image/jpeg')
+        if not ctype.startswith('image/'):
+            return Response(status_code=415)
+        return Response(content=resp.content, media_type=ctype)
+    except Exception as e:
+        logger.debug(f"Proxy de miniatura falló: {e}")
+        return Response(status_code=502)
+
+
+@app.delete("/api/clear-downloads")
+async def clear_downloads():
+    def clear():
+        shutil.rmtree(DOWNLOAD_FOLDER, ignore_errors=True)
+        os.makedirs(DOWNLOAD_FOLDER, exist_ok=True)
+    try:
+        await run_light(clear)
+        return {"status": "success", "message": "Descargas locales eliminadas correctamente."}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ─── ENDPOINTS: HERRAMIENTAS PERIODÍSTICAS ───────────────────────────────────
+
+@app.post("/api/chat")
+async def chat_with_transcript(req: ChatRequest):
+    client = require_groq(req.groq_api_key)
+    if not req.question.strip():
+        raise HTTPException(status_code=400, detail="La pregunta está vacía.")
+    try:
+        answer = await run_blocking(ai.chat_about_transcript, client, req.transcript, req.question)
+        return {"answer": answer}
+    except Exception as e:
+        raise ai_error(e)
+
+
+@app.post("/api/analyze")
+async def analyze_transcript(req: AnalyzeRequest):
+    """Modos: summary (resumen), data (datos duros), angle (ángulos), diarization (hablantes)."""
+    client = require_groq(req.groq_api_key)
+    if req.mode not in ai.JOURNALIST_PROMPTS:
+        raise HTTPException(status_code=400, detail=f"Modo inválido. Opciones: {list(ai.JOURNALIST_PROMPTS)}")
+    if len(req.transcript.strip()) < 50:
+        raise HTTPException(status_code=400, detail="La transcripción es demasiado corta para analizar.")
+    try:
+        out = await run_blocking(ai.analyze_transcript, client, req.transcript, req.mode)
+        return {"result": out["result"], "mode": req.mode, "model_used": out["model_used"], "parts": out["parts"]}
+    except Exception as e:
+        raise ai_error(e)
+
+
+@app.post("/api/quotes")
+async def extract_quotes_with_times(req: QuotesRequest):
+    """Citas textuales con sus tiempos de entrada/salida en el video."""
+    client = require_groq(req.groq_api_key)
+    if len(req.transcript.strip()) < 50:
+        raise HTTPException(status_code=400, detail="La transcripción es demasiado corta.")
+    try:
+        quotes, parts = await run_blocking(ai.extract_quotes, client, req.transcript)
+    except Exception as e:
+        raise ai_error(e)
+    if not quotes and parts:
+        raise HTTPException(status_code=500, detail="No se pudo interpretar la respuesta de la IA. Reintentá.")
+
+    enriched = []
+    for item in quotes:
+        quote_text = str(item.get("quote", "")).strip()
+        search_kw = str(item.get("search") or quote_text[:60]).strip()
+        times = find_segment_times_for_quote(search_kw, req.segments) or find_segment_times_for_quote(quote_text, req.segments)
+        enriched.append({"quote": quote_text, "note": str(item.get("note", "")).strip(), "search": search_kw,
+                         "start": times.get("start"), "end": times.get("end"), "has_time": bool(times)})
+    return {"quotes": enriched, "total": len(enriched), "parts": parts}
+
+
 @app.post("/api/export-docx")
 async def export_docx(req: ExportDocxRequest):
     try:
         import docx
         from docx.shared import Inches, Pt, RGBColor
         from docx.enum.text import WD_ALIGN_PARAGRAPH
-        
+    except ImportError:
+        raise HTTPException(status_code=500, detail="Falta la librería python-docx. Ejecutá: pip install python-docx")
+
+    def build() -> io.BytesIO:
         doc = docx.Document()
-        
-        # Margins
         for section in doc.sections:
-            section.top_margin = Inches(1)
-            section.bottom_margin = Inches(1)
-            section.left_margin = Inches(1)
-            section.right_margin = Inches(1)
-            
-        # Normal Style
-        style_normal = doc.styles['Normal']
-        font = style_normal.font
-        font.name = 'Arial'
-        font.size = Pt(11)
-        font.color.rgb = RGBColor(0x33, 0x41, 0x55) # Slate 700
-        
-        # Title
-        p_title = doc.add_paragraph()
-        p_title.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        p_title.paragraph_format.space_after = Pt(12)
-        run_title = p_title.add_run(req.title)
-        run_title.bold = True
-        run_title.font.size = Pt(18)
-        run_title.font.color.rgb = RGBColor(0x1e, 0x1b, 0x4b) # Indigo 950
-        
-        # Metadata
+            section.top_margin = section.bottom_margin = Inches(1)
+            section.left_margin = section.right_margin = Inches(1)
+        normal = doc.styles['Normal'].font
+        normal.name, normal.size, normal.color.rgb = 'Arial', Pt(11), RGBColor(0x33, 0x41, 0x55)
+
+        p = doc.add_paragraph()
+        p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        p.paragraph_format.space_after = Pt(12)
+        r = p.add_run(req.title)
+        r.bold, r.font.size, r.font.color.rgb = True, Pt(18), RGBColor(0x1e, 0x1b, 0x4b)
+
         if req.uploader or req.url:
-            p_meta = doc.add_paragraph()
-            p_meta.paragraph_format.space_before = Pt(6)
-            p_meta.paragraph_format.space_after = Pt(12)
-            if req.uploader:
-                r = p_meta.add_run("Autor/Canal: ")
-                r.bold = True
-                p_meta.add_run(f"{req.uploader}\n")
-            if req.url:
-                r = p_meta.add_run("Enlace: ")
-                r.bold = True
-                p_meta.add_run(f"{req.url}\n")
-                
-        # Description
+            p = doc.add_paragraph()
+            p.paragraph_format.space_after = Pt(12)
+            for label, value in (("Autor/Canal: ", req.uploader), ("Enlace: ", req.url)):
+                if value:
+                    p.add_run(label).bold = True
+                    p.add_run(f"{value}\n")
+
         if req.description:
-            p_desc_title = doc.add_paragraph()
-            r = p_desc_title.add_run("Descripción / Copy:")
-            r.bold = True
-            r.font.size = Pt(12)
-            p_desc_title.paragraph_format.space_before = Pt(12)
-            p_desc_title.paragraph_format.space_after = Pt(4)
-            
-            p_desc = doc.add_paragraph()
-            p_desc.paragraph_format.left_indent = Inches(0.25)
-            p_desc.paragraph_format.space_after = Pt(18)
-            p_desc.add_run(req.description)
-            
-        # Divider
-        p_sep = doc.add_paragraph()
-        p_sep.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        p_sep.add_run("─" * 40)
-        p_sep.paragraph_format.space_after = Pt(18)
-        
-        # Transcription Title
-        p_trans_title = doc.add_paragraph()
-        r = p_trans_title.add_run("Transcripción:")
-        r.bold = True
-        r.font.size = Pt(14)
-        r.font.color.rgb = RGBColor(0x4f, 0x46, 0xe5) # Indigo Accent
-        p_trans_title.paragraph_format.space_after = Pt(12)
-        
-        # Transcription Text
-        paragraphs = req.transcript.split("\n\n")
-        for para in paragraphs:
-            para_clean = para.strip()
-            if para_clean:
-                if para_clean.startswith("--- ") and para_clean.endswith(" ---"):
-                    p_slide = doc.add_paragraph()
-                    p_slide.paragraph_format.space_before = Pt(12)
-                    p_slide.paragraph_format.space_after = Pt(6)
-                    r_slide = p_slide.add_run(para_clean)
-                    r_slide.bold = True
-                    r_slide.font.size = Pt(12)
-                    r_slide.font.color.rgb = RGBColor(0x63, 0x66, 0xf1)
-                else:
-                    p = doc.add_paragraph()
-                    p.paragraph_format.space_after = Pt(6)
-                    p.add_run(para_clean)
-                    
-        import io
-        file_stream = io.BytesIO()
-        doc.save(file_stream)
-        file_stream.seek(0)
-        
-        from fastapi.responses import StreamingResponse
-        headers = {
-            'Content-Disposition': 'attachment; filename="transcripcion.docx"',
-            'Access-Control-Expose-Headers': 'Content-Disposition'
-        }
-        return StreamingResponse(file_stream, media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document", headers=headers)
-        
+            r = doc.add_paragraph().add_run("Descripción / Copy:")
+            r.bold, r.font.size = True, Pt(12)
+            p = doc.add_paragraph(req.description)
+            p.paragraph_format.left_indent = Inches(0.25)
+            p.paragraph_format.space_after = Pt(18)
+
+        sep = doc.add_paragraph("─" * 40)
+        sep.alignment = WD_ALIGN_PARAGRAPH.CENTER
+
+        r = doc.add_paragraph().add_run("Transcripción:")
+        r.bold, r.font.size, r.font.color.rgb = True, Pt(14), RGBColor(0x4f, 0x46, 0xe5)
+
+        for para in req.transcript.split("\n\n"):
+            para = para.strip()
+            if not para:
+                continue
+            p = doc.add_paragraph()
+            p.paragraph_format.space_after = Pt(6)
+            if para.startswith("--- ") and para.endswith(" ---"):
+                r = p.add_run(para)
+                r.bold, r.font.size, r.font.color.rgb = True, Pt(12), RGBColor(0x63, 0x66, 0xf1)
+            else:
+                # Respetar **negritas** (nombres de hablantes en la diarización)
+                for i, piece in enumerate(re.split(r'\*\*(.+?)\*\*', para)):
+                    if piece:
+                        p.add_run(piece).bold = (i % 2 == 1)
+        stream = io.BytesIO()
+        doc.save(stream)
+        stream.seek(0)
+        return stream
+
+    try:
+        stream = await run_light(build)
     except Exception as e:
-        logger.error(f"Error exportando a DOCX: {e}")
-        raise HTTPException(status_code=500, detail=f"No se pudo generar el archivo DOCX: {str(e)}")
+        logger.exception("Error exportando DOCX")
+        raise HTTPException(status_code=500, detail=f"No se pudo generar el archivo DOCX: {e}")
+    fname = safe_filename(req.title, 60) or "transcripcion"
+    return StreamingResponse(
+        stream, media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        headers={'Content-Disposition': f"attachment; filename=\"transcripcion.docx\"; filename*=UTF-8''{quote(fname)}.docx"})
 
 
-# --- SERVIDO DE FRONTEND ---
-# Este bloque DEBE ir al final para no interceptar rutas de la API
-if os.path.exists(FRONTEND_DIR):
-    @app.get("/{path:path}")
-    async def serve_static_or_index(path: str):
-        # Si la ruta está vacía, servimos index.html
-        if not path:
-            return FileResponse(os.path.join(FRONTEND_DIR, 'index.html'))
+# ─── ENDPOINTS: MANTENIMIENTO ────────────────────────────────────────────────
 
-        # Intentamos buscar el archivo en la carpeta frontend de forma segura
-        requested = Path(FRONTEND_DIR) / path
-        try:
-            resolved = requested.resolve()
-            frontend_root = Path(FRONTEND_DIR).resolve()
-            # Asegurar que la ruta resuelta está dentro de la carpeta frontend
-            if frontend_root in resolved.parents or resolved == frontend_root:
-                if resolved.exists() and resolved.is_file():
-                    return FileResponse(str(resolved))
-        except Exception as e:
-            logger.debug(f"Error resolviendo ruta estática: {e}")
-
-        # Fallback a index.html para rutas SPA
-        return FileResponse(os.path.join(FRONTEND_DIR, 'index.html'))
-
-    # Soporte explícito para HEAD / (Render HealthCheck)
-    @app.head("/", include_in_schema=False)
-    @app.get("/", include_in_schema=False)
-    async def serve_index():
-        if os.path.exists(os.path.join(FRONTEND_DIR, 'index.html')):
-            return FileResponse(os.path.join(FRONTEND_DIR, 'index.html'))
-        return Response(content="StreamVault API Root", media_type="text/plain")
-else:
-    logger.warning(f"No se encontró la carpeta frontend en {FRONTEND_DIR}")
+def _pip_install_requirements() -> tuple:
+    req_file = os.path.join(BASE_DIR, 'requirements.txt')
+    res = subprocess.run([sys.executable, '-m', 'pip', 'install', '-q', '-r', req_file],
+                         capture_output=True, text=True, timeout=900)
+    return res.returncode == 0, (res.stderr or res.stdout).strip()[-500:]
 
 
-# --- FUNCIONES DE MANTENIMIENTO DEL SISTEMA ---
+def _update_app() -> dict:
+    protected = [os.path.join(d, n) for d in (ROOT_DIR, BASE_DIR) for n in (".env", "cookies.txt", "cookies_ig.txt")]
+    backups = {}
+    for path in protected:
+        if os.path.exists(path):
+            try:
+                with open(path, "rb") as f:
+                    backups[path] = f.read()
+            except OSError as e:
+                logger.warning(f"No se pudo respaldar {path}: {e}")
+
+    repo = os.environ.get('GIT_REPO_DIR', ROOT_DIR)
+    error, output = None, ""
+    try:
+        res = subprocess.run(["git", "pull", "origin", "main"], capture_output=True, text=True, cwd=repo, timeout=300)
+        output = res.stdout.strip()
+        if res.returncode != 0:
+            error = f"git pull salió con código {res.returncode}: {res.stderr.strip()[-400:]}"
+    except FileNotFoundError:
+        error = "Git no está instalado o no está en el PATH."
+    except Exception as e:
+        error = str(e)
+    finally:
+        for path, content in backups.items():
+            try:
+                with open(path, "wb") as f:
+                    f.write(content)
+            except OSError as e:
+                logger.warning(f"No se pudo restaurar {path}: {e}")
+
+    if error:
+        return {"error": f"Error al actualizar: {error}"}
+    if "Already up to date" in output or "Ya está actualizado" in output:
+        return {"status": "ok", "message": "La aplicación ya está actualizada. No hay cambios nuevos.", "output": output}
+
+    ok, pip_out = _pip_install_requirements()
+    msg = "✅ Aplicación actualizada. Reiniciá Clipadsk (cerrá y abrí iniciar.bat) para aplicar los cambios."
+    if not ok:
+        msg += f" ⚠️ No se pudieron instalar algunas dependencias: {pip_out}"
+    return {"status": "ok", "message": msg, "output": output}
+
 
 @app.post("/api/system/update-app")
 async def update_app(request: Request):
-    """Ejecuta git pull para traer los últimos cambios del código, protegiendo archivos de configuración locales."""
-    # Protección simple: si ADMIN_TOKEN está configurado, requerir header X-ADMIN-TOKEN
-    admin_token = os.environ.get('ADMIN_TOKEN')
-    if admin_token:
-        provided = request.headers.get('X-ADMIN-TOKEN') or request.query_params.get('admin_token')
-        if not provided or provided != admin_token:
-            raise HTTPException(status_code=403, detail="Se requiere token de administrador para esta operación.")
-    
-    # Respaldar archivos de configuración locales para evitar que git pull los borre o sobreescriba
-    config_backups = {}
-    files_to_backup = [
-        (ROOT_DIR, ".env"),
-        (ROOT_DIR, "cookies.txt"),
-        (ROOT_DIR, "cookies_ig.txt"),
-        (BASE_DIR, "cookies.txt"),
-        (BASE_DIR, "cookies_ig.txt")
-    ]
-    for folder, fname in files_to_backup:
-        fpath = os.path.join(folder, fname)
-        if os.path.exists(fpath):
-            try:
-                with open(fpath, "rb") as f:
-                    config_backups[fpath] = f.read()
-                logger.info(f"Respaldo temporal creado para: {fpath}")
-            except Exception as ex:
-                logger.warning(f"No se pudo respaldar {fpath}: {ex}")
+    """git pull + reinstalar dependencias, protegiendo .env y cookies."""
+    require_admin(request)
+    result = await run_light(_update_app)
+    if "error" in result:
+        return JSONResponse(status_code=500, content=result)
+    return result
 
-    pull_error = None
-    pull_stdout = ""
-    pull_stderr = ""
 
-    # Determinar directorio del repo git.
-    git_repo_dir = os.environ.get('GIT_REPO_DIR', ROOT_DIR)
-
-    try:
-        import subprocess
-        logger.info(f"Ejecutando git pull en: {git_repo_dir}")
-        result = subprocess.run(
-            ["git", "pull", "origin", "main"],
-            capture_output=True,
-            text=True,
-            cwd=git_repo_dir
-        )
-        pull_stdout = result.stdout.strip()
-        pull_stderr = result.stderr.strip()
-
-        if result.returncode != 0:
-            pull_error = f"git pull salió con código {result.returncode}. stderr: {pull_stderr}"
-        elif "Already up to date" in pull_stdout:
-            pull_stdout = "La aplicación ya está actualizada. No hay cambios nuevos."
-    except FileNotFoundError:
-        pull_error = "Git no está instalado o no está en el PATH."
-    except Exception as e:
-        pull_error = str(e)
-
-    # Restaurar siempre los archivos de configuración respaldados
-    for fpath, content in config_backups.items():
+def _update_engine() -> dict:
+    # El backend usa el paquete de Python yt_dlp, así que se actualiza ese (y el .exe si existe)
+    res = subprocess.run([sys.executable, '-m', 'pip', 'install', '-U', '-q', 'yt-dlp[default]'],
+                         capture_output=True, text=True, timeout=600)
+    if res.returncode != 0:
+        return {"error": f"Error al actualizar motor: {(res.stderr or res.stdout)[-400:]}"}
+    exe = os.path.join(ROOT_DIR, "yt-dlp.exe")
+    if os.path.exists(exe):
         try:
-            with open(fpath, "wb") as f:
-                f.write(content)
-            logger.info(f"Restaurado archivo de configuración/cookie en: {fpath}")
-        except Exception as ex:
-            logger.warning(f"No se pudo restaurar {fpath}: {ex}")
+            subprocess.run([exe, "-U"], capture_output=True, text=True, timeout=300)
+        except Exception as e:
+            logger.warning(f"No se pudo actualizar yt-dlp.exe: {e}")
+    version = subprocess.run([sys.executable, '-m', 'yt_dlp', '--version'], capture_output=True, text=True).stdout.strip()
+    return {"status": "ok",
+            "message": f"Motor de descarga actualizado (yt-dlp {version}). Reiniciá Clipadsk para usar la nueva versión.",
+            "output": version}
 
-    if pull_error:
-        return JSONResponse(status_code=500, content={"error": f"Error al actualizar: {pull_error}"})
-
-    return {"status": "ok", "message": "✅ Aplicación actualizada con éxito. Recargando...", "output": pull_stdout}
 
 @app.post("/api/system/update-engine")
 async def update_engine(request: Request):
-    """Actualiza el ejecutable yt-dlp.exe."""
-    admin_token = os.environ.get('ADMIN_TOKEN')
-    if admin_token:
-        provided = request.headers.get('X-ADMIN-TOKEN') or request.query_params.get('admin_token')
-        if not provided or provided != admin_token:
-            raise HTTPException(status_code=403, detail="Se requiere token de administrador para esta operación.")
-    try:
-        import subprocess
-        ytdlp_path = os.path.join(ROOT_DIR, "yt-dlp.exe")
-        if not os.path.exists(ytdlp_path):
-            ytdlp_path = "yt-dlp" # Fallback a path si no está en root
-            
-        result = subprocess.run([ytdlp_path, "-U"], capture_output=True, text=True, check=True)
-        return {"status": "ok", "message": "Motor de descarga actualizado.", "output": result.stdout}
-    except Exception as e:
-        return JSONResponse(status_code=500, content={"error": f"Error al actualizar motor: {str(e)}"})
+    require_admin(request)
+    result = await run_light(_update_engine)
+    if "error" in result:
+        return JSONResponse(status_code=500, content=result)
+    return result
+
 
 @app.post("/api/system/reset")
 async def reset_system(request: Request):
-    """Limpia descargas y base de datos (mantenimiento extremo)."""
-    admin_token = os.environ.get('ADMIN_TOKEN')
-    if admin_token:
-        provided = request.headers.get('X-ADMIN-TOKEN') or request.query_params.get('admin_token')
-        if not provided or provided != admin_token:
-            raise HTTPException(status_code=403, detail="Se requiere token de administrador para esta operación.")
-    try:
-        import shutil
-        # 1. Limpiar descargas
-        if os.path.exists(DOWNLOAD_FOLDER):
-            shutil.rmtree(DOWNLOAD_FOLDER)
-            os.makedirs(DOWNLOAD_FOLDER)
-        
-        # 2. Limpiar cache de la base de datos
-        try:
-            conn = sqlite3.connect(DB_FILE)
-            c = conn.cursor()
-            c.execute("DELETE FROM transcripts")
-            conn.commit()
-            conn.close()
-        except Exception as db_err:
-            logger.exception(f"Error al limpiar la base de datos en reset: {db_err}")
+    """Borra descargas y la caché de transcripciones."""
+    require_admin(request)
 
+    def reset():
+        shutil.rmtree(DOWNLOAD_FOLDER, ignore_errors=True)
+        os.makedirs(DOWNLOAD_FOLDER, exist_ok=True)
+        with db_connect() as conn:
+            conn.execute("DELETE FROM transcripts")
+    try:
+        await run_light(reset)
         return {"status": "ok", "message": "Sistema reseteado (descargas y caché limpias)."}
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e)})
 
-if __name__ == "__main__":
 
+# ─── FRONTEND (debe ir al final para no tapar las rutas /api) ────────────────
+if os.path.exists(FRONTEND_DIR):
+    FRONTEND_ROOT = Path(FRONTEND_DIR).resolve()
+    INDEX_HTML = FRONTEND_ROOT / 'index.html'
+
+    @app.head("/", include_in_schema=False)
+    @app.get("/", include_in_schema=False)
+    async def serve_index():
+        return FileResponse(INDEX_HTML)
+
+    @app.get("/{path:path}", include_in_schema=False)
+    async def serve_static_or_index(path: str):
+        if path.startswith("api/"):
+            raise HTTPException(status_code=404, detail="Endpoint no encontrado")
+        try:
+            resolved = (FRONTEND_ROOT / path).resolve()
+            if FRONTEND_ROOT in resolved.parents and resolved.is_file():
+                return FileResponse(resolved)
+        except Exception as e:
+            logger.debug(f"Error resolviendo ruta estática: {e}")
+        return FileResponse(INDEX_HTML)  # rutas de la SPA
+else:
+    logger.warning(f"No se encontró la carpeta frontend en {FRONTEND_DIR}")
+
+
+if __name__ == "__main__":
     import uvicorn
-    port = int(os.environ.get("PORT", 5000))
-    uvicorn.run(
-        app,
-        host="0.0.0.0",
-        port=port,
-        timeout_keep_alive=600,   # 10 minutos — soporta videos muy largos
-        h11_max_incomplete_event_size=None,  # sin límite de tamaño de respuesta
-    )
+    if HOST not in ("127.0.0.1", "localhost") and not ADMIN_TOKEN and not IS_RENDER:
+        logger.warning(f"Escuchando en {HOST}: otras PCs de la red pueden usar Clipadsk. Definí ADMIN_TOKEN en .env.")
+    logger.info(f"Clipadsk en http://{'127.0.0.1' if HOST == '0.0.0.0' else HOST}:{PORT}")
+    uvicorn.run(app, host=HOST, port=PORT, timeout_keep_alive=600)

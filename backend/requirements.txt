@@ -1,6 +1,6 @@
 fastapi
 uvicorn
-yt-dlp>=2026.03.13
+yt-dlp[default]>=2026.03.13
 pydantic
 python-multipart
 requests
@@ -8,8 +8,11 @@ groq
 deep-translator
 python-dotenv
 pydub
+audioop-lts; python_version >= "3.13"
 instaloader
+gallery-dl
+python-docx
 cachetools
-# faster-whisper is optional: instalar si querés transcripción local con modelo small
-# faster-whisper
 bgutil-ytdlp-pot-provider
+# Opcional: transcripción local sin Groq (modelo "small", ~500 MB)
+# faster-whisper

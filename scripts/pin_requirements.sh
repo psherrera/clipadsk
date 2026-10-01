@@ -1,14 +1,15 @@
 #!/usr/bin/env bash
+# Genera backend/requirements-pinned.txt con versiones exactas, desde un entorno limpio.
 set -euo pipefail
+cd "$(dirname "$0")/.."
 
-if [ ! -f backend/requirements.txt ]; then
-  echo "backend/requirements.txt not found"
-  exit 1
-fi
-
-python -m venv .venv
-source .venv/bin/activate
-python -m pip install --upgrade pip
-pip install -r backend/requirements.txt
-pip freeze > backend/requirements-pinned.txt
-echo "Pinned requirements written to backend/requirements-pinned.txt"
+rm -rf .venv-pin
+python -m venv .venv-pin
+.venv-pin/bin/python -m pip install --upgrade pip -q
+.venv-pin/bin/python -m pip install -r backend/requirements.txt -q
+{
+  echo "# Versiones exactas probadas. Instalar con: pip install -r backend/requirements-pinned.txt"
+  .venv-pin/bin/python -m pip freeze --exclude-editable
+} > backend/requirements-pinned.txt
+rm -rf .venv-pin
+echo "Listo: backend/requirements-pinned.txt"

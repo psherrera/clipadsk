@@ -1,0 +1,8 @@
+# Configuración de ruff (linter). Se ejecuta en CI: `ruff check .`
+target-version = "py310"
+line-length = 140
+extend-exclude = ["backend/venv", ".venv"]
+
+[lint]
+# Errores reales: sintaxis (E9), pyflakes (F: imports/variables sin usar, nombres indefinidos)
+select = ["E9", "F"]

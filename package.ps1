@@ -26,7 +26,7 @@ function Safe-RoboCopy($src, $dst, $excludeDirs=@(), $excludeFiles=@()) {
     $xf = $excludeFiles | ForEach-Object { "/XF `"$($_)`"" } | Out-String
     $xd = $xd -replace "\r?\n"," "
     $xf = $xf -replace "\r?\n"," "
-    $cmd = "robocopy `"$src`" `"$dst`" /E /COPYALL /R:2 /W:1 $xd $xf"
+    $cmd = "robocopy `"$src`" `"$dst`" /E /COPY:DAT /R:2 /W:1 $xd $xf"
     Write-Host "Running: $cmd" -ForegroundColor DarkGray
     cmd.exe /c $cmd | Out-Null
 }
@@ -38,11 +38,12 @@ if (Test-Path (Join-Path $root 'frontend')) {
 
 # Copiar backend excluyendo downloads y model
 if (Test-Path (Join-Path $root 'backend')) {
-    Safe-RoboCopy (Join-Path $root 'backend') (Join-Path $temp 'backend') @('downloads','model') @('clipadsk.db','transcripts_cache.json','transcripts_cache.json.migrated')
+    Safe-RoboCopy (Join-Path $root 'backend') (Join-Path $temp 'backend') @('downloads','model','venv','__pycache__') @('clipadsk.db','transcripts_cache.json','transcripts_cache.json.migrated','cookies.txt','cookies_ig.txt','.env','*.mp4','*.mp3','*.wav','*.ogg','test_*.html')
 }
 
 # Copiar ficheros sueltos
-$toCopy = @('docker-compose.yml','install.ps1','.env.template','README.md')
+# Nunca se copian .env ni cookies (contienen claves y sesiones personales)
+$toCopy = @('docker-compose.yml','install.ps1','iniciar.bat','.env.template','README.md','clipa.ico')
 foreach ($f in $toCopy) {
     $src = Join-Path $root $f
     if (Test-Path $src) { Copy-Item -Path $src -Destination (Join-Path $temp $f) -Force }

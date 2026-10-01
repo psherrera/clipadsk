@@ -67,11 +67,17 @@ El sistema usa tres métodos en cascada:
 2. **Groq Whisper v3** — si `GROQ_API_KEY` está configurado, transcribe en la nube de Groq (rápido, gratuito).
 3. **Whisper local** — si instalás `faster-whisper`, el backend puede transcribir sin Groq usando un modelo local.
 
+Los audios largos se dividen automáticamente en partes de 20 minutos. La limpieza con IA solo corrige puntuación y párrafos: **no resume ni cambia lo dicho**, para que las citas sean textuales.
+
+Las herramientas de IA (resumen, citas, datos, ángulos, diarización y chat) analizan la transcripción **completa**, aunque sea larga: la dividen en partes y combinan los resultados.
+
 ---
 
 ## Actualizaciones
 
-Desde la app: **Config → Actualizar Aplicación** ejecuta `git pull` automáticamente.
+Desde la app: **Config → Actualizar Aplicación** ejecuta `git pull` e instala las dependencias nuevas. Después hay que cerrar y volver a abrir `iniciar.bat`.
+
+**Config → Actualizar motor** actualiza yt-dlp (útil cuando YouTube o Instagram dejan de funcionar).
 
 O manualmente:
 
@@ -87,20 +93,43 @@ iniciar.bat
 ```
 clipadsk/
 ├── backend/
-│   ├── main.py            ← API FastAPI
+│   ├── main.py            ← API FastAPI (endpoints)
+│   ├── config.py          ← variables de entorno, rutas y logging
+│   ├── text_utils.py      ← subtítulos, SRT, citas, URLs (funciones puras)
+│   ├── media.py           ← FFmpeg + transcripción (Groq / Whisper local)
+│   ├── ai.py              ← limpieza, traducción y herramientas periodísticas
 │   ├── requirements.txt
-│   ├── Dockerfile
-│   └── downloads/         ← archivos descargados (auto-creado)
-├── frontend/
-│   ├── index.html
-│   ├── main.js
-│   └── style.css
+│   ├── requirements-pinned.txt  ← versiones exactas probadas
+│   └── downloads/         ← archivos temporales (auto-creado)
+├── frontend/              ← index.html, main.js, style.css
+├── tests/                 ← tests (pytest)
 ├── docker-compose.yml
 ├── iniciar.bat            ← arranque diario en Windows
 ├── install.ps1            ← instalación inicial en Windows
-├── yt-dlp.exe             ← motor de descarga (auto-descargado)
-└── .env.template          ← plantilla de variables de entorno
+└── .env.template          ← plantilla de configuración
 ```
+
+---
+
+## Seguridad
+
+- Por defecto el servidor **solo acepta conexiones desde esta PC** (`127.0.0.1`).
+  Para usarlo desde otras PCs de la red, poné `HOST=0.0.0.0` en `.env` y definí `ADMIN_TOKEN`.
+- Solo la propia app (o los orígenes de `FRONTEND_ALLOWED_ORIGINS`) puede llamar a la API:
+  otras páginas web abiertas en el navegador no pueden usarla.
+- La API key de Groq cargada desde la app queda guardada solo en tu navegador.
+
+---
+
+## Desarrollo
+
+```bash
+pip install -r requirements-dev.txt
+ruff check .
+pytest -q
+```
+
+Para regenerar `backend/requirements-pinned.txt`: `scripts/pin_requirements.ps1` (Windows) o `scripts/pin_requirements.sh`.
 
 ---
 

@@ -10,7 +10,9 @@ echo  ==========================================
 echo.
 
 :: ── Matar instancias previas en puerto 5000 ──────────────────────────────────
-for /f "tokens=5" %%a in ('netstat -aon ^| findstr ":5000 " 2^>nul') do (
+::    (solo procesos ESCUCHANDO en :5000; antes podía matar el navegador si tenía
+::     una conexión saliente a otro servidor en el puerto 5000)
+for /f "tokens=5" %%a in ('netstat -aon ^| findstr /r /c:":5000 .*LISTENING" 2^>nul') do (
     taskkill /f /pid %%a >nul 2>&1
 )
 
@@ -76,28 +78,40 @@ if not exist "yt-dlp.exe" (
 )
 
 :: ─────────────────────────────────────────────────────────────────────────────
-:: 4) ENTORNO VIRTUAL + DEPENDENCIAS (solo la primera vez)
+:: 4) ENTORNO VIRTUAL + DEPENDENCIAS
+::    Se reinstalan solas cuando cambia backend\requirements.txt (p. ej. tras actualizar)
 :: ─────────────────────────────────────────────────────────────────────────────
+set "PRIMERA_VEZ=0"
 if not exist "backend\venv\Scripts\python.exe" (
+    set "PRIMERA_VEZ=1"
     echo.
     echo  [+] Primera vez: creando entorno virtual e instalando dependencias...
     echo      Esto puede tardar 2-3 minutos. Solo ocurre una vez.
     echo.
     python -m venv backend\venv
-    if %errorlevel% neq 0 (
+    if !errorlevel! neq 0 (
         echo  [ERROR] No se pudo crear el entorno virtual.
         pause
         exit /b 1
     )
     backend\venv\Scripts\python.exe -m pip install --upgrade pip --quiet
-    backend\venv\Scripts\python.exe -m pip install -r backend\requirements.txt
-    if %errorlevel% neq 0 (
+)
+
+fc /b "backend\requirements.txt" "backend\venv\.requirements.installed" >nul 2>&1
+if !errorlevel! neq 0 (
+    echo  [+] Instalando/actualizando dependencias...
+    backend\venv\Scripts\python.exe -m pip install -r backend\requirements.txt --quiet
+    if !errorlevel! neq 0 (
         echo  [ERROR] Fallo al instalar dependencias. Revisa tu conexion a internet.
-        pause
-        exit /b 1
+        if "!PRIMERA_VEZ!"=="1" (
+            pause
+            exit /b 1
+        )
+        echo          Se intenta arrancar igual con las dependencias anteriores.
+    ) else (
+        copy /y "backend\requirements.txt" "backend\venv\.requirements.installed" >nul
+        echo  [OK] Dependencias al dia.
     )
-    echo.
-    echo  [OK] Dependencias instaladas correctamente.
 ) else (
     echo  [OK] Entorno virtual listo.
 )
@@ -129,7 +143,7 @@ echo  [+] Esperando que el servidor este listo...
 set /a intentos=0
 :esperar
 timeout /t 2 >nul
-curl -s http://127.0.0.1:5000/api/health/cookies >nul 2>&1
+curl -s -f http://127.0.0.1:5000/api/health >nul 2>&1
 if %errorlevel% equ 0 goto listo
 set /a intentos+=1
 if %intentos% lss 15 goto esperar

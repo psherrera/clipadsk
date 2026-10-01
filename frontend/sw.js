@@ -1,9 +1,9 @@
-const CACHE_NAME = 'clipadsk-v4.1';
+const CACHE_NAME = 'clipadsk-v4.2';
 const ASSETS = [
     './',
     './index.html',
     './style.css?v=4.0',
-    './main.js?v=4.0',
+    './main.js?v=4.2',
     './icon.svg',
     './manifest.json'
 ];

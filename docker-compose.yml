@@ -1,15 +1,12 @@
-version: '3.8'
-
 # Uso: docker-compose up -d --build
-# Frontend: http://localhost
-# Backend:  http://localhost:5000
+# Frontend: http://localhost   (backend/API: http://localhost:5000)
 
 services:
   backend:
     build: ./backend
     container_name: clipadsk-backend
     ports:
-      - "5000:5000"
+      - "127.0.0.1:5000:5000"   # solo accesible desde esta PC
     volumes:
       - ./backend/downloads:/app/downloads   # archivos descargados
       - ./backend/model:/app/model           # modelo Whisper (cache)
@@ -24,7 +21,7 @@ services:
     image: nginx:alpine
     container_name: clipadsk-frontend
     ports:
-      - "80:80"
+      - "127.0.0.1:80:80"
     volumes:
       - ./frontend:/usr/share/nginx/html:ro
     depends_on:

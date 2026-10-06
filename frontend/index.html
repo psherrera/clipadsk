@@ -352,6 +352,24 @@
 
                         <div class="glass card space-y-3">
                             <div class="flex items-center gap-3">
+                                <span class="quick-icon bg-primary/10 text-primary"><span class="material-symbols-outlined">high_quality</span></span>
+                                <h3 class="font-semibold text-white">Calidad de video</h3>
+                            </div>
+                            <p class="text-xs text-slate-400 leading-relaxed">Clipadsk baja el archivo tal cual lo guarda la plataforma, sin volver a comprimirlo. Lo que cambia es cuál de las versiones elige.</p>
+                            <div class="grid grid-cols-1 gap-2">
+                                <label class="maint-btn cursor-pointer">
+                                    <input type="radio" name="video-quality" value="compatible" class="accent-primary mt-1">
+                                    <div class="text-left"><p class="text-sm font-semibold text-white">Compatible (H.264)</p><p class="text-[11px] text-slate-500">Abre en cualquier editor, WhatsApp y PCs viejas. Recomendado.</p></div>
+                                </label>
+                                <label class="maint-btn cursor-pointer">
+                                    <input type="radio" name="video-quality" value="max" class="accent-primary mt-1">
+                                    <div class="text-left"><p class="text-sm font-semibold text-white">Máxima calidad (VP9 / AV1)</p><p class="text-[11px] text-slate-500">Mejor imagen. Algunos editores o PCs pueden necesitar una extensión de códec para abrirlo.</p></div>
+                                </label>
+                            </div>
+                        </div>
+
+                        <div class="glass card space-y-3">
+                            <div class="flex items-center gap-3">
                                 <span class="quick-icon bg-accent/10 text-accent"><span class="material-symbols-outlined">rocket_launch</span></span>
                                 <h3 class="font-semibold text-white">¿Instalar en otra PC?</h3>
                             </div>
@@ -422,6 +440,7 @@
                                     <select id="format-select" class="field w-full appearance-none cursor-pointer pr-10"></select>
                                     <span class="material-symbols-outlined absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none text-slate-400">expand_more</span>
                                 </div>
+                                <p id="quality-mode-hint" class="text-[11px] text-slate-500"></p>
                             </div>
 
                             <div class="space-y-2">

@@ -184,6 +184,52 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     });
 
+    // ─── CALIDAD DE VIDEO ────────────────────────────────────────────────────────
+    const QUALITY_STORE = 'clipadsk_video_quality';
+    const QUALITY_NAMES = { compatible: 'Compatible (H.264)', max: 'Máxima calidad (VP9/AV1)' };
+    let lastFormats = [];
+
+    function getVideoQuality() {
+        try { return localStorage.getItem(QUALITY_STORE) === 'max' ? 'max' : 'compatible'; }
+        catch { return 'compatible'; }
+    }
+
+    // Arma el menú de resoluciones según el modo: tamaño estimado de lo que se va a bajar
+    // y aviso cuando una resolución no existe en H.264 (YouTube no tiene H.264 arriba de 1080p).
+    function renderFormatOptions() {
+        if (!formatSelect) return;
+        const mode = getVideoQuality();
+        const previous = formatSelect.value;
+        formatSelect.innerHTML = '';
+        lastFormats.forEach(f => {
+            const opt = document.createElement('option');
+            opt.value = f.format_id;
+            const isVideoHeight = /^h\d+$/.test(f.format_id || '');
+            let bytes = f.filesize;
+            let note = '';
+            if (isVideoHeight && mode === 'compatible') {
+                if (f.compatible) bytes = f.filesize_compatible ?? f.filesize;
+                else note = ' · sin H.264, baja en VP9/AV1';
+            }
+            const size = bytes ? ` (${(bytes / 1048576).toFixed(1)} MB)` : '';
+            opt.textContent = `${f.label}${size}${note}`;
+            formatSelect.appendChild(opt);
+        });
+        if (previous && lastFormats.some(f => f.format_id === previous)) formatSelect.value = previous;
+        const hint = document.getElementById('quality-mode-hint');
+        if (hint) hint.textContent = `Modo: ${QUALITY_NAMES[mode]} · se cambia en Configuración`;
+    }
+
+    document.querySelectorAll('input[name="video-quality"]').forEach(radio => {
+        radio.checked = radio.value === getVideoQuality();
+        radio.addEventListener('change', () => {
+            if (!radio.checked) return;
+            try { localStorage.setItem(QUALITY_STORE, radio.value); } catch {}
+            renderFormatOptions();
+            showToast(`Calidad de video: ${QUALITY_NAMES[radio.value]}`, 'success');
+        });
+    });
+
     // ─── CLEAR DOWNLOADS ─────────────────────────────────────────────────────────
     const clearDownloadsBtn = document.getElementById('clear-downloads-btn');
     clearDownloadsBtn?.addEventListener('click', async () => {
@@ -745,14 +791,8 @@ document.addEventListener('DOMContentLoaded', () => {
                 durationEl.textContent = `${m}:${s.toString().padStart(2, '0')}`;
             }
 
-            formatSelect.innerHTML = '';
-            data.formats.forEach(f => {
-                const opt = document.createElement('option');
-                opt.value = f.format_id;
-                const size = f.filesize ? `(${(f.filesize / 1048576).toFixed(1)} MB)` : '';
-                opt.textContent = `${f.label} ${size}`.trim();
-                formatSelect.appendChild(opt);
-            });
+            lastFormats = data.formats || [];
+            renderFormatOptions();
 
             if (!data.has_ffmpeg) qualityWarning?.classList.remove('hidden');
             
@@ -791,7 +831,7 @@ document.addEventListener('DOMContentLoaded', () => {
         }, 800);
 
         try {
-            const bodyData = { url, format_id: formatId, uid: downloadUid };
+            const bodyData = { url, format_id: formatId, uid: downloadUid, quality: getVideoQuality() };
             if (startTime) bodyData.start_time = startTime;
             if (endTime) bodyData.end_time = endTime;
 

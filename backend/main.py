@@ -46,6 +46,9 @@ from config import (
     HOST, PORT, ADMIN_TOKEN, ALLOWED_ORIGINS, HAS_FFMPEG, FFMPEG_BIN, IS_RENDER,
     MAX_WORKERS, MAX_CONCURRENT_JOBS, MAX_UPLOAD_MB, GROQ_MAX_UPLOAD_MB,
 )
+from formats import (
+    build_format_list, download_format_opts, normalize_quality, TRIM_FFMPEG_ARGS,
+)
 from text_utils import (
     sanitize_url, parse_subtitles_to_segments, generate_srt_from_segments, remove_repetitions,
     find_segment_times_for_quote, ensure_paragraphs, host_matches, is_allowed_thumbnail_url, safe_filename,
@@ -481,6 +484,7 @@ class VideoRequest(BaseModel):
     groq_api_key: Optional[str] = None
     uid: Optional[str] = None
     target_lang: Optional[str] = "es"  # es, en, original
+    quality: Optional[str] = "compatible"  # compatible (H.264) | max (VP9/AV1)
 
 
 class ChatRequest(BaseModel):
@@ -550,19 +554,6 @@ async def check_cookies():
 
 # ─── ENDPOINTS: INFO DE VIDEO ────────────────────────────────────────────────
 
-def _resolution_label(height: Optional[int], fmt: dict) -> str:
-    if height:
-        for min_h, label in ((2160, "2160p (4K UHD)"), (1440, "1440p (2K QHD)"), (1080, "1080p (Full HD)"),
-                             (720, "720p (HD)"), (480, "480p (SD)"), (360, "360p (SD)")):
-            if height >= min_h:
-                return label
-        return f"{height}p"
-    note = fmt.get('format_note')
-    if note and not re.search(r'\d+x\d+', note) and len(note) < 15:
-        return note
-    return "Calidad estándar"
-
-
 MP3_FORMAT = {'format_id': 'mp3', 'ext': 'mp3', 'resolution': 'Solo audio', 'filesize': None, 'label': 'Solo audio (.mp3)'}
 BEST_FORMAT = {'format_id': 'best', 'ext': 'mp4', 'resolution': 'Mejor calidad', 'filesize': None, 'label': 'Mejor calidad (.mp4)'}
 
@@ -605,24 +596,7 @@ async def get_video_info(req: VideoRequest):
                 raise HTTPException(status_code=400, detail="Este post de Instagram no contiene video (es una publicación de fotos). Clipadsk solo puede descargar o transcribir videos y audios.")
         raise HTTPException(status_code=400, detail=f"No pudimos procesar este video. Puede ser privado o la plataforma bloqueó la conexión. Errores: {last_error[:200]}")
 
-    formats, seen = [], set()
-    useful = sorted((f for f in info.get('formats') or [] if f.get('vcodec') != 'none'),
-                    key=lambda f: f.get('height') or 0, reverse=True)
-    for f in useful:
-        height = f.get('height')
-        res_str = f.get('resolution') or ''
-        if not height and 'x' in res_str:
-            try:
-                height = int(res_str.split('x')[1])
-            except (ValueError, IndexError):
-                pass
-        res = _resolution_label(height, f)
-        ext = f.get('ext', 'mp4')
-        if f"{res}_{ext}" in seen:
-            continue
-        seen.add(f"{res}_{ext}")
-        formats.append({'format_id': f.get('format_id'), 'ext': ext, 'resolution': res,
-                        'filesize': f.get('filesize') or f.get('filesize_approx'), 'label': f"{res} (.{ext})"})
+    formats = build_format_list(info.get('formats') or [], HAS_FFMPEG)
     if not formats:
         formats.append(BEST_FORMAT)
     if HAS_FFMPEG:
@@ -969,13 +943,8 @@ async def download_video(req: VideoRequest, background_tasks: BackgroundTasks):
         extra = {'format': 'bestaudio/best', 'outtmpl': output_template,
                  'postprocessors': [{'key': 'FFmpegExtractAudio', 'preferredcodec': 'mp3', 'preferredquality': '192'}]}
     else:
-        if not HAS_FFMPEG:
-            fmt = 'best[ext=mp4]/best'  # sin FFmpeg no se puede unir video+audio
-        elif format_id and format_id not in ('best', 'bestvideo+bestaudio'):
-            fmt = f"{format_id}+bestaudio[ext=m4a]/{format_id}+bestaudio/bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best[ext=mp4]/best"
-        else:
-            fmt = 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best[ext=mp4]/best'
-        extra = {'format': fmt, 'outtmpl': output_template, 'merge_output_format': 'mp4'}
+        extra = {'outtmpl': output_template, **download_format_opts(format_id, req.quality, HAS_FFMPEG)}
+        logger.info(f"Descarga: opción={format_id} calidad={normalize_quality(req.quality)} formato={extra['format']}")
 
     def hook(d):
         if d.get('status') == 'downloading':
@@ -995,6 +964,9 @@ async def download_video(req: VideoRequest, background_tasks: BackgroundTasks):
             raise HTTPException(status_code=400, detail="Rango de tiempo inválido.")
         extra['download_ranges'] = download_range_func(None, [(start_sec, end_sec)])
         extra['force_keyframes_at_cuts'] = True
+        if format_id != 'mp3':
+            # Cortar justo en el segundo pedido obliga a recodificar: con calidad alta, no la de FFmpeg por defecto
+            extra['external_downloader_args'] = {'ffmpeg_o': TRIM_FFMPEG_ARGS}
 
     def find_output():
         for f in os.listdir(DOWNLOAD_FOLDER):

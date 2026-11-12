@@ -12,6 +12,7 @@ Módulos:
   ai.py          limpieza, traducción y análisis con Groq
 """
 import os
+import hashlib
 import re
 import io
 import json
@@ -299,7 +300,26 @@ def find_cookie_file(url: str) -> Optional[str]:
     for name in names:
         candidates += [f'/etc/secrets/{name}', os.path.join(BASE_DIR, name), os.path.join(ROOT_DIR, name),
                        os.path.join(HOME_DIR, name)]
-    return next((p for p in candidates if p and os.path.exists(p)), None)
+    found = next((p for p in candidates if p and os.path.exists(p)), None)
+    return cookie_snapshot(found) if found else None
+
+
+def cookie_snapshot(path: str) -> str:
+    """Copia de trabajo de un archivo de cookies.
+
+    yt-dlp y gallery-dl reescriben el archivo que reciben con lo que contesta el sitio: si Instagram cierra
+    la sesión, borran el sessionid del original y la sesión se pierde para siempre. Por eso les pasamos una
+    copia y el archivo del usuario queda intacto."""
+    try:
+        snap_dir = os.path.join(tempfile.gettempdir(), "clipadsk_cookies")
+        os.makedirs(snap_dir, exist_ok=True)
+        st = os.stat(path)
+        tag = hashlib.md5(f"{os.path.abspath(path)}|{st.st_mtime_ns}|{st.st_size}".encode()).hexdigest()[:12]
+        snap = os.path.join(snap_dir, f"{tag}_{os.path.basename(path)}")
+        shutil.copyfile(path, snap)  # siempre desde el original: la copia anterior pudo quedar pisada
+        return snap
+    except OSError:
+        return path
 
 
 def instagram_session_ok() -> bool:
@@ -547,7 +567,11 @@ def get_instagram_carousel_info(url: str, cookies_path: Optional[str] = None) ->
         if res.returncode != 0:
             logger.warning(f"gallery-dl falló ({res.returncode}): {res.stderr[:300]}")
             return None
-        return [{"url": item[1], "metadata": item[2]} for item in json.loads(res.stdout)
+        data = json.loads(res.stdout or "[]")
+        for item in data:
+            if isinstance(item, list) and len(item) >= 2 and item[0] == -1:
+                logger.warning(f"gallery-dl no pudo leer {url}: {item[1]}")
+        return [{"url": item[1], "metadata": item[2]} for item in data
                 if isinstance(item, list) and len(item) >= 3 and item[0] == 3]
     except Exception:
         logger.exception("Error extrayendo carrusel con gallery-dl")
@@ -599,7 +623,7 @@ def get_carousel(url: str, try_instaloader: bool = True) -> Optional[dict]:
                 return remember_carousel(url, {'items': ig['sidecar'], 'username': ig.get('uploader') or 'instagram',
                                                'description': ig.get('caption') or '', 'shortcode': ig.get('shortcode') or ''})
         except Exception as e:
-            logger.debug(f"instaloader no pudo leer el carrusel: {e}")
+            logger.warning(f"instaloader no pudo leer el carrusel: {str(e)[:200]}")
     files = get_instagram_carousel_info(url, find_cookie_file(url))
     if not files:
         return None

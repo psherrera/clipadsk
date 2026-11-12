@@ -12,6 +12,8 @@ Si Clipadsk ya está abierto, solo abre el navegador.
 Opciones: --autonomo (fuerza el modo 2) · --sin-navegador
 """
 import os
+import re
+import json
 import socket
 import subprocess
 import sys
@@ -137,10 +139,50 @@ def start_bundled():
     uvicorn.run(main.app, host=main.HOST, port=PORT, log_config=None, access_log=False, timeout_keep_alive=600)
 
 
+def running_version():
+    try:
+        with urllib.request.urlopen(APP_URL + "api/health", timeout=2) as r:
+            return json.loads(r.read().decode("utf-8", "replace")).get("version")
+    except Exception:
+        return None
+
+
+def local_version():
+    """APP_VERSION del backend que está al lado del exe (o None)."""
+    try:
+        with open(os.path.join(EXE_DIR, "backend", "main.py"), encoding="utf-8") as f:
+            m = re.search(r'^APP_VERSION\s*=\s*"([^"]+)"', f.read(), re.M)
+        return m.group(1) if m else None
+    except OSError:
+        return None
+
+
+def stop_running_server():
+    """Cierra el servidor que escucha en el puerto (queda abierto sin ventana después de cada uso)."""
+    if not IS_WINDOWS:
+        return
+    try:
+        out = subprocess.run(["netstat", "-ano", "-p", "TCP"], capture_output=True, text=True, timeout=10,
+                             creationflags=subprocess.CREATE_NO_WINDOW).stdout
+        pids = {line.split()[-1] for line in out.splitlines()
+                if f":{PORT} " in line and "LISTENING" in line.upper() and line.split()[-1].isdigit()}
+        for pid in pids:
+            subprocess.run(["taskkill", "/F", "/T", "/PID", pid], capture_output=True, timeout=10,
+                           creationflags=subprocess.CREATE_NO_WINDOW)
+        deadline = time.time() + 10
+        while port_in_use() and time.time() < deadline:
+            time.sleep(0.3)
+    except Exception:
+        pass
+
+
 def run():
     if clipa_running():
-        open_browser()
-        return
+        wanted = local_version()
+        if not wanted or running_version() == wanted:
+            open_browser()
+            return
+        stop_running_server()  # quedó abierta una versión vieja: se reinicia con la nueva
     if port_in_use():
         message(f"El puerto {PORT} está ocupado por otro programa.\n"
                 f"Cerralo o cambiá PORT en el archivo .env de Clipadsk.")

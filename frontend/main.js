@@ -1776,7 +1776,7 @@ document.addEventListener('DOMContentLoaded', () => {
         const prefix = btn.dataset.prefix;
         if (!mode || !prefix) return;
 
-        const postCopy = (lastVideoInfo?.copy || '').trim();
+        const postCopy = (lastVideoInfo?.copy || String(lastVideoInfo?.description || '').replace(/\.\.\.$/, '').replace(/^Sin descripción$/, '')).trim();
         if (mode === 'copy') {
             if (postCopy.length < 10) { showToast('Esta publicación no tiene copy (texto) para analizar', 'error'); return; }
         } else if (!currentTranscript || currentTranscript.length < 50) {

@@ -1987,7 +1987,7 @@
 
         function mount(info) {
             unmount();
-            const text = (info?.copy || '').trim();
+            const text = (info?.copy || (info?.carousel ? info.description : '') || '').trim();
             if (text.length < 10 || info.playlist) return;
             const body = document.querySelector('#video-info-card .p-6');
             if (!body) return;

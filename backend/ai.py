@@ -8,9 +8,9 @@ from typing import Optional
 
 from config import (
     logger, GROQ_API_KEY, GROQ_TEXT_MODELS, GROQ_CHAT_MODELS, GROQ_VISION_MODELS,
-    AI_CHUNK_CHARS, AI_CLEANUP_MAX_CHARS, ANALYSIS_CHUNK_CHARS, CHAT_CONTEXT_CHARS,
+    AI_CHUNK_CHARS, AI_CLEANUP_MAX_CHARS, ANALYSIS_CHUNK_CHARS, CHAT_CONTEXT_CHARS, AI_FIDELITY_MIN,
 )
-from text_utils import split_text_chunks, pick_relevant_chunks, parse_json_from_llm
+from text_utils import split_text_chunks, pick_relevant_chunks, parse_json_from_llm, word_fidelity
 
 try:
     from groq import Groq
@@ -151,6 +151,8 @@ def chat_completion(client, prompt: str = "", *, system: str = None, models=None
 # ─── LIMPIEZA DE TRANSCRIPCIONES ─────────────────────────────────────────────
 
 LANG_NAMES = {"es": "español", "en": "inglés"}
+# Por debajo de esto casi no hay palabras en común: el texto estaba en otro idioma y se tradujo
+_TRANSLATION_BELOW = 0.4
 
 CLEANUP_PROMPT = """Actuá como un corrector de estilo estricto. Tu único objetivo es tomar esta transcripción cruda y aplicar correcciones ortotipográficas para facilitar su lectura, manteniendo el 100% del contenido original hablado.
 
@@ -177,6 +179,11 @@ def cleanup_transcript(text: str, client, target_lang: str = "es", warnings: lis
     """
     Puntúa y separa en párrafos SIN cambiar lo dicho. Procesa por partes cortadas en
     oraciones. Si una parte falla (p. ej. rate limit) se deja esa parte cruda.
+
+    Control de fidelidad: se compara palabra por palabra lo que devuelve la IA con el
+    original. Si cambió demasiado (reescribió o resumió) se descarta su versión y queda
+    el texto original de esa parte. Si casi no hay palabras en común se asume que fue
+    una traducción pedida (otro idioma) y se acepta.
     """
     warnings = warnings if warnings is not None else []
     if not client or not text or len(text) < 50:
@@ -189,7 +196,7 @@ def cleanup_transcript(text: str, client, target_lang: str = "es", warnings: lis
     translate_rule = (f"\nIdioma: el resultado debe estar en {lang_name}. Si el texto está en otro idioma, "
                       f"traducilo fielmente al {lang_name}, frase por frase, sin resumir ni omitir nada.\n") if lang_name else ""
     chunks = split_text_chunks(text, AI_CHUNK_CHARS)
-    out, failed = [], 0
+    out, failed, altered = [], 0, 0
     for i, chunk in enumerate(chunks):
         part_note = (f"\nEste es el fragmento {i + 1} de {len(chunks)} de una transcripción más larga: "
                      "no agregues ni quites nada al principio o al final.\n") if len(chunks) > 1 else ""
@@ -197,13 +204,26 @@ def cleanup_transcript(text: str, client, target_lang: str = "es", warnings: lis
         try:
             cleaned, _ = chat_completion(client, prompt, max_tokens=4000, temperature=0.2)
             # Si el modelo devolvió algo sospechosamente corto, preferimos el original
-            out.append(cleaned if cleaned and len(cleaned) > len(chunk) * 0.6 else chunk)
+            if not cleaned or len(cleaned) <= len(chunk) * 0.6:
+                out.append(chunk)
+                continue
+            fidelity = word_fidelity(chunk, cleaned)
+            was_translated = bool(lang_name) and fidelity < _TRANSLATION_BELOW
+            if fidelity < AI_FIDELITY_MIN and not was_translated:
+                logger.warning(f"Limpieza IA descartada en parte {i + 1}/{len(chunks)}: fidelidad {fidelity:.2f}")
+                out.append(chunk)
+                altered += 1
+            else:
+                out.append(cleaned)
         except Exception as e:
             logger.warning(f"Limpieza IA falló en parte {i + 1}/{len(chunks)}: {e}")
             out.append(chunk)
             failed += 1
     if failed:
         warnings.append(f"{failed} de {len(chunks)} partes quedaron sin limpieza con IA (límite de Groq o error).")
+    if altered:
+        warnings.append(f"En {altered} de {len(chunks)} partes la IA cambió palabras de lo dicho: "
+                        "se dejó el texto original de esas partes (sin corrección de puntuación).")
     return "\n\n".join(out)
 
 

@@ -320,6 +320,64 @@ def is_allowed_thumbnail_url(url: str) -> bool:
     return host_matches(url, THUMBNAIL_PROXY_DOMAINS)
 
 
+_LOCAL_SUFFIXES = (".local", ".lan", ".home", ".internal", ".localhost")
+
+
+def is_trusted_host(host_header: str, extra=()) -> bool:
+    """
+    Valida el header Host para frenar ataques de "DNS rebinding" (una página web ajena
+    que apunta su dominio a 127.0.0.1 para hablarle a la app). Se aceptan: localhost,
+    direcciones IP, nombres de la red local (sin punto o .local/.lan) y los de `extra`.
+    Un dominio público cualquiera se rechaza.
+    """
+    import ipaddress
+    host = (host_header or "").strip().lower()
+    if not host:
+        return False
+    extra = {e.strip().lower() for e in extra if e}
+    if host in extra:
+        return True
+    if host.startswith("["):                      # IPv6: [::1]:5000
+        name = host[1:].split("]", 1)[0]
+    else:
+        name = host.rsplit(":", 1)[0] if host.count(":") == 1 else host
+    if name in extra:
+        return True
+    try:
+        ipaddress.ip_address(name)
+        return True
+    except ValueError:
+        pass
+    if not re.fullmatch(r"[a-z0-9]([a-z0-9\-\.]*[a-z0-9])?", name):
+        return False
+    return "." not in name or name.endswith(_LOCAL_SUFFIXES)
+
+
+_PARTIAL_FILE_RE = re.compile(r"(\.part(-Frag\d+)?|\.ytdl|\.f\d+\.[a-z0-9]{2,5})$", re.I)
+
+
+def is_partial_download(filename: str) -> bool:
+    """
+    True si es un archivo intermedio de yt-dlp: descarga a medias (.part, .ytdl),
+    temporal (.temp.) o una pista suelta sin unir (video.f137.mp4 / audio.f140.m4a).
+    """
+    return ".temp." in filename or bool(_PARTIAL_FILE_RE.search(filename))
+
+
+def word_fidelity(original: str, edited: str) -> float:
+    """
+    Qué tan iguales son dos textos palabra por palabra (0 a 1), ignorando mayúsculas y
+    puntuación. Sirve para comprobar que la "limpieza" con IA no cambió lo que se dijo.
+    """
+    from difflib import SequenceMatcher
+    a, b = _norm_words(original or ""), _norm_words(edited or "")
+    if not a and not b:
+        return 1.0
+    if not a or not b:
+        return 0.0
+    return SequenceMatcher(None, a, b, autojunk=False).ratio()
+
+
 def safe_filename(name: str, max_len: int = 60) -> str:
     """Nombre de archivo seguro para Windows y para el header Content-Disposition."""
     name = re.sub(r'[\\/:*?"<>|\r\n\t]+', ' ', name or "")

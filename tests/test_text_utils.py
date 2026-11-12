@@ -128,3 +128,29 @@ def test_ensure_paragraphs_keeps_existing_paragraphs_and_short_text():
     assert ensure_paragraphs("Hola.\nChau.") == "Hola.\n\nChau."
     assert ensure_paragraphs("Corto.") == "Corto."
     assert ensure_paragraphs("") == ""
+
+
+def test_is_trusted_host():
+    from text_utils import is_trusted_host
+    for ok in ("localhost:5000", "127.0.0.1", "192.168.1.20:5000", "[::1]:5000", "mi-pc", "notebook.local:5000"):
+        assert is_trusted_host(ok), ok
+    for bad in ("", "evil.example:5000", "127.0.0.1.evil.example", "localhost.evil.example", "a b"):
+        assert not is_trusted_host(bad), bad
+    assert is_trusted_host("clipa.midominio.com", ["clipa.midominio.com"])
+    assert is_trusted_host("clipa.midominio.com:443", ["clipa.midominio.com"])
+
+
+def test_is_partial_download():
+    from text_utils import is_partial_download
+    for partial in ("v_abc.mp4.part", "v_abc.mp4.ytdl", "v_abc.f137.mp4", "v_abc.f140.m4a", "v_abc.temp.mp4",
+                    "v_abc.mp4.part-Frag12"):
+        assert is_partial_download(partial), partial
+    for final in ("v_abc.mp4", "Entrevista parte 2_abc.mp3", "audio.webm", "sub.es.vtt"):
+        assert not is_partial_download(final), final
+
+
+def test_word_fidelity():
+    from text_utils import word_fidelity
+    assert word_fidelity("hola que tal como andan", "Hola, ¿qué tal? ¿Cómo andan?") < 1  # tildes cuentan
+    assert word_fidelity("hola que tal como andan", "Hola, que tal. Como andan.") == 1.0
+    assert word_fidelity("uno dos tres cuatro cinco seis", "siete ocho nueve diez once doce") == 0.0

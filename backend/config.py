@@ -55,6 +55,24 @@ _DEFAULT_ORIGINS = [
     "http://127.0.0.1", "http://localhost",          # frontend nginx (docker-compose)
 ]
 ALLOWED_ORIGINS = _env_list('FRONTEND_ALLOWED_ORIGINS') or _DEFAULT_ORIGINS
+
+# ¿El servidor solo es alcanzable desde esta PC? Si no (red local, Docker, Render),
+# las operaciones de mantenimiento exigen ADMIN_TOKEN sí o sí.
+IS_LOCAL_ONLY = HOST in ('127.0.0.1', 'localhost', '::1') and not os.path.exists('/.dockerenv')
+
+# Nombres de host extra con los que se puede entrar a la app (además de localhost, IPs y
+# nombres de la red local). Hace falta solo si se publica con un dominio propio.
+ALLOWED_HOSTS = _env_list('ALLOWED_HOSTS')
+if os.environ.get('RENDER_EXTERNAL_HOSTNAME', '').strip():
+    ALLOWED_HOSTS.append(os.environ['RENDER_EXTERNAL_HOSTNAME'].strip())
+for _o in ALLOWED_ORIGINS:
+    _h = _o.split('://', 1)[-1].split('/', 1)[0]
+    if _h and _h != '*':
+        ALLOWED_HOSTS.append(_h)
+
+# Verificación de certificados HTTPS en yt-dlp. Solo desactivar (=1) detrás de un
+# proxy/antivirus que intercepta HTTPS: sin verificación, las cookies viajan sin garantía.
+YTDLP_NO_CHECK_CERTIFICATE = _env_bool('YTDLP_NO_CHECK_CERTIFICATE', False)
 if "*" in ALLOWED_ORIGINS:
     logger.warning("FRONTEND_ALLOWED_ORIGINS='*': cualquier página web puede usar esta API.")
 
@@ -110,6 +128,9 @@ AI_CHUNK_CHARS = int(os.environ.get('AI_CHUNK_CHARS', '6000'))          # limpie
 AI_CLEANUP_MAX_CHARS = int(os.environ.get('AI_CLEANUP_MAX_CHARS', '120000'))
 ANALYSIS_CHUNK_CHARS = int(os.environ.get('ANALYSIS_CHUNK_CHARS', '12000'))
 CHAT_CONTEXT_CHARS = int(os.environ.get('CHAT_CONTEXT_CHARS', '14000'))
+# Fidelidad mínima (0-1) entre el texto crudo y el que devuelve la limpieza con IA.
+# Si la IA cambió más palabras que esto, se descarta su versión y queda el texto original.
+AI_FIDELITY_MIN = float(os.environ.get('AI_FIDELITY_MIN', '0.85'))
 
 # Audio: Groq acepta hasta 25 MB por archivo; partimos antes por seguridad
 GROQ_MAX_UPLOAD_MB = float(os.environ.get('GROQ_MAX_UPLOAD_MB', '19'))

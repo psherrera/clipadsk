@@ -230,6 +230,32 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     });
 
+    // ─── TOKEN DE ADMINISTRADOR ──────────────────────────────────────────────────
+    // Solo hace falta si el servidor tiene ADMIN_TOKEN en .env (uso en red). Se pide una
+    // vez cuando el servidor lo exige y queda guardado en este navegador.
+    const ADMIN_TOKEN_STORE = 'clipadsk_admin_token';
+    async function adminFetch(url, options = {}) {
+        const send = () => {
+            let token = '';
+            try { token = localStorage.getItem(ADMIN_TOKEN_STORE) || ''; } catch {}
+            const headers = { ...(options.headers || {}), ...(token ? { 'X-ADMIN-TOKEN': token } : {}) };
+            return fetch(url, { ...options, headers });
+        };
+        let r = await send();
+        if (r.status === 403) {
+            const detail = (await r.clone().json().catch(() => ({}))).detail || '';
+            if (/token de administrador/i.test(detail)) {
+                const token = window.prompt('Esta operación pide el token de administrador (ADMIN_TOKEN del archivo .env):');
+                if (token && token.trim()) {
+                    try { localStorage.setItem(ADMIN_TOKEN_STORE, token.trim()); } catch {}
+                    r = await send();
+                    if (r.status === 403) { try { localStorage.removeItem(ADMIN_TOKEN_STORE); } catch {} }
+                }
+            }
+        }
+        return r;
+    }
+
     // ─── CLEAR DOWNLOADS ─────────────────────────────────────────────────────────
     const clearDownloadsBtn = document.getElementById('clear-downloads-btn');
     clearDownloadsBtn?.addEventListener('click', async () => {
@@ -240,7 +266,7 @@ document.addEventListener('DOMContentLoaded', () => {
         clearDownloadsBtn.disabled = true;
 
         try {
-            const r = await fetch(`${API_BASE}/clear-downloads`, { method: 'DELETE' });
+            const r = await adminFetch(`${API_BASE}/clear-downloads`, { method: 'DELETE' });
             const data = await r.json();
             if (r.ok) showToast('Descargas borradas correctamente, espacio liberado', 'success');
             else throw new Error(data.detail || 'Error al borrar descargas');
@@ -2328,12 +2354,12 @@ document.addEventListener('DOMContentLoaded', () => {
         btn.innerHTML = `<div class="w-10 h-10 rounded-lg bg-white/5 flex items-center justify-center animate-spin"><span class="material-symbols-outlined">sync</span></div><div class="text-left"><p class="text-sm font-bold text-white">Procesando...</p></div>`;
         
         try {
-            const r = await fetch(`${API_BASE}/system/${endpoint}`, { method: 'POST' });
+            const r = await adminFetch(`${API_BASE}/system/${endpoint}`, { method: 'POST' });
             const d = await r.json();
             if (r.ok) {
                 showToast(d.message, 'success', 9000);
             } else {
-                throw new Error(d.error || 'Fallo en la operacion');
+                throw new Error(d.error || d.detail || 'Fallo en la operacion');
             }
         } catch (e) {
             showToast(e.message, 'error');

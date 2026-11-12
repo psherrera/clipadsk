@@ -43,8 +43,9 @@ from pydantic import BaseModel
 
 from config import (
     logger, BASE_DIR, ROOT_DIR, FRONTEND_DIR, DOWNLOAD_FOLDER, DB_FILE, CACHE_FILE,
-    HOST, PORT, ADMIN_TOKEN, ALLOWED_ORIGINS, HAS_FFMPEG, FFMPEG_BIN, IS_RENDER,
+    HOST, PORT, ADMIN_TOKEN, ALLOWED_ORIGINS, HAS_FFMPEG, FFMPEG_BIN,
     MAX_WORKERS, MAX_CONCURRENT_JOBS, MAX_UPLOAD_MB, GROQ_MAX_UPLOAD_MB,
+    IS_LOCAL_ONLY, ALLOWED_HOSTS, YTDLP_NO_CHECK_CERTIFICATE,
 )
 from formats import (
     build_format_list, download_format_opts, normalize_quality, TRIM_FFMPEG_ARGS,
@@ -52,6 +53,7 @@ from formats import (
 from text_utils import (
     sanitize_url, parse_subtitles_to_segments, generate_srt_from_segments, remove_repetitions,
     find_segment_times_for_quote, ensure_paragraphs, host_matches, is_allowed_thumbnail_url, safe_filename,
+    is_trusted_host, is_partial_download,
     YOUTUBE_DOMAINS, INSTAGRAM_DOMAINS, TIKTOK_DOMAINS, TWITTER_DOMAINS, FACEBOOK_DOMAINS,
 )
 import media
@@ -102,13 +104,21 @@ app.add_middleware(
 @app.middleware("http")
 async def block_foreign_origins(request: Request, call_next):
     """
-    CORS no frena los POST "simples" (formularios) de otras páginas: igual llegan al
-    servidor. Rechazamos cualquier petición a /api/ que venga con un Origin ajeno.
+    1) Host: solo se atiende si se entró por localhost, una IP, un nombre de la red local
+       o un dominio declarado en ALLOWED_HOSTS. Esto frena el "DNS rebinding" (una web
+       ajena que apunta su dominio a 127.0.0.1 para manejar la app desde el navegador).
+    2) CORS no frena los POST "simples" (formularios) de otras páginas: igual llegan al
+       servidor. Rechazamos cualquier petición a /api/ que venga con un Origin ajeno.
     """
+    if not is_trusted_host(request.headers.get("host", ""), ALLOWED_HOSTS):
+        logger.warning(f"Petición bloqueada: Host no permitido ({request.headers.get('host', '')!r})")
+        return JSONResponse(status_code=400, content={
+            "detail": "Host no permitido. Si usás un dominio propio, agregalo a ALLOWED_HOSTS en .env."})
     if request.url.path.startswith("/api/") and request.method not in ("GET", "HEAD", "OPTIONS"):
         origin = request.headers.get("origin")
         if origin and "*" not in ALLOWED_ORIGINS and origin not in ALLOWED_ORIGINS:
-            # Mismo host que sirve la app (p. ej. acceso por IP en la red con HOST=0.0.0.0)
+            # Mismo host que sirve la app (p. ej. acceso por IP en la red con HOST=0.0.0.0).
+            # Es seguro porque el Host ya fue validado arriba.
             if origin.split("://", 1)[-1] != request.headers.get("host", ""):
                 logger.warning(f"Petición bloqueada desde origen no permitido: {origin}")
                 return JSONResponse(status_code=403, content={"detail": "Origen no permitido."})
@@ -116,11 +126,19 @@ async def block_foreign_origins(request: Request, call_next):
 
 
 def require_admin(request: Request):
-    """Si ADMIN_TOKEN está definido, exige el header X-ADMIN-TOKEN."""
+    """
+    Operaciones de mantenimiento (actualizar, resetear, borrar descargas).
+    - Con ADMIN_TOKEN definido: exige el header X-ADMIN-TOKEN.
+    - Sin ADMIN_TOKEN: solo se permiten si el servidor es accesible únicamente desde
+      esta PC. Expuesto a la red (HOST=0.0.0.0, Docker, Render) quedan bloqueadas.
+    """
     if ADMIN_TOKEN:
         provided = request.headers.get('X-ADMIN-TOKEN', '')
-        if not hmac.compare_digest(provided, ADMIN_TOKEN):
+        if not hmac.compare_digest(provided.encode(), ADMIN_TOKEN.encode()):
             raise HTTPException(status_code=403, detail="Se requiere token de administrador para esta operación.")
+    elif not IS_LOCAL_ONLY:
+        raise HTTPException(status_code=403, detail="Mantenimiento deshabilitado: el servidor está expuesto a la red "
+                            "y no tiene ADMIN_TOKEN. Definí ADMIN_TOKEN en .env y reiniciá.")
 
 
 # ─── PROGRESO, LOGS Y RESULTADOS (memoria, con vencimiento) ──────────────────
@@ -272,7 +290,7 @@ def get_robust_opts(target_url: str, extra: Optional[dict] = None) -> dict:
         'no_warnings': False,
         'cachedir': False,
         'noplaylist': True,
-        'nocheckcertificate': True,
+        'nocheckcertificate': YTDLP_NO_CHECK_CERTIFICATE,
         'ignoreerrors': False,
         'user_agent': random.choice(USER_AGENTS),
         'js_runtimes': {'deno': {}, 'node': {}},
@@ -328,10 +346,12 @@ def ytdlp_extract(url: str, extra: Optional[dict] = None) -> dict:
     raise RuntimeError(" | ".join(errors) or "Sin información")
 
 
-def ytdlp_download(url: str, extra: dict, done_check, on_attempt=None):
+def ytdlp_download(url: str, extra: dict, done_check, on_attempt=None, cleanup=None):
     """
     Descarga con reintentos (bloqueante). done_check() decide si el intento
     produjo lo esperado (yt-dlp a veces "termina bien" sin bajar nada).
+    cleanup() borra los restos de un intento fallido (archivos a medias) antes del
+    siguiente intento y al fallar del todo.
     """
     errors = []
     for n, (name, tweak) in enumerate(_strategies(url), start=1):
@@ -347,6 +367,8 @@ def ytdlp_download(url: str, extra: dict, done_check, on_attempt=None):
             logger.debug(f"Descarga ({name}) falló: {e}")
         if done_check():
             return
+        if cleanup:
+            cleanup()
     raise RuntimeError(" | ".join(errors) or "yt-dlp no descargó ningún archivo")
 
 
@@ -362,15 +384,17 @@ def detect_bunny_embed(page_url: str) -> Optional[str]:
     if host_matches(page_url, KNOWN_PLATFORMS) or not page_url.startswith(('http://', 'https://')):
         return None
     try:
-        cookies = {}
-        cookie_path = os.path.join(BASE_DIR, 'cookies.txt')
-        if os.path.exists(cookie_path):
+        # Las cookies se pasan como "jar": requests manda a cada sitio SOLO las cookies de
+        # ese dominio. (Antes se mandaban todas —incluidas las de YouTube— a cualquier página.)
+        cookies = None
+        cookie_path = next((p for p in (os.path.join(BASE_DIR, 'cookies.txt'), os.path.join(ROOT_DIR, 'cookies.txt'))
+                            if os.path.exists(p)), None)
+        if cookie_path:
             try:
-                cj = http.cookiejar.MozillaCookieJar(cookie_path)
-                cj.load(ignore_discard=True, ignore_expires=True)
-                cookies = {c.name: c.value for c in cj}
+                cookies = http.cookiejar.MozillaCookieJar(cookie_path)
+                cookies.load(ignore_discard=True, ignore_expires=True)
             except Exception:
-                pass
+                cookies = None
         resp = requests.get(page_url, headers={'User-Agent': DESKTOP_UA, 'Accept-Language': 'es-419,es;q=0.9,en;q=0.8'},
                             cookies=cookies, timeout=15)
         if resp.status_code != 200:
@@ -621,7 +645,10 @@ async def get_video_info(req: VideoRequest):
 # ─── ENDPOINTS: TRANSCRIPCIÓN DE URL ─────────────────────────────────────────
 
 def _find_file(folder: str, prefix: str, contains=()) -> Optional[str]:
+    """Primer archivo TERMINADO con ese prefijo (ignora descargas a medias de yt-dlp)."""
     for f in sorted(os.listdir(folder)):
+        if is_partial_download(f):
+            continue
         if f.startswith(prefix) and (not contains or any(c in f for c in contains)):
             return os.path.join(folder, f)
     return None
@@ -630,7 +657,7 @@ def _find_file(folder: str, prefix: str, contains=()) -> Optional[str]:
 def transcribe_from_subtitles(url: str, lang: str, tmpdir: str, uid: Optional[str]) -> Optional[dict]:
     """Intenta usar los subtítulos de YouTube (sin descargar audio). Bloqueante."""
     def has_subs():
-        return any(f.startswith('sub.') for f in os.listdir(tmpdir))
+        return _find_file(tmpdir, 'sub.') is not None
 
     extra = {'skip_download': True, 'writesubtitles': True, 'writeautomaticsub': True,
              'subtitleslangs': ['es.*', 'en.*'], 'subtitlesformat': 'vtt/srt/best',
@@ -718,7 +745,7 @@ async def get_transcript(req: VideoRequest):
     try:
         url = await resolve_url(req.url)
     except HTTPException as e:
-        return JSONResponse(status_code=e.status_code, content={"error": e.detail})
+        return JSONResponse(status_code=e.status_code, content={"error": e.detail, "detail": e.detail})
     add_log(uid, f"Iniciando transcripción para: {url} | Idioma: {lang}")
 
     cache_key = f"{url}_{lang}"
@@ -773,7 +800,7 @@ async def get_transcript(req: VideoRequest):
     except Exception as e:
         logger.exception("Error en transcripción")
         add_log(uid, f"Error: {e}")
-        return JSONResponse(status_code=500, content={"error": str(e)[:500]})
+        return JSONResponse(status_code=500, content={"error": str(e)[:500], "detail": str(e)[:500]})
 
 
 # ─── ENDPOINTS: TRANSCRIPCIÓN DE ARCHIVO ─────────────────────────────────────
@@ -970,14 +997,24 @@ async def download_video(req: VideoRequest, background_tasks: BackgroundTasks):
 
     def find_output():
         for f in os.listdir(DOWNLOAD_FOLDER):
-            if file_uid in f and not f.endswith(('.part', '.ytdl')) and '.temp.' not in f:
+            if file_uid in f and not is_partial_download(f):
                 return os.path.join(DOWNLOAD_FOLDER, f)
         return None
+
+    def remove_leftovers():
+        # Restos de un intento fallido (.part, pistas sin unir): si quedan, se acumulan en disco
+        for f in os.listdir(DOWNLOAD_FOLDER):
+            if file_uid in f:
+                try:
+                    os.remove(os.path.join(DOWNLOAD_FOLDER, f))
+                except OSError:
+                    logger.warning(f"No se pudo borrar el resto de descarga {f}")
 
     update_progress(req.uid, 5, "Iniciando proceso...")
     try:
         await run_blocking(ytdlp_download, url, extra, lambda: find_output() is not None,
-                           on_attempt=lambda n, name: update_progress(req.uid, 5 + n * 5, f"Conectando ({name})..."))
+                           on_attempt=lambda n, name: update_progress(req.uid, 5 + n * 5, f"Conectando ({name})..."),
+                           cleanup=remove_leftovers)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"No se pudo descargar: {str(e)[:300]}")
 
@@ -1009,7 +1046,8 @@ async def proxy_thumbnail(url: str):
 
 
 @app.delete("/api/clear-downloads")
-async def clear_downloads():
+async def clear_downloads(request: Request):
+    require_admin(request)
     def clear():
         shutil.rmtree(DOWNLOAD_FOLDER, ignore_errors=True)
         os.makedirs(DOWNLOAD_FOLDER, exist_ok=True)
@@ -1349,7 +1387,11 @@ else:
 
 if __name__ == "__main__":
     import uvicorn
-    if HOST not in ("127.0.0.1", "localhost") and not ADMIN_TOKEN and not IS_RENDER:
-        logger.warning(f"Escuchando en {HOST}: otras PCs de la red pueden usar Clipadsk. Definí ADMIN_TOKEN en .env.")
+    if not IS_LOCAL_ONLY and not ADMIN_TOKEN:
+        logger.warning(f"Escuchando en {HOST}: otras PCs pueden usar Clipadsk (descargas, transcripción y tu key de Groq). "
+                       "El mantenimiento queda bloqueado hasta definir ADMIN_TOKEN en .env.")
+    if os.environ.get('APP_PASSWORD'):
+        logger.warning("APP_PASSWORD está en .env pero Clipadsk no lo usa: NO protege la app. "
+                       "Para restringir el acceso mantené HOST=127.0.0.1 o poné un proxy con contraseña delante.")
     logger.info(f"Clipadsk en http://{'127.0.0.1' if HOST == '0.0.0.0' else HOST}:{PORT}")
     uvicorn.run(app, host=HOST, port=PORT, timeout_keep_alive=600)

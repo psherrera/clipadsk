@@ -124,6 +124,12 @@ Para verificar una cita palabra por palabra, el botón **Original** muestra el t
 
 ---
 
+## Novedades de la versión 3.2
+
+- **Listas y canales:** pegá el enlace de una lista o de un canal de YouTube, elegí los videos y se transcriben en fila.
+- **Grabar vivos:** si el enlace está en vivo aparece "Grabar el vivo". Se detiene desde el panel de trabajos (arriba a la derecha) y queda en la carpeta `grabaciones`.
+- **Configuración → Funciones extra:** cuándo usar los subtítulos de YouTube, botón de comentarios, canales vigilados con aviso de Windows (y transcripción automática opcional) y corte automático de las grabaciones.
+
 ## Novedades de la versión 3.1
 
 - **Carruseles de Instagram:** al pegar un carrusel aparecen todas las fotos y videos. Clic para elegir, doble clic para verla grande. Se baja una sola, las elegidas (en .zip) o todo el carrusel.

@@ -1,5 +1,17 @@
 # Registro de cambios
 
+## 3.2.0 — noviembre 2026
+
+### Nuevo
+- **Listas y canales de YouTube:** al pegar una lista o un canal aparecen sus videos con casillas para elegir; los elegidos se transcriben en fila, en segundo plano.
+- **Grabar vivos:** si el enlace está en vivo aparece "Grabar el vivo" (desde ahora o desde el principio, y transcribir al terminar). Graba hasta que termina la transmisión, se detiene desde el panel de trabajos o llega al máximo de horas. Queda en `grabaciones` como .mp4; si se corta en el medio lo grabado igual sirve.
+- **Configuración → Funciones extra:**
+  - Subtítulos de YouTube: usarlos siempre, solo los del autor o nunca (transcribir siempre).
+  - Comentarios de YouTube: botón "Comentarios" con los más votados o los más nuevos, búsqueda y descarga en .txt.
+  - Vigilar canales: avisa (navegador y notificación de Windows) cuando un canal o una lista sube un video nuevo; opcionalmente lo transcribe solo.
+  - Corte automático de las grabaciones.
+- Ajustes guardados en la PC (`/api/settings`), compartidos entre navegadores.
+
 ## 3.1.0 — noviembre 2026
 
 ### Nuevo

@@ -4,7 +4,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Clipadsk 3.1 - Transcriptor para Periodistas</title>
+    <title>Clipadsk 3.2 - Transcriptor para Periodistas</title>
 
     <!-- Tema: se aplica antes de pintar para evitar parpadeo -->
     <script>
@@ -23,11 +23,11 @@
     <meta name="theme-color" content="#2a1566">
     <link rel="apple-touch-icon" href="icon.svg">
 
-    <link rel="stylesheet" href="style.css?v=3.1">
+    <link rel="stylesheet" href="style.css?v=3.2">
     <!-- Tailwind compilado (después de style.css, igual que antes con el CDN) -->
-    <link rel="stylesheet" href="vendor/tailwind.css?v=3.1">
+    <link rel="stylesheet" href="vendor/tailwind.css?v=3.2">
     <!-- Componentes de la versión 3 (visualizador, trabajos, diálogos) -->
-    <link rel="stylesheet" href="v3.css?v=3.1">
+    <link rel="stylesheet" href="v3.css?v=3.2">
     <!-- JSZip: crear archivos .zip en el navegador sin backend -->
     <script src="vendor/jszip.min.js"></script>
 </head>
@@ -40,7 +40,7 @@
             <img src="logo.png" alt="" class="sidebar-logo">
             <div>
                 <p class="sidebar-title">Clipadsk</p>
-                <p class="sidebar-version">versión 3.1</p>
+                <p class="sidebar-version">versión 3.2</p>
             </div>
             <button id="sidebar-close-btn" class="sidebar-close" aria-label="Cerrar menú">
                 <span class="material-symbols-outlined">close</span>
@@ -514,8 +514,8 @@
     </div>
 
     <!-- v3.js va antes que main.js: define window.ClipaV3, que main.js usa -->
-    <script src="v3.js?v=3.1" defer></script>
-    <script src="main.js?v=3.1" defer></script>
+    <script src="v3.js?v=3.2" defer></script>
+    <script src="main.js?v=3.2" defer></script>
     <script>
         if ('serviceWorker' in navigator) {
             window.addEventListener('load', () => {

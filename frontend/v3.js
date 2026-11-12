@@ -301,7 +301,8 @@
 
     function notifyJob(job) {
         const ok = job.status === 'done';
-        const title = ok ? 'Transcripción lista' : 'No se pudo transcribir';
+        const rec = job.kind === 'record';
+        const title = rec ? (ok ? 'Grabación guardada' : 'La grabación falló') : (ok ? 'Transcripción lista' : 'No se pudo transcribir');
         const body = `${job.title || job.url}${ok ? '' : ` — ${job.error || ''}`}`;
         toast(`${title}: ${job.title || job.url}`, ok ? 'success' : 'error', 6000);
         if ('Notification' in window && Notification.permission === 'granted' && document.hidden) {
@@ -1205,6 +1206,11 @@
                 window.Clipa.openHistory(Number(a.dataset.id));
             }
             if (act === 'dismiss') jobs.dismiss(a.dataset.id);
+            if (act === 'stop') {
+                a.disabled = true;
+                await api(`/jobs/${a.dataset.id}/stop`, { method: 'POST' }).catch(err => toast(err.message, 'error'));
+                jobs.poll();
+            }
             if (act === 'retry') {
                 const job = jobs.list.find(j => j.id === a.dataset.id);
                 if (job) { await jobs.dismiss(job.id); jobs.create({ url: job.url, lang: job.lang, title: job.title }); }
@@ -1226,15 +1232,20 @@
             const states = {
                 queued: `<span class="v3-st">En cola</span>`,
                 running: `<div class="progress-track v3-mini"><div style="width:${Number(j.progress) || 0}%"></div></div><span class="v3-st">${esc(j.text || 'Procesando...')}</span>`,
-                done: `<span class="v3-st v3-ok">Lista</span>`,
+                done: j.warning ? `<span class="v3-st v3-warn">${esc(j.warning)}</span>` : `<span class="v3-st v3-ok">${j.kind === 'record' ? `Guardada${j.size_mb ? ` · ${esc(j.size_mb)} MB` : ''}` : 'Lista'}</span>`,
                 error: `<span class="v3-st v3-err">${esc(j.error || 'Error')}</span>`,
             };
-            const actions = j.status === 'done'
-                ? `<button class="link-btn" data-j="open" data-id="${Number(j.history_id)}">Abrir</button>`
-                : j.status === 'error' ? `<button class="link-btn" data-j="retry" data-id="${esc(j.id)}">Reintentar</button>` : '';
+            const isRec = j.kind === 'record';
+            let actions = '';
+            if (isRec && j.status === 'running') actions = `<button class="link-btn v3-stop" data-j="stop" data-id="${esc(j.id)}"><span class="material-symbols-outlined text-base">stop_circle</span> Detener</button>`;
+            else if (isRec && j.status === 'done') actions = (j.file ? `<a class="link-btn" href="${API}/record/${encodeURIComponent(j.id)}/file" download>Descargar</a>` : '')
+                + (j.history_id ? ` <button class="link-btn" data-j="open" data-id="${Number(j.history_id)}">Abrir</button>` : '');
+            else if (j.status === 'done') actions = `<button class="link-btn" data-j="open" data-id="${Number(j.history_id)}">Abrir</button>`;
+            else if (j.status === 'error' && !isRec) actions = `<button class="link-btn" data-j="retry" data-id="${esc(j.id)}">Reintentar</button>`;
             const dismiss = (j.status === 'done' || j.status === 'error')
                 ? `<button class="icon-btn-sm" data-j="dismiss" data-id="${esc(j.id)}" title="Quitar de la lista"><span class="material-symbols-outlined text-base">close</span></button>` : '';
-            return `<div class="v3-job v3-job-${esc(j.status)}"><div class="v3-job-main"><p class="v3-job-title" title="${esc(j.url)}">${title}</p>${states[j.status] || ''}</div><div class="v3-job-actions">${actions}${dismiss}</div></div>`;
+            const icon = isRec ? '<span class="v3-rec-dot" title="Grabación de un vivo"></span>' : '';
+            return `<div class="v3-job v3-job-${esc(j.status)}"><div class="v3-job-main"><p class="v3-job-title" title="${esc(j.url)}">${icon}${title}</p>${states[j.status] || ''}</div><div class="v3-job-actions">${actions}${dismiss}</div></div>`;
         }).join('');
     }
 
@@ -1566,6 +1577,392 @@
         return { mount, unmount, selected: () => [...selected] };
     })();
 
+
+    // ─── Motor de descarga: ajustes, listas, vivos, comentarios y canales vigilados ──
+    const motor = (() => {
+        let settings = null;
+        let lastEvent = Number(store.get('clipadsk_watch_last') || 0);
+        let eventsTimer = null;
+
+        async function loadSettings() {
+            try { settings = await api('/settings'); } catch { settings = settings || {}; }
+            return settings;
+        }
+
+        async function saveSetting(patch) {
+            try {
+                settings = await api('/settings', { method: 'PUT', body: patch });
+                toast('Guardado', 'success', 1500);
+            } catch (err) { toast(err.message, 'error'); }
+            renderSettingsCard();
+            startEventsPolling();
+            return settings;
+        }
+
+        // ── Tarjeta en Configuración ──
+        function mountSettingsCard() {
+            const section = document.getElementById('config-section');
+            if (!section || document.getElementById('v3-motor-card')) return;
+            const card = document.createElement('div');
+            card.id = 'v3-motor-card';
+            card.className = 'glass card space-y-3 v3-motor-card';
+            section.insertBefore(card, section.children[2] || null);
+            card.addEventListener('change', onSettingsChange);
+            card.addEventListener('click', onSettingsClick);
+            card.addEventListener('keydown', (e) => {
+                if (e.key === 'Enter' && e.target.id === 'v3-watch-url') { e.preventDefault(); addWatch(); }
+            });
+            renderSettingsCard();
+        }
+
+        function renderSettingsCard() {
+            const card = document.getElementById('v3-motor-card');
+            if (!card || !settings) return;
+            const st = settings;
+            const sw = (key, label, help) => `
+                <label class="v3-switch-row">
+                    <span><b>${label}</b><small>${help}</small></span>
+                    <input type="checkbox" class="v3-switch" data-s="${key}" ${st[key] ? 'checked' : ''}>
+                </label>`;
+            const opt = (v, t, cur) => `<option value="${v}" ${String(cur) === String(v) ? 'selected' : ''}>${t}</option>`;
+            card.innerHTML = `
+                <div class="flex items-center gap-3">
+                    <span class="quick-icon bg-primary/10 text-primary"><span class="material-symbols-outlined">tune</span></span>
+                    <h3 class="font-semibold text-white">Funciones extra</h3>
+                </div>
+                <div class="v3-set-block">
+                    <p class="v3-set-title">Subtítulos de YouTube</p>
+                    <p class="v3-set-help">Si el video ya tiene subtítulos, el texto sale al instante y sin gastar Groq. Los automáticos tienen más errores que la transcripción.</p>
+                    <select class="field w-full" data-s="subtitles_mode">
+                        ${opt('auto', 'Usarlos siempre que haya (más rápido)', st.subtitles_mode)}
+                        ${opt('manual', 'Solo los que cargó el autor (los automáticos no)', st.subtitles_mode)}
+                        ${opt('never', 'Nunca: transcribir siempre (más preciso)', st.subtitles_mode)}
+                    </select>
+                </div>
+                ${sw('comments_enabled', 'Comentarios de YouTube', 'Agrega el botón "Comentarios" al analizar un video: los más votados o los más nuevos, para leer o bajar en .txt.')}
+                <div class="v3-set-block">
+                    ${sw('watch_enabled', 'Vigilar canales', 'Avisa cuando un canal o una lista sube un video nuevo. Funciona mientras Clipadsk esté abierto en la PC.')}
+                    <div class="v3-watch ${st.watch_enabled ? '' : 'v3-dim'}">
+                        <div class="v3-watch-add">
+                            <input id="v3-watch-url" class="field flex-1" placeholder="https://www.youtube.com/@canal" autocomplete="off">
+                            <button class="btn-soft" data-a="add-watch"><span class="material-symbols-outlined">add</span> Vigilar</button>
+                        </div>
+                        <ul id="v3-watch-list" class="v3-watch-list"><li class="v3-hint">Cargando...</li></ul>
+                        <div class="v3-watch-opts">
+                            <label>Revisar cada
+                                <select class="field" data-s="watch_interval_min">
+                                    ${[15, 30, 60, 180, 720].map(m => opt(m, m < 60 ? `${m} min` : `${m / 60} h`, st.watch_interval_min)).join('')}
+                                </select>
+                            </label>
+                            <button class="link-btn" data-a="check-now"><span class="material-symbols-outlined text-base">refresh</span> Revisar ahora</button>
+                        </div>
+                        ${sw('watch_auto_transcribe', 'Transcribir solo', 'Cada video nuevo se transcribe y queda en el Historial (usa la key de Groq del .env).')}
+                        ${sw('windows_toasts', 'Aviso de Windows', 'Además del aviso del navegador, muestra una notificación de Windows aunque la pestaña esté cerrada.')}
+                        <button class="link-btn" data-a="test-notif"><span class="material-symbols-outlined text-base">notifications</span> Permitir y probar avisos</button>
+                    </div>
+                </div>
+                <div class="v3-set-block">
+                    <p class="v3-set-title">Grabación de vivos</p>
+                    <label class="v3-watch-opts">Cortar sola después de
+                        <select class="field" data-s="record_max_hours">
+                            ${[1, 2, 4, 6, 12].map(h => opt(h, `${h} h`, st.record_max_hours)).join('')}
+                        </select>
+                    </label>
+                </div>`;
+            loadWatches();
+        }
+
+        async function onSettingsChange(e) {
+            const key = e.target.dataset.s;
+            if (!key) return;
+            const value = e.target.type === 'checkbox' ? e.target.checked
+                : (['watch_interval_min', 'record_max_hours'].includes(key) ? Number(e.target.value) : e.target.value);
+            if (key === 'watch_enabled' && value) askNotificationPermission();
+            await saveSetting({ [key]: value });
+        }
+
+        async function onSettingsClick(e) {
+            const a = e.target.closest('[data-a]');
+            if (!a) return;
+            if (a.dataset.a === 'add-watch') addWatch();
+            if (a.dataset.a === 'del-watch') {
+                if (!await confirmDialog('¿Dejar de vigilar este canal?', { okText: 'Dejar de vigilar' })) return;
+                const res = await api(`/watch/${a.dataset.id}`, { method: 'DELETE' }).catch(err => toast(err.message, 'error'));
+                if (res) renderWatches(res.watches);
+            }
+            if (a.dataset.a === 'check-now') {
+                a.disabled = true;
+                try {
+                    const res = await api('/watch/check', { method: 'POST' });
+                    renderWatches(res.watches);
+                    toast(res.new ? `${res.new} video(s) nuevo(s)` : 'No hay videos nuevos', res.new ? 'success' : 'info');
+                    pollEvents();
+                } catch (err) { toast(err.message, 'error'); }
+                a.disabled = false;
+            }
+            if (a.dataset.a === 'test-notif') {
+                if ('Notification' in window && Notification.permission !== 'granted') await Notification.requestPermission().catch(() => {});
+                showNotification('Clipadsk', 'Así se van a ver los avisos de videos nuevos.');
+            }
+        }
+
+        async function addWatch() {
+            const input = document.getElementById('v3-watch-url');
+            const url = input?.value.trim();
+            if (!url) return;
+            const btn = document.querySelector('[data-a="add-watch"]');
+            if (btn) btn.disabled = true;
+            try {
+                const res = await api('/watch', { method: 'POST', body: { url } });
+                input.value = '';
+                renderWatches(res.watches);
+                toast(`Vigilando: ${res.title}`, 'success');
+                if (!settings.watch_enabled) await saveSetting({ watch_enabled: true });
+            } catch (err) { toast(err.message, 'error'); }
+            if (btn) btn.disabled = false;
+        }
+
+        async function loadWatches() {
+            try { renderWatches((await api('/watch')).watches); } catch { renderWatches([]); }
+        }
+
+        function renderWatches(list) {
+            const ul = document.getElementById('v3-watch-list');
+            if (!ul) return;
+            if (!list?.length) { ul.innerHTML = '<li class="v3-hint">Todavía no vigilás ningún canal.</li>'; return; }
+            ul.innerHTML = list.map(w => {
+                const when = w.last_check ? new Date(w.last_check * 1000).toLocaleString('es-AR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) : 'sin revisar';
+                return `<li><span class="material-symbols-outlined">smart_display</span>
+                    <div><a href="${esc(w.url)}" target="_blank" rel="noopener">${esc(w.title)}</a>
+                    <small>${w.last_error ? `<span class="v3-err">${esc(w.last_error)}</span>` : `Última revisión: ${esc(when)}`}</small></div>
+                    <button class="icon-btn-sm" data-a="del-watch" data-id="${Number(w.id)}" title="Dejar de vigilar"><span class="material-symbols-outlined text-base">close</span></button></li>`;
+            }).join('');
+        }
+
+        // ── Avisos de videos nuevos ──
+        function showNotification(title, body, onClick) {
+            toast(`${title}: ${body}`, 'info', 8000);
+            if ('Notification' in window && Notification.permission === 'granted') {
+                try {
+                    const n = new Notification(title, { body, icon: 'icon.svg' });
+                    n.onclick = () => { window.focus(); onClick?.(); n.close(); };
+                } catch { /* sin notificaciones del sistema */ }
+            }
+        }
+
+        async function pollEvents() {
+            try {
+                const { events } = await api(`/watch/events?after=${lastEvent}`);
+                const fresh = (events || []).filter(e => e.id > lastEvent).reverse();
+                if (!lastEvent && fresh.length) {
+                    // primera vez en este navegador: solo tomar nota, no avisar de lo viejo
+                    lastEvent = fresh[fresh.length - 1].id;
+                } else {
+                    for (const ev of fresh) {
+                        showNotification(`Video nuevo de ${ev.channel || 'un canal vigilado'}`, ev.title || ev.url, () => {
+                            window.Clipa?.switchTab('link');
+                            const input = document.getElementById('video-url');
+                            if (input) { input.value = ev.url; document.getElementById('fetch-info-btn')?.click(); }
+                        });
+                        if (ev.job_id) jobs.poll();
+                        lastEvent = Math.max(lastEvent, ev.id);
+                    }
+                }
+                store.set('clipadsk_watch_last', String(lastEvent));
+            } catch { /* servidor apagado */ }
+        }
+
+        function startEventsPolling() {
+            clearInterval(eventsTimer);
+            eventsTimer = null;
+            if (!settings?.watch_enabled) return;
+            pollEvents();
+            eventsTimer = setInterval(pollEvents, 60000);
+        }
+
+        // ── Panel según lo que se pegó: lista, vivo, comentarios ──
+        function clearInfoExtras() {
+            document.getElementById('v3-list')?.remove();
+            document.getElementById('v3-live')?.remove();
+            document.getElementById('v3-comments-btn')?.remove();
+            document.getElementById('v3-comments')?.remove();
+            const card = document.getElementById('video-info-card');
+            card?.classList.remove('v3-is-list');
+            const trim = document.getElementById('clip-start')?.closest('.space-y-2');
+            const fmt = document.getElementById('format-select')?.closest('.space-y-2');
+            const dl = document.getElementById('download-btn');
+            if (!card?.classList.contains('v3-is-carousel')) { if (trim) trim.style.display = ''; }
+            if (fmt) fmt.style.display = '';
+            if (dl) dl.style.display = '';
+        }
+
+        function onVideoInfo(info) {
+            clearInfoExtras();
+            const body = document.querySelector('#video-info-card .p-6');
+            if (!body) return;
+            if (Array.isArray(info.playlist) && info.playlist.length) mountList(info, body);
+            else if (info.is_live) mountLive(info, body);
+            if (settings?.comments_enabled && !info.playlist && /youtu\.?be/.test(info.url || '')) mountCommentsButton(info, body);
+        }
+
+        function mountList(info, body) {
+            const card = document.getElementById('video-info-card');
+            card.classList.add('v3-is-list');
+            ['clip-start', 'format-select'].forEach(id => {
+                const el = document.getElementById(id)?.closest('.space-y-2');
+                if (el) el.style.display = 'none';
+            });
+            const dl = document.getElementById('download-btn');
+            if (dl) dl.style.display = 'none';
+            const items = info.playlist;
+            const sel = new Set();
+            const wrap = document.createElement('div');
+            wrap.id = 'v3-list';
+            wrap.className = 'v3-list';
+            wrap.innerHTML = `
+                <div class="v3-carousel-head"><div><strong>Lista</strong> <span class="v3-hint">· ${items.length} videos</span></div>
+                    <button type="button" class="v3-link" data-l="all">Elegir todos</button></div>
+                <ul class="v3-list-items">${items.map((it, i) => `
+                    <li><label>
+                        <input type="checkbox" data-i="${i}">
+                        ${it.thumbnail ? `<img src="${esc(it.thumbnail)}" alt="" loading="lazy" referrerpolicy="no-referrer">` : '<span class="v3-list-noimg material-symbols-outlined">movie</span>'}
+                        <span class="v3-list-title">${esc(it.title)}${it.live ? ' <em class="v3-live-tag">EN VIVO</em>' : ''}</span>
+                        <span class="v3-list-dur">${it.duration ? fmtTime(it.duration) : ''}</span>
+                    </label></li>`).join('')}</ul>
+                <div class="v3-list-actions">
+                    <select class="field" data-l="lang" title="Idioma"><option value="es">Español</option><option value="en">Inglés</option><option value="original">Original</option></select>
+                    <button type="button" class="btn-primary flex-1" data-l="go" disabled><span class="material-symbols-outlined">playlist_add</span> <span>Elegí videos para transcribir</span></button>
+                </div>
+                <p class="v3-hint">Se transcriben de a uno en segundo plano y quedan en el Historial. Podés seguir usando Clipa mientras tanto.</p>`;
+            const first = body.firstElementChild;
+            first ? first.insertAdjacentElement('afterend', wrap) : body.prepend(wrap);
+            const refresh = () => {
+                wrap.querySelectorAll('input[data-i]').forEach(c => { c.checked = sel.has(+c.dataset.i); });
+                const go = wrap.querySelector('[data-l="go"]');
+                go.disabled = !sel.size;
+                go.querySelector('span:last-child').textContent = sel.size ? `Transcribir ${sel.size} ${sel.size === 1 ? 'video' : 'videos'}` : 'Elegí videos para transcribir';
+                wrap.querySelector('[data-l="all"]').textContent = sel.size === items.length ? 'Quitar todos' : 'Elegir todos';
+            };
+            wrap.addEventListener('change', (e) => {
+                const i = e.target.dataset?.i;
+                if (i == null) return;
+                e.target.checked ? sel.add(+i) : sel.delete(+i);
+                refresh();
+            });
+            wrap.addEventListener('click', async (e) => {
+                const act = e.target.closest('[data-l]')?.dataset.l;
+                if (act === 'all') { if (sel.size === items.length) sel.clear(); else items.forEach((_, i) => sel.add(i)); refresh(); }
+                if (act === 'go') {
+                    const btn = e.target.closest('button');
+                    btn.disabled = true;
+                    const lang = wrap.querySelector('[data-l="lang"]').value;
+                    let ok = 0;
+                    for (const i of [...sel].sort((a, b) => a - b)) {
+                        const it = items[i];
+                        try { await jobs.create({ url: it.url, lang, title: it.title, uploader: info.uploader, duration: it.duration }); ok++; }
+                        catch (err) { toast(`${it.title}: ${err.message}`, 'error'); }
+                    }
+                    if (ok) {
+                        toast(`${ok} ${ok === 1 ? 'video en cola' : 'videos en cola'}. Te aviso cuando terminen.`, 'success');
+                        document.getElementById('v3-jobs-btn')?.click();
+                    }
+                    sel.clear();
+                    refresh();
+                }
+            });
+        }
+
+        function mountLive(info, body) {
+            const box = document.createElement('div');
+            box.id = 'v3-live';
+            box.className = 'v3-live';
+            const upcoming = info.live_status === 'is_upcoming';
+            box.innerHTML = `
+                <div class="v3-live-head"><span class="v3-rec-dot"></span><strong>${upcoming ? 'Vivo programado' : 'Está en vivo'}</strong></div>
+                ${upcoming ? '<p class="v3-hint">Todavía no empezó. Volvé a analizar el enlace cuando arranque para grabarlo.</p>' : `
+                <label class="v3-check"><input type="checkbox" data-r="from_start"> Grabar desde el principio (no solo desde ahora)</label>
+                <label class="v3-check"><input type="checkbox" data-r="transcribe" checked> Transcribir al terminar</label>
+                <button type="button" class="btn-primary w-full" data-r="go"><span class="material-symbols-outlined">radio_button_checked</span> Grabar el vivo</button>
+                <p class="v3-hint">Graba en segundo plano hasta que termine la transmisión o la detengas desde el panel de trabajos. Queda en la carpeta "grabaciones".</p>`}`;
+            const first = body.firstElementChild;
+            first ? first.insertAdjacentElement('afterend', box) : body.prepend(box);
+            box.querySelector('[data-r="go"]')?.addEventListener('click', async (e) => {
+                const btn = e.currentTarget;
+                btn.disabled = true;
+                try {
+                    askNotificationPermission();
+                    const lang = document.querySelector('.lang-btn.active')?.dataset.lang || 'es';
+                    await api('/record', { method: 'POST', body: {
+                        url: info.url, from_start: box.querySelector('[data-r="from_start"]').checked,
+                        transcribe: box.querySelector('[data-r="transcribe"]').checked, target_lang: lang, groq_api_key: groqKey() } });
+                    toast('Grabando. Lo ves y lo detenés desde el panel de trabajos.', 'success', 6000);
+                    jobs.poll();
+                    document.getElementById('v3-jobs-btn')?.click();
+                } catch (err) { toast(err.message, 'error'); }
+                btn.disabled = false;
+            });
+        }
+
+        function mountCommentsButton(info, body) {
+            const anchor = document.getElementById('download-thumb-btn')?.closest('.grid');
+            if (!anchor) return;
+            const btn = document.createElement('button');
+            btn.id = 'v3-comments-btn';
+            btn.className = 'btn-ghost w-full justify-center';
+            btn.innerHTML = `<span class="material-symbols-outlined text-lg">forum</span> Comentarios${info.comment_count ? ` (${Number(info.comment_count).toLocaleString('es-AR')})` : ''}`;
+            anchor.insertAdjacentElement('afterend', btn);
+            btn.addEventListener('click', () => loadComments(info, btn));
+        }
+
+        async function loadComments(info, btn, sort = 'top') {
+            document.getElementById('v3-comments')?.remove();
+            const box = document.createElement('div');
+            box.id = 'v3-comments';
+            box.className = 'v3-comments';
+            box.innerHTML = '<div class="v3-comments-loading"><span class="v3-spinner v3-spinner-sm"></span> Bajando comentarios (puede tardar un poco)...</div>';
+            btn.insertAdjacentElement('afterend', box);
+            try {
+                const d = await api('/comments', { method: 'POST', body: { url: info.url, limit: 300, sort } });
+                const filter = (q) => {
+                    const n = normalize(q);
+                    return d.comments.filter(c => !n || normalize(c.text + ' ' + c.author).includes(n));
+                };
+                const render = (list) => list.map(c => `
+                    <li class="${c.reply ? 'v3-reply' : ''}">
+                        <p class="v3-c-meta"><b>${esc(c.author)}</b>${c.by_uploader ? ' <em>autor</em>' : ''}${c.pinned ? ' <em>fijado</em>' : ''} · ${Number(c.likes).toLocaleString('es-AR')} <span class="material-symbols-outlined">thumb_up</span>${c.when ? ` · ${esc(c.when)}` : ''}</p>
+                        <p>${esc(c.text)}</p></li>`).join('') || '<li class="v3-hint">Nada coincide.</li>';
+                box.innerHTML = `
+                    <div class="v3-comments-bar">
+                        <select class="field" data-c="sort"><option value="top" ${sort === 'top' ? 'selected' : ''}>Más votados</option><option value="new" ${sort === 'new' ? 'selected' : ''}>Más nuevos</option></select>
+                        <input class="field flex-1" data-c="q" placeholder="Buscar en ${d.comments.length} comentarios...">
+                        <button class="icon-btn-sm" data-c="txt" title="Descargar .txt"><span class="material-symbols-outlined">download</span></button>
+                        <button class="icon-btn-sm" data-c="close" title="Cerrar"><span class="material-symbols-outlined">close</span></button>
+                    </div>
+                    <ul class="v3-comments-list">${render(d.comments)}</ul>`;
+                box.querySelector('[data-c="q"]').addEventListener('input', (e) => { box.querySelector('ul').innerHTML = render(filter(e.target.value)); });
+                box.querySelector('[data-c="sort"]').addEventListener('change', (e) => loadComments(info, btn, e.target.value));
+                box.querySelector('[data-c="close"]').addEventListener('click', () => box.remove());
+                box.querySelector('[data-c="txt"]').addEventListener('click', () => {
+                    downloadBlob(new Blob([d.text], { type: 'text/plain;charset=utf-8' }), `comentarios_${(info.title || 'video').slice(0, 40)}.txt`);
+                });
+            } catch (err) {
+                box.innerHTML = `<p class="v3-err">${esc(err.message)}</p>`;
+            }
+        }
+
+        function normalize(t) {
+            return String(t || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase();
+        }
+
+        async function init() {
+            await loadSettings();
+            mountSettingsCard();
+            startEventsPolling();
+        }
+
+        return { init, onVideoInfo, settings: () => settings, clear: clearInfoExtras };
+    })();
+
     // ─── Arranque ────────────────────────────────────────────────────────────────
     document.addEventListener('clipa:ready', () => {
         mountJobsPanel();
@@ -1574,6 +1971,7 @@
         mountShortcuts();
         checkCookiesBanner();
         history.migrateFromBrowser().then(() => history.load());
+        motor.init();
     });
 
     document.addEventListener('clipa:transcript', (e) => {
@@ -1582,11 +1980,12 @@
         mountRawToggle({ text: d.text, raw: d.raw, segments: d.segments });
     });
 
-    document.addEventListener('clipa:tab', () => { viewer.unmount(); gallery.unmount(); });
-    document.addEventListener('clipa:videoinfo', (e) => { showEstimate(e.detail || {}); gallery.mount(e.detail || {}); });
+    document.addEventListener('clipa:tab', () => { viewer.unmount(); gallery.unmount(); motor.clear(); });
+    document.addEventListener('clipa:videoinfo', (e) => { showEstimate(e.detail || {}); gallery.mount(e.detail || {}); motor.onVideoInfo(e.detail || {}); });
 
     window.ClipaV3 = {
         gallery,
+        motor,
         version: '3.0.0', api, history, jobs, viewer, confirm: confirmDialog, prompt: promptDialog, dialog,
         formatQuote, linkAt, fmtTime, parseTime, youtubeId, estimateTranscription,
     };

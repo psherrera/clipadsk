@@ -23,6 +23,7 @@ import random
 import shutil
 import sqlite3
 import asyncio
+import contextlib
 import zipfile
 import mimetypes
 import threading
@@ -33,12 +34,12 @@ import sys
 import http.cookiejar
 from pathlib import Path
 from typing import Optional, Any, List
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
 from concurrent.futures import ThreadPoolExecutor
 
 import requests
 import yt_dlp
-from fastapi import FastAPI, Request, HTTPException, BackgroundTasks, UploadFile, File, Form, Response
+from fastapi import FastAPI, Request, HTTPException, BackgroundTasks, UploadFile, File, Form, Response, Body
 from fastapi.responses import JSONResponse, FileResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -60,6 +61,7 @@ from text_utils import (
 )
 from errors import friendly_error
 import history as hist
+import extras
 import media
 import ai
 
@@ -74,8 +76,17 @@ except ImportError:  # pragma: no cover
     TTLCache = None
 
 
-APP_VERSION = "3.1.0"
-app = FastAPI(title="Clipadsk API", version=APP_VERSION)
+APP_VERSION = "3.2.0"
+@contextlib.asynccontextmanager
+async def lifespan(_app):
+    task = asyncio.create_task(watch_loop())
+    try:
+        yield
+    finally:
+        task.cancel()
+
+
+app = FastAPI(title="Clipadsk API", version=APP_VERSION, lifespan=lifespan)
 
 # ─── EJECUCIÓN EN SEGUNDO PLANO ──────────────────────────────────────────────
 # Todo lo que bloquea (yt-dlp, FFmpeg, Groq, requests) se corre en hilos para que el
@@ -242,6 +253,7 @@ def cache_set(key: str, data: dict):
 
 init_db()
 hist.init(DB_FILE)
+extras.init(DB_FILE)
 
 
 # ─── YT-DLP ──────────────────────────────────────────────────────────────────
@@ -699,6 +711,25 @@ MP3_FORMAT = {'format_id': 'mp3', 'ext': 'mp3', 'resolution': 'Solo audio', 'fil
 BEST_FORMAT = {'format_id': 'best', 'ext': 'mp4', 'resolution': 'Mejor calidad', 'filesize': None, 'label': 'Mejor calidad (.mp4)'}
 
 
+def extract_list(url: str, limit: int = 200) -> dict:
+    """Lista o canal sin entrar a cada video (rápido). Bloqueante."""
+    target = extras.list_url(url)
+    return ytdlp_extract(target, {'extract_flat': 'in_playlist', 'playlistend': limit, 'noplaylist': False,
+                                  'skip_download': True})
+
+
+def list_info_response(info: dict) -> dict:
+    entries = extras.normalize_entries(info)
+    if not entries:
+        raise HTTPException(status_code=400, detail="La lista o el canal no tiene videos (o es privado).")
+    title = info.get('title') or 'Lista de videos'
+    return {'title': title, 'uploader': info.get('uploader') or info.get('channel') or '',
+            'description': f"{len(entries)} videos", 'thumbnail': entries[0].get('thumbnail'),
+            'max_res_thumbnail': entries[0].get('thumbnail'), 'duration': None,
+            'formats': [BEST_FORMAT], 'has_ffmpeg': HAS_FFMPEG, 'has_subtitles': False,
+            'can_transcribe': False, 'playlist': entries}
+
+
 @app.post("/api/video-info")
 async def get_video_info(req: VideoRequest):
     url = await resolve_url(req.url)
@@ -720,6 +751,12 @@ async def get_video_info(req: VideoRequest):
         except Exception as e:
             logger.debug(f"Instaloader falló, intentando con yt-dlp: {e}")
 
+    if extras.looks_like_list(url):
+        try:
+            return list_info_response(await run_blocking(extract_list, url, 200))
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=friendly_error(str(e)))
+
     try:
         info = await run_blocking(ytdlp_extract, url)
     except Exception as e:
@@ -736,6 +773,8 @@ async def get_video_info(req: VideoRequest):
         data = await run_blocking(get_carousel, url, False)
         if data:
             return carousel_info_response(data)
+    if not is_instagram and info.get('_type') == 'playlist' and info.get('entries'):
+        return list_info_response(info)
 
     formats = build_format_list(info.get('formats') or [], HAS_FFMPEG)
     if not formats:
@@ -757,6 +796,9 @@ async def get_video_info(req: VideoRequest):
         'has_ffmpeg': HAS_FFMPEG,
         'has_subtitles': bool(info.get('subtitles') or info.get('automatic_captions')),
         'has_manual_subtitles': bool(info.get('subtitles')),
+        'live_status': info.get('live_status'),
+        'is_live': info.get('live_status') in ('is_live', 'is_upcoming') or bool(info.get('is_live')),
+        'comment_count': info.get('comment_count'),
     }
 
 
@@ -772,12 +814,14 @@ def _find_file(folder: str, prefix: str, contains=()) -> Optional[str]:
     return None
 
 
-def transcribe_from_subtitles(url: str, lang: str, tmpdir: str, uid: Optional[str]) -> Optional[dict]:
-    """Intenta usar los subtítulos de YouTube (sin descargar audio). Bloqueante."""
+def transcribe_from_subtitles(url: str, lang: str, tmpdir: str, uid: Optional[str],
+                              auto_captions: bool = True) -> Optional[dict]:
+    """Intenta usar los subtítulos de YouTube (sin descargar audio). Bloqueante.
+    auto_captions=False: solo los subtítulos que cargó el autor (los automáticos tienen más errores)."""
     def has_subs():
         return _find_file(tmpdir, 'sub.') is not None
 
-    extra = {'skip_download': True, 'writesubtitles': True, 'writeautomaticsub': True,
+    extra = {'skip_download': True, 'writesubtitles': True, 'writeautomaticsub': auto_captions,
              'subtitleslangs': ['es.*', 'en.*'], 'subtitlesformat': 'vtt/srt/best',
              'outtmpl': os.path.join(tmpdir, 'sub.%(ext)s')}
     try:
@@ -905,9 +949,10 @@ async def transcribe_url(raw_url: str, lang: str, groq_api_key: Optional[str], u
 
         with tempfile.TemporaryDirectory() as tmpdir:
             result = None
-            if host_matches(url, YOUTUBE_DOMAINS):
+            subs_mode = (await run_light(extras.get_settings, DB_FILE)).get("subtitles_mode", "auto")
+            if host_matches(url, YOUTUBE_DOMAINS) and subs_mode != "never":
                 add_log(uid, "Buscando subtítulos de YouTube...")
-                result = await run_blocking(transcribe_from_subtitles, url, lang, tmpdir, uid)
+                result = await run_blocking(transcribe_from_subtitles, url, lang, tmpdir, uid, subs_mode == "auto")
             if not result:
                 result = await run_blocking(transcribe_from_audio, url, lang, tmpdir, uid, client)
 
@@ -1396,7 +1441,7 @@ class JobRequest(BaseModel):
 
 
 def _job_public(job: dict, with_result: bool = False) -> dict:
-    out = {k: v for k, v in job.items() if k not in ("result", "api_key")}
+    out = {k: v for k, v in job.items() if k not in ("result", "api_key", "stop")}
     prog = progress_store.get(job["id"]) or {}
     if job["status"] == "running":
         out["progress"], out["text"] = prog.get("progress", 0), prog.get("text", "Procesando...")
@@ -1456,24 +1501,36 @@ async def _run_job(job: dict):
         job["finished"] = time.time()
 
 
-@app.post("/api/jobs")
-async def create_job(req: JobRequest):
-    url = sanitize_url(req.url)
-    if not url.startswith(("http://", "https://")):
+def enqueue_job(url: str, lang: str = "es", title: Optional[str] = None, uploader: Optional[str] = None,
+                duration: Optional[float] = None, api_key: Optional[str] = None) -> dict:
+    """Pone una transcripción en la cola de trabajos (necesita el bucle de asyncio en marcha)."""
+    clean = sanitize_url(url)
+    if not clean.startswith(("http://", "https://")):
         raise HTTPException(status_code=400, detail="La URL debe empezar con http:// o https://")
     _prune_jobs()
     job_id = uuid.uuid4().hex[:16]
     platform = next((name for name, domains in (("youtube", YOUTUBE_DOMAINS), ("instagram", INSTAGRAM_DOMAINS),
                                                  ("tiktok", TIKTOK_DOMAINS), ("redes", TWITTER_DOMAINS + FACEBOOK_DOMAINS))
-                     if host_matches(url, domains)), "bunny")
-    job = {"id": job_id, "url": req.url.strip(), "lang": req.target_lang or "es", "status": "queued",
-           "title": (req.title or "").strip() or None, "uploader": req.uploader, "duration": req.duration,
+                     if host_matches(clean, domains)), "bunny")
+    job = {"id": job_id, "kind": "transcribe", "url": url.strip(), "lang": lang or "es", "status": "queued",
+           "title": (title or "").strip() or None, "uploader": uploader, "duration": duration,
            "platform": platform, "created": time.time(), "finished": None, "error": None, "history_id": None,
-           "api_key": req.groq_api_key}
+           "api_key": api_key}
     JOBS[job_id] = job
-    task = asyncio.create_task(_run_job(job))
+    _start_task(_run_job(job))
+    return job
+
+
+def _start_task(coro):
+    task = asyncio.create_task(coro)
     _job_tasks.add(task)
     task.add_done_callback(_job_tasks.discard)
+    return task
+
+
+@app.post("/api/jobs")
+async def create_job(req: JobRequest):
+    job = enqueue_job(req.url, req.target_lang or "es", req.title, req.uploader, req.duration, req.groq_api_key)
     return _job_public(job)
 
 
@@ -1501,6 +1558,349 @@ async def dismiss_job(job_id: str):
         raise HTTPException(status_code=409, detail="El trabajo todavía está corriendo.")
     JOBS.pop(job_id, None)
     return {"status": "ok"}
+
+
+@app.post("/api/jobs/{job_id}/stop")
+async def stop_job(job_id: str):
+    """Corta una grabación en curso (lo grabado hasta ahí se guarda)."""
+    job = JOBS.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="El trabajo no existe.")
+    if job.get("kind") != "record":
+        raise HTTPException(status_code=400, detail="Solo se pueden detener las grabaciones.")
+    job["stop"] = True
+    return _job_public(job)
+
+
+# ─── AJUSTES ─────────────────────────────────────────────────────────────────
+
+@app.get("/api/settings")
+async def get_settings_endpoint():
+    return await run_light(extras.get_settings, DB_FILE)
+
+
+@app.put("/api/settings")
+async def put_settings(request: Request, patch: dict = Body(...)):
+    require_admin(request)
+    try:
+        return await run_light(extras.update_settings, DB_FILE, patch)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+# ─── COMENTARIOS ─────────────────────────────────────────────────────────────
+
+class CommentsRequest(BaseModel):
+    url: str
+    limit: int = 300
+    sort: str = "top"  # top | new
+
+
+def fetch_comments(url: str, limit: int, sort: str) -> dict:
+    limit = max(10, min(limit, 2000))
+    extra = {'getcomments': True, 'skip_download': True,
+             'extractor_args': {'youtube': {'comment_sort': ['new' if sort == 'new' else 'top'],
+                                            'max_comments': [str(limit), 'all', '20', '10']}}}
+    opts = get_robust_opts(url, extra)
+    with yt_dlp.YoutubeDL(opts) as ydl:
+        info = ydl.extract_info(url, download=False)
+    return {'title': info.get('title') or url, 'url': url, 'total': info.get('comment_count'),
+            'comments': extras.normalize_comments(info, limit)}
+
+
+@app.post("/api/comments")
+async def comments_endpoint(req: CommentsRequest):
+    url = await resolve_url(req.url)
+    try:
+        data = await run_blocking(fetch_comments, url, req.limit, req.sort)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=friendly_error(str(e)))
+    data['text'] = extras.comments_as_text(data['title'], url, data['comments'])
+    return data
+
+
+# ─── CANALES VIGILADOS ───────────────────────────────────────────────────────
+
+WATCH_TICK = 60
+
+
+def check_watch(watch: dict) -> list:
+    """Revisa un canal y devuelve los videos nuevos. Bloqueante."""
+    try:
+        info = extract_list(watch["url"], 15)
+        entries = [e for e in extras.normalize_entries(info, 15)]
+        title = info.get("uploader") or info.get("channel") or info.get("title") or ""
+        return extras.record_check(DB_FILE, watch["id"], entries, title)
+    except Exception as e:
+        logger.warning(f"No se pudo revisar {watch['url']}: {str(e)[:200]}")
+        extras.record_check(DB_FILE, watch["id"], [], error=friendly_error(str(e)))
+        return []
+
+
+async def run_watch_checks(force: bool = False) -> list:
+    settings = await run_light(extras.get_settings, DB_FILE)
+    interval = 0 if force else int(settings["watch_interval_min"])
+    events = []
+    for watch in await run_light(extras.due_watches, DB_FILE, interval):
+        events += await run_blocking(check_watch, watch)
+    for ev in events:
+        if settings["windows_toasts"]:
+            await run_light(extras.windows_toast, f"Video nuevo de {ev['channel'] or 'un canal vigilado'}", ev["title"] or ev["url"])
+        if settings["watch_auto_transcribe"]:
+            try:
+                job = enqueue_job(ev["url"], "es", ev["title"], ev["channel"])
+                await run_light(extras.set_event_job, DB_FILE, ev["id"], job["id"])
+                ev["job_id"] = job["id"]
+            except Exception as e:
+                logger.warning(f"No se pudo poner en cola {ev['url']}: {e}")
+    return events
+
+
+async def watch_loop():
+    """Revisa los canales vigilados cada minuto (cada canal según el intervalo elegido)."""
+    await asyncio.sleep(20)
+    while True:
+        try:
+            settings = await run_light(extras.get_settings, DB_FILE)
+            if settings["watch_enabled"]:
+                await run_watch_checks()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Error revisando canales vigilados")
+        await asyncio.sleep(WATCH_TICK)
+
+
+class WatchRequest(BaseModel):
+    url: str
+
+
+@app.get("/api/watch")
+async def list_watch():
+    return {"watches": await run_light(extras.list_watches, DB_FILE)}
+
+
+@app.post("/api/watch")
+async def add_watch(req: WatchRequest, request: Request):
+    require_admin(request)
+    url = sanitize_url(req.url)
+    if not extras.is_youtube(url):
+        raise HTTPException(status_code=400, detail="Por ahora solo se pueden vigilar canales y listas de YouTube.")
+    p = urlparse(url)
+    if not extras.looks_like_list(url):
+        raise HTTPException(status_code=400, detail="Pegá el enlace del canal (por ejemplo youtube.com/@canal) o de una lista.")
+    try:
+        info = await run_blocking(extract_list, url, 15)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=friendly_error(str(e)))
+    title = info.get("uploader") or info.get("channel") or info.get("title") or p.path.strip("/")
+    watch_id = await run_light(extras.add_watch, DB_FILE, url, title)
+    # La primera revisión anota lo que ya hay, para avisar solo de lo que se suba de ahora en más
+    await run_light(extras.record_check, DB_FILE, watch_id, extras.normalize_entries(info, 15), title)
+    return {"id": watch_id, "title": title, "watches": await run_light(extras.list_watches, DB_FILE)}
+
+
+@app.delete("/api/watch/{watch_id}")
+async def delete_watch(watch_id: int, request: Request):
+    require_admin(request)
+    await run_light(extras.delete_watch, DB_FILE, watch_id)
+    return {"watches": await run_light(extras.list_watches, DB_FILE)}
+
+
+@app.post("/api/watch/check")
+async def check_watch_now(request: Request):
+    require_admin(request)
+    events = await run_watch_checks(force=True)
+    return {"new": len(events), "events": events, "watches": await run_light(extras.list_watches, DB_FILE)}
+
+
+@app.get("/api/watch/events")
+async def watch_events(after: int = 0, limit: int = 50):
+    return {"events": await run_light(extras.list_events, DB_FILE, max(0, after), max(1, min(limit, 200)))}
+
+
+# ─── GRABAR VIVOS ────────────────────────────────────────────────────────────
+
+RECORD_DIR = os.path.join(DATA_DIR, 'grabaciones')
+os.makedirs(RECORD_DIR, exist_ok=True)
+
+
+class RecordRequest(BaseModel):
+    url: str
+    from_start: bool = False
+    transcribe: bool = False
+    target_lang: Optional[str] = "es"
+    groq_api_key: Optional[str] = None
+
+
+def _fmt_clock(sec: float) -> str:
+    sec = int(sec)
+    return f"{sec // 3600}:{sec % 3600 // 60:02d}:{sec % 60:02d}"
+
+
+def _record_blocking(job: dict, cmd: list, out_base: str, max_seconds: float) -> str:
+    """Corre yt-dlp hasta que termina el vivo, se pide detener o se llega al máximo. Devuelve el archivo."""
+    folder, prefix = os.path.dirname(out_base), os.path.basename(out_base)
+    flags = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
+    tail: list = []
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding='utf-8',
+                            errors='replace', creationflags=flags)
+
+    def reader():
+        for line in proc.stdout:
+            tail.append(line.strip())
+            del tail[:-30]
+    threading.Thread(target=reader, daemon=True).start()
+
+    started = time.time()
+
+    def current_file():
+        files = [os.path.join(folder, f) for f in os.listdir(folder) if f.startswith(prefix)]
+        return max(files, key=os.path.getsize) if files else None
+
+    while proc.poll() is None:
+        elapsed = time.time() - started
+        if job.get("stop") or elapsed > max_seconds:
+            extras.kill_tree(proc)
+            break
+        f = current_file()
+        size = os.path.getsize(f) / 1_048_576 if f else 0
+        job["recorded_seconds"] = int(elapsed)
+        update_progress(job["id"], 50, f"Grabando · {_fmt_clock(elapsed)} · {size:.0f} MB")
+        time.sleep(1)
+    f = current_file()
+    if not f or os.path.getsize(f) < 1024:
+        raise RuntimeError(" ".join(tail[-6:]) or "yt-dlp no grabó nada")
+    return f
+
+
+def _finish_recording(src: str, title: str) -> str:
+    """Pasa lo grabado (MPEG-TS) a .mp4 sin recomprimir."""
+    name = f"{safe_filename(title, 60)}_{time.strftime('%Y%m%d-%H%M')}.mp4"
+    final = os.path.join(RECORD_DIR, name)
+    if HAS_FFMPEG:
+        try:
+            res = subprocess.run([FFMPEG_BIN or 'ffmpeg', '-hide_banner', '-loglevel', 'error', '-y', '-i', src,
+                                  '-c', 'copy', '-movflags', '+faststart', final],
+                                 capture_output=True, text=True, timeout=1800,
+                                 creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+            if res.returncode == 0 and os.path.exists(final) and os.path.getsize(final) > 0:
+                os.remove(src)
+                return final
+            logger.warning(f"No se pudo pasar la grabación a mp4: {res.stderr[-300:]}")
+        except (OSError, subprocess.TimeoutExpired) as e:
+            logger.warning(f"No se pudo pasar la grabación a mp4: {e}")
+    final = os.path.splitext(final)[0] + ".ts"
+    shutil.move(src, final)
+    return final
+
+
+async def _run_record(job: dict, cmd_base: list, args_fn, max_seconds: float):
+    job["status"] = "running"
+    update_progress(job["id"], 5, "Conectando con el vivo...")
+    out_base = os.path.join(RECORD_DIR, f".grabando_{job['id']}")
+    try:
+        cmd = cmd_base + args_fn(out_base)
+        raw = await run_blocking(_record_blocking, job, cmd, out_base, max_seconds)
+        update_progress(job["id"], 70, "Guardando la grabación...")
+        final = await run_blocking(_finish_recording, raw, job.get("title") or "vivo")
+        job["file"] = os.path.basename(final)
+        job["size_mb"] = round(os.path.getsize(final) / 1_048_576, 1)
+        result = {"file": job["file"], "size_mb": job["size_mb"], "title": job.get("title"),
+                  "recorded_seconds": job.get("recorded_seconds")}
+        if job.get("transcribe"):
+            try:
+                result.update(await _transcribe_recording(job, final))
+            except Exception as e:  # la grabación ya está guardada: avisar sin perderla
+                msg = str(e) if isinstance(e, TranscriptionError) else friendly_error(str(e))
+                logger.warning(f"No se pudo transcribir la grabación: {e}")
+                result["warnings"] = [f"La grabación se guardó, pero no se pudo transcribir: {msg}"]
+                job["warning"] = result["warnings"][0]
+        job["result"] = result
+        job["status"] = "done"
+    except TranscriptionError as e:
+        job.update(status="error", error=str(e), technical=e.technical)
+    except Exception as e:
+        logger.exception("Error grabando el vivo")
+        job.update(status="error", error=friendly_error(str(e)), technical=str(e)[:400])
+    finally:
+        job["finished"] = time.time()
+        for f in os.listdir(RECORD_DIR):  # restos de una grabación cortada
+            if f.startswith(f".grabando_{job['id']}"):
+                try:
+                    os.remove(os.path.join(RECORD_DIR, f))
+                except OSError:
+                    pass
+
+
+async def _transcribe_recording(job: dict, path: str) -> dict:
+    client = ai.get_groq_client(job.pop("api_key", None))
+    if not client and not media.WHISPER_MODEL_AVAILABLE:
+        raise TranscriptionError("falta la API Key de Groq.", 400)
+    lang = job.get("lang") or "es"
+    warnings: List[str] = []
+    with tempfile.TemporaryDirectory() as tmp:
+        update_progress(job["id"], 75, "Preparando el audio...")
+        audio = await run_blocking(media.to_speech_mp3, path, os.path.join(tmp, "speech.mp3")) if HAS_FFMPEG else path
+        text, segments, method = await run_blocking(
+            media.transcribe_audio, audio, lang, client, tmp,
+            progress=lambda p, t: update_progress(job["id"], 75 + int(p * 0.2), t), log=lambda m: add_log(job["id"], m))
+    raw = remove_repetitions(text.strip())
+    text = raw
+    if client:
+        update_progress(job["id"], 96, "Aplicando puntuación y párrafos con IA...")
+        text = await run_blocking(ai.cleanup_transcript, text, client, lang, warnings)
+    text = ensure_paragraphs(text)
+    entry = {"url": job["url"], "platform": job.get("platform") or "youtube",
+             "title": f"{job.get('title') or 'Vivo'} (grabación {time.strftime('%d/%m %H:%M')})",
+             "uploader": job.get("uploader") or "", "duration": job.get("recorded_seconds"), "lang": lang,
+             "method": method, "transcript": text, "raw_transcript": ensure_paragraphs(raw),
+             "srt": generate_srt_from_segments(segments), "segments": segments}
+    job["history_id"] = await run_light(hist.upsert, DB_FILE, entry)
+    out = {"transcript": text, "segments": segments, "history_id": job["history_id"], "method": method}
+    if warnings:
+        out["warnings"] = warnings
+    return out
+
+
+@app.post("/api/record")
+async def start_record(req: RecordRequest):
+    cmd_base = extras.ytdlp_command((HOME_DIR, ROOT_DIR, BASE_DIR))
+    if not cmd_base:
+        raise HTTPException(status_code=503, detail="Para grabar vivos hace falta yt-dlp.exe en la carpeta de Clipadsk.")
+    url = await resolve_url(req.url)
+    try:
+        info = await run_blocking(ytdlp_extract, url)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=friendly_error(str(e)))
+    status = info.get('live_status')
+    if status == 'is_upcoming':
+        raise HTTPException(status_code=400, detail="El vivo todavía no empezó. Probá de nuevo cuando arranque.")
+    if status != 'is_live' and not info.get('is_live'):
+        raise HTTPException(status_code=400, detail="Este video no está en vivo ahora. Para videos comunes usá Descargar.")
+    settings = await run_light(extras.get_settings, DB_FILE)
+    job_id = uuid.uuid4().hex[:16]
+    job = {"id": job_id, "kind": "record", "url": url, "lang": req.target_lang or "es", "status": "queued",
+           "title": info.get('title') or 'Vivo', "uploader": info.get('uploader'), "platform": "youtube"
+           if host_matches(url, YOUTUBE_DOMAINS) else "redes", "created": time.time(), "finished": None,
+           "error": None, "history_id": None, "transcribe": req.transcribe, "from_start": req.from_start,
+           "api_key": req.groq_api_key, "file": None}
+    JOBS[job_id] = job
+    cookies = find_cookie_file(url)
+    _start_task(_run_record(job, cmd_base,
+                            lambda base: extras.record_args(url, base, req.from_start, cookies),
+                            float(settings["record_max_hours"]) * 3600))
+    return _job_public(job)
+
+
+@app.get("/api/record/{job_id}/file")
+async def record_file(job_id: str):
+    job = JOBS.get(job_id)
+    name = (job or {}).get("file")
+    path = os.path.join(RECORD_DIR, name) if name else None
+    if not path or not os.path.exists(path):
+        raise HTTPException(status_code=404, detail="La grabación no está disponible.")
+    return FileResponse(path, filename=name, media_type=mimetypes.guess_type(path)[0] or 'video/mp4')
 
 
 # ─── HISTORIAL (SQLite) ──────────────────────────────────────────────────────

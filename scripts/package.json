@@ -1,0 +1,10 @@
+{
+  "name": "clipadsk-build",
+  "private": true,
+  "description": "Solo para regenerar frontend/vendor/tailwind*.css (ver build_css.ps1). La app no necesita Node para funcionar.",
+  "devDependencies": {
+    "tailwindcss": "3.4.19",
+    "@tailwindcss/forms": "0.5.11",
+    "@tailwindcss/container-queries": "0.1.1"
+  }
+}

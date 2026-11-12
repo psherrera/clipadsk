@@ -166,6 +166,8 @@ pytest -q
 
 Para regenerar `backend/requirements-pinned.txt`: `scripts/pin_requirements.ps1` (Windows) o `scripts/pin_requirements.sh`.
 
+**Frontend sin internet:** Tailwind, JSZip y las fuentes están en `frontend/vendor/` (no se cargan de ningún CDN). Si agregás o cambiás clases de Tailwind en `index.html`, `setup.html` o `main.js`, regenerá el CSS con `powershell -ExecutionPolicy Bypass -File scripts\build_css.ps1` (necesita Node.js solo para esto; la app no lo necesita) y subí también `frontend/vendor/`. Al cambiar `style.css`, `main.js` o el CSS compilado, subí el número de versión (`?v=`) en `index.html` y en `sw.js` para que el navegador recargue.
+
 ---
 
 ## Requisitos

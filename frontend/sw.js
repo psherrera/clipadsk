@@ -1,9 +1,15 @@
-const CACHE_NAME = 'clipadsk-v5.3';
+const CACHE_NAME = 'clipadsk-v5.4';
 const ASSETS = [
     './',
     './index.html',
-    './style.css?v=5.2',
-    './main.js?v=5.3',
+    './style.css?v=5.4',
+    './main.js?v=5.4',
+    './vendor/tailwind.css?v=5.4',
+    './vendor/fonts.css',
+    './vendor/jszip.min.js',
+    './vendor/fonts/outfit-latin-wght-normal.woff2',
+    './vendor/fonts/outfit-latin-ext-wght-normal.woff2',
+    './vendor/fonts/material-symbols-outlined.woff2',
     './icon.svg',
     './manifest.json'
 ];

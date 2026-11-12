@@ -10,8 +10,14 @@ from dotenv import load_dotenv
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 ROOT_DIR = os.path.dirname(BASE_DIR)
+# Clipa.exe autónomo: el código viene dentro del exe (carpeta temporal), así que la carpeta del
+# exe (CLIPA_HOME) aporta .env, cookies y ffmpeg, y los datos van a CLIPA_DATA_DIR.
+HOME_DIR = os.environ.get('CLIPA_HOME') or ROOT_DIR
+DATA_DIR = os.environ.get('CLIPA_DATA_DIR') or BASE_DIR
+os.makedirs(DATA_DIR, exist_ok=True)
 
 # .env en la raíz del proyecto (y, si existe, uno en backend/ que lo complementa)
+load_dotenv(os.path.join(HOME_DIR, '.env'))
 load_dotenv(os.path.join(ROOT_DIR, '.env'))
 load_dotenv(os.path.join(BASE_DIR, '.env'))
 
@@ -22,7 +28,7 @@ logging.basicConfig(level=LOG_LEVEL, format=_log_format)
 # El servidor corre sin ventana (iniciar.bat): además se guarda un registro en backend/clipadsk.log
 try:
     from logging.handlers import RotatingFileHandler
-    _fh = RotatingFileHandler(os.path.join(BASE_DIR, 'clipadsk.log'), maxBytes=1_000_000, backupCount=2, encoding='utf-8')
+    _fh = RotatingFileHandler(os.path.join(DATA_DIR, 'clipadsk.log'), maxBytes=1_000_000, backupCount=2, encoding='utf-8')
     _fh.setFormatter(logging.Formatter(_log_format))
     logging.getLogger().addHandler(_fh)
 except OSError:
@@ -80,14 +86,14 @@ if "*" in ALLOWED_ORIGINS:
 FRONTEND_DIR = os.environ.get('FRONTEND_DIR') or os.path.join(ROOT_DIR, 'frontend')
 if not os.path.isabs(FRONTEND_DIR):
     FRONTEND_DIR = os.path.normpath(os.path.join(BASE_DIR, FRONTEND_DIR))
-DOWNLOAD_FOLDER = os.path.join(BASE_DIR, 'downloads')
-DB_FILE = os.path.join(BASE_DIR, 'clipadsk.db')
-CACHE_FILE = os.path.join(BASE_DIR, 'transcripts_cache.json')  # formato viejo (se migra)
+DOWNLOAD_FOLDER = os.path.join(DATA_DIR, 'downloads')
+DB_FILE = os.path.join(DATA_DIR, 'clipadsk.db')
+CACHE_FILE = os.path.join(DATA_DIR, 'transcripts_cache.json')  # formato viejo (se migra)
 os.makedirs(DOWNLOAD_FOLDER, exist_ok=True)
 
 # ─── FFMPEG ──────────────────────────────────────────────────────────────────
 FFMPEG_BIN = None
-for _d in (ROOT_DIR, BASE_DIR):
+for _d in dict.fromkeys((HOME_DIR, ROOT_DIR, BASE_DIR)):
     _candidate = os.path.join(_d, "ffmpeg.exe")
     if os.path.exists(_candidate):
         FFMPEG_BIN = _candidate

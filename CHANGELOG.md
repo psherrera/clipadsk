@@ -1,5 +1,16 @@
 # Registro de cambios
 
+## 3.1.0 — noviembre 2026
+
+### Nuevo
+- **Galería de carruseles de Instagram:** al pegar un carrusel se ven todas las fotos y videos en miniatura. Se puede elegir una, varias o todas y bajarlas sueltas o en un .zip. Doble clic abre la foto grande, con flechas para recorrer y "Descargar esta". Los carruseles se detectan también con instaloader (antes solo se ofrecía la primera imagen) y con yt-dlp cuando el carrusel tiene varios videos.
+- **Clipa.exe nuevo** (`CREAR_EXE.bat`): si en la carpeta hay una instalación (`backend\venv`) la usa, así el exe corre siempre el código actual y se actualiza desde la app. Sin instalación funciona solo, con los datos en `clipadsk_datos`. Si Clipadsk ya está abierto, solo abre el navegador.
+- **Clipa para Claude** (`INSTALAR_MCP.bat`): servidor MCP para Claude Desktop con herramientas para transcribir enlaces y archivos, buscar y leer el historial, traducir, resumir, sacar citas y descargar. El trabajo lo hace Clipa en la PC; a Claude le llega solo el texto.
+- gallery-dl también funciona como biblioteca (el exe no trae el programa gallery-dl).
+
+### Cambios
+- Rutas de datos configurables (`CLIPA_HOME`, `CLIPA_DATA_DIR`) para el exe autónomo. En el exe autónomo las actualizaciones desde la app avisan que hay que regenerarlo.
+
 ## 3.0.0 — noviembre 2026
 
 ### Nuevo

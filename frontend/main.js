@@ -891,7 +891,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 const serverFilename = decodeURIComponent(cdMatch[1].replace(/["']/g, '').trim());
                 // Extraer solo la extensión del servidor
                 const serverExt = serverFilename.split('.').pop();
-                a.download = `${filename}.${serverExt}`;
+                a.download = formatId === 'carousel_images' ? serverFilename : `${filename}.${serverExt}`;
             } else {
                 // Fallback: determinar extensión por formato seleccionado
                 const isMP3 = formatId === 'mp3' || selectedText.toLowerCase().includes('mp3');

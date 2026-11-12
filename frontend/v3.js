@@ -1356,6 +1356,216 @@
         btn.closest('.grid')?.insertAdjacentElement('afterend', p);
     }
 
+
+    // ─── Galería de carruseles de Instagram ──────────────────────────────────────
+    const gallery = (() => {
+        let info = null;
+        let selected = new Set();
+        let lightboxIndex = -1;
+
+        const thumbUrl = (t) => (t && t.startsWith('/') ? MEDIA_BASE + t : t || '');
+
+        function setCardMode(isCarousel) {
+            const card = document.getElementById('video-info-card');
+            if (!card) return;
+            card.classList.toggle('v3-is-carousel', isCarousel);
+            const thumbBox = document.getElementById('video-thumbnail')?.parentElement;
+            if (thumbBox) thumbBox.style.display = isCarousel ? 'none' : '';
+            const trim = document.getElementById('clip-start')?.closest('.space-y-2');
+            if (trim) trim.style.display = isCarousel ? 'none' : '';
+            const btn = document.getElementById('download-btn');
+            if (btn) {
+                if (!btn.dataset.v3Label) btn.dataset.v3Label = btn.innerHTML;
+                btn.innerHTML = isCarousel
+                    ? '<span class="material-symbols-outlined">folder_zip</span> Descargar todo (.zip)'
+                    : btn.dataset.v3Label;
+            }
+        }
+
+        function unmount() {
+            document.getElementById('v3-carousel')?.remove();
+            closeLightbox();
+            info = null;
+            selected = new Set();
+            setCardMode(false);
+        }
+
+        function mount(detail) {
+            unmount();
+            const items = detail?.carousel;
+            if (!Array.isArray(items) || !items.length) return;
+            info = detail;
+            const card = document.getElementById('video-info-card');
+            const body = card?.querySelector('.p-6');
+            if (!body) return;
+            const nVideos = items.filter(i => i.is_video).length;
+            const what = nVideos ? `${items.length} archivos (${items.length - nVideos} fotos, ${nVideos} videos)` : `${items.length} fotos`;
+            const wrap = document.createElement('div');
+            wrap.id = 'v3-carousel';
+            wrap.className = 'v3-carousel';
+            wrap.innerHTML = `
+                <div class="v3-carousel-head">
+                    <div><strong>Carrusel</strong> <span class="v3-hint">· ${esc(what)}</span></div>
+                    <button type="button" class="v3-link" data-act="toggle-all">Elegir todas</button>
+                </div>
+                <div class="v3-carousel-grid">
+                    ${items.map(it => `
+                        <div class="v3-cimg" data-i="${it.index}" tabindex="0" role="checkbox" aria-checked="false"
+                             title="Clic para elegir · doble clic para verla grande">
+                            ${it.thumb ? `<img src="${esc(thumbUrl(it.thumb))}" alt="Archivo ${it.index + 1}" loading="lazy" referrerpolicy="no-referrer">`
+                                       : `<div class="v3-cimg-empty"><span class="material-symbols-outlined">movie</span></div>`}
+                            <span class="v3-cimg-num">${it.index + 1}</span>
+                            ${it.is_video ? '<span class="v3-cimg-video material-symbols-outlined">play_circle</span>' : ''}
+                            <span class="v3-cimg-check material-symbols-outlined">check</span>
+                            <div class="v3-cimg-tools">
+                                <button type="button" data-act="zoom" title="Ver grande"><span class="material-symbols-outlined">zoom_in</span></button>
+                                <button type="button" data-act="one" title="Descargar solo esta"><span class="material-symbols-outlined">download</span></button>
+                            </div>
+                        </div>`).join('')}
+                </div>
+                <button type="button" class="btn-soft w-full v3-carousel-dl" data-act="selected" disabled>
+                    <span class="material-symbols-outlined">download</span> <span class="v3-carousel-dl-label">Elegí las fotos que querés bajar</span>
+                </button>`;
+            const first = body.firstElementChild;
+            first ? first.insertAdjacentElement('afterend', wrap) : body.prepend(wrap);
+            setCardMode(true);
+
+            wrap.addEventListener('click', (e) => {
+                const btn = e.target.closest('button[data-act]');
+                const tile = e.target.closest('.v3-cimg');
+                if (btn) {
+                    e.stopPropagation();
+                    const act = btn.dataset.act;
+                    if (act === 'toggle-all') toggleAll();
+                    else if (act === 'selected') download([...selected], btn);
+                    else if (act === 'zoom' && tile) openLightbox(+tile.dataset.i);
+                    else if (act === 'one' && tile) download([+tile.dataset.i], btn);
+                    return;
+                }
+                if (tile) toggle(+tile.dataset.i);
+            });
+            wrap.addEventListener('dblclick', (e) => {
+                const tile = e.target.closest('.v3-cimg');
+                if (tile) { toggle(+tile.dataset.i); openLightbox(+tile.dataset.i); }
+            });
+            wrap.addEventListener('keydown', (e) => {
+                const tile = e.target.closest('.v3-cimg');
+                if (!tile) return;
+                if (e.key === ' ' || e.key === 'Enter') { e.preventDefault(); e.key === ' ' ? toggle(+tile.dataset.i) : openLightbox(+tile.dataset.i); }
+            });
+            refresh();
+        }
+
+        function toggle(i) {
+            selected.has(i) ? selected.delete(i) : selected.add(i);
+            refresh();
+        }
+
+        function toggleAll() {
+            const all = info?.carousel || [];
+            selected = selected.size === all.length ? new Set() : new Set(all.map(i => i.index));
+            refresh();
+        }
+
+        function refresh() {
+            const wrap = document.getElementById('v3-carousel');
+            if (!wrap || !info) return;
+            wrap.querySelectorAll('.v3-cimg').forEach(t => {
+                const on = selected.has(+t.dataset.i);
+                t.classList.toggle('selected', on);
+                t.setAttribute('aria-checked', on ? 'true' : 'false');
+            });
+            const n = selected.size, total = info.carousel.length;
+            const btn = wrap.querySelector('[data-act="selected"]');
+            btn.disabled = n === 0;
+            wrap.querySelector('.v3-carousel-dl-label').textContent =
+                n === 0 ? 'Elegí las fotos que querés bajar'
+                : n === 1 ? 'Descargar la elegida'
+                : `Descargar las ${n} elegidas (.zip)`;
+            wrap.querySelector('[data-act="toggle-all"]').textContent = n === total ? 'Quitar todas' : 'Elegir todas';
+        }
+
+        async function download(indexes, btn) {
+            if (!indexes.length || !info) return;
+            const old = btn?.innerHTML;
+            if (btn) { btn.disabled = true; btn.innerHTML = '<span class="v3-spinner v3-spinner-sm"></span>'; }
+            try {
+                const r = await api('/download', { method: 'POST', body: { url: info.url, format_id: 'carousel_images', items: indexes.sort((a, b) => a - b) } });
+                const blob = await r.blob();
+                downloadBlob(blob, filenameFrom(r, indexes.length === 1 ? 'carrusel.jpg' : 'carrusel.zip'));
+                toast(indexes.length === 1 ? 'Archivo descargado' : `${indexes.length} archivos descargados en un .zip`, 'success');
+            } catch (err) {
+                toast(err.message || 'No se pudo descargar', 'error');
+            } finally {
+                if (btn) { btn.innerHTML = old; btn.disabled = false; }
+                refresh();
+            }
+        }
+
+        function openLightbox(i) {
+            const items = info?.carousel || [];
+            const it = items[i];
+            if (!it) return;
+            lightboxIndex = i;
+            let box = document.getElementById('v3-lightbox');
+            if (!box) {
+                box = document.createElement('div');
+                box.id = 'v3-lightbox';
+                box.className = 'v3-modal-backdrop v3-lightbox';
+                box.innerHTML = `
+                    <button type="button" class="v3-lb-nav v3-lb-prev" data-act="prev" title="Anterior (←)"><span class="material-symbols-outlined">chevron_left</span></button>
+                    <figure class="v3-lb-figure"><div class="v3-lb-media"></div>
+                        <figcaption class="v3-lb-bar">
+                            <span class="v3-lb-count"></span>
+                            <label class="v3-check"><input type="checkbox" data-act="pick"> Elegida</label>
+                            <button type="button" class="btn-primary" data-act="one"><span class="material-symbols-outlined">download</span> Descargar esta</button>
+                            <button type="button" class="btn-ghost" data-act="close">Cerrar</button>
+                        </figcaption></figure>
+                    <button type="button" class="v3-lb-nav v3-lb-next" data-act="next" title="Siguiente (→)"><span class="material-symbols-outlined">chevron_right</span></button>`;
+                box.addEventListener('click', (e) => {
+                    const act = e.target.closest('[data-act]')?.dataset.act;
+                    if (e.target === box || act === 'close') closeLightbox();
+                    else if (act === 'prev') step(-1);
+                    else if (act === 'next') step(1);
+                    else if (act === 'one') download([lightboxIndex], e.target.closest('button'));
+                });
+                box.querySelector('[data-act="pick"]').addEventListener('change', () => { toggle(lightboxIndex); });
+                document.addEventListener('keydown', onLightboxKey, true);
+                document.body.appendChild(box);
+            }
+            const media = box.querySelector('.v3-lb-media');
+            media.innerHTML = it.thumb
+                ? `<img src="${esc(thumbUrl(it.thumb))}" alt="Archivo ${i + 1}" referrerpolicy="no-referrer">${it.is_video ? '<span class="v3-lb-video">Video · se ve la portada; al descargar baja el video completo</span>' : ''}`
+                : '<div class="v3-cimg-empty"><span class="material-symbols-outlined">movie</span><p>Video sin vista previa</p></div>';
+            box.querySelector('.v3-lb-count').textContent = `${i + 1} de ${items.length}`;
+            box.querySelector('[data-act="pick"]').checked = selected.has(i);
+            box.querySelector('.v3-lb-prev').disabled = i === 0;
+            box.querySelector('.v3-lb-next').disabled = i === items.length - 1;
+        }
+
+        function step(d) {
+            const n = info?.carousel?.length || 0;
+            const next = lightboxIndex + d;
+            if (next >= 0 && next < n) openLightbox(next);
+        }
+
+        function onLightboxKey(e) {
+            if (!document.getElementById('v3-lightbox')) return;
+            if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); closeLightbox(); }
+            else if (e.key === 'ArrowLeft') { e.preventDefault(); e.stopPropagation(); step(-1); }
+            else if (e.key === 'ArrowRight') { e.preventDefault(); e.stopPropagation(); step(1); }
+            else if (e.key === ' ') { e.preventDefault(); e.stopPropagation(); toggle(lightboxIndex); openLightbox(lightboxIndex); }
+        }
+
+        function closeLightbox() {
+            document.getElementById('v3-lightbox')?.remove();
+            document.removeEventListener('keydown', onLightboxKey, true);
+            lightboxIndex = -1;
+        }
+
+        return { mount, unmount, selected: () => [...selected] };
+    })();
+
     // ─── Arranque ────────────────────────────────────────────────────────────────
     document.addEventListener('clipa:ready', () => {
         mountJobsPanel();
@@ -1372,10 +1582,11 @@
         mountRawToggle({ text: d.text, raw: d.raw, segments: d.segments });
     });
 
-    document.addEventListener('clipa:tab', () => viewer.unmount());
-    document.addEventListener('clipa:videoinfo', (e) => showEstimate(e.detail || {}));
+    document.addEventListener('clipa:tab', () => { viewer.unmount(); gallery.unmount(); });
+    document.addEventListener('clipa:videoinfo', (e) => { showEstimate(e.detail || {}); gallery.mount(e.detail || {}); });
 
     window.ClipaV3 = {
+        gallery,
         version: '3.0.0', api, history, jobs, viewer, confirm: confirmDialog, prompt: promptDialog, dialog,
         formatQuote, linkAt, fmtTime, parseTime, youtubeId, estimateTranscription,
     };

@@ -124,6 +124,12 @@ Para verificar una cita palabra por palabra, el botón **Original** muestra el t
 
 ---
 
+## Novedades de la versión 3.1
+
+- **Carruseles de Instagram:** al pegar un carrusel aparecen todas las fotos y videos. Clic para elegir, doble clic para verla grande. Se baja una sola, las elegidas (en .zip) o todo el carrusel.
+- **Clipa.exe:** doble clic en `CREAR_EXE.bat` para generarlo (tarda unos minutos). Si la carpeta tiene la instalación (`backend\venv`), el exe la usa y corre siempre la versión actual; si no, funciona solo, con los datos en `clipadsk_datos`. Hay que volver a generarlo solo si se usa sin instalación y salió una versión nueva.
+- **Clipa para Claude (MCP):** doble clic en `INSTALAR_MCP.bat` y reiniciar Claude Desktop. Claude puede pedirle a Clipa que transcriba un enlace o un archivo, busque en el historial, traduzca, resuma o saque citas; Clipa hace el trabajo en la PC y a Claude le llega solo el texto. Si Clipadsk está cerrado, se abre solo. La key de Groq tiene que estar en `.env` (`GROQ_API_KEY=`), porque la que se carga en el navegador no le llega.
+
 ## Novedades de la versión 3
 
 - **Pegar y listo:** un solo ítem "Pegar enlace" para todas las plataformas; al pegar un enlace se analiza solo.

@@ -24,6 +24,8 @@ import shutil
 import sqlite3
 import asyncio
 import zipfile
+import mimetypes
+import threading
 import tempfile
 import functools
 import subprocess
@@ -42,7 +44,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from config import (
-    logger, BASE_DIR, ROOT_DIR, FRONTEND_DIR, DOWNLOAD_FOLDER, DB_FILE, CACHE_FILE,
+    logger, BASE_DIR, ROOT_DIR, HOME_DIR, DATA_DIR, FRONTEND_DIR, DOWNLOAD_FOLDER, DB_FILE, CACHE_FILE,
     HOST, PORT, ADMIN_TOKEN, ALLOWED_ORIGINS, HAS_FFMPEG, FFMPEG_BIN,
     MAX_WORKERS, MAX_CONCURRENT_JOBS, MAX_UPLOAD_MB, GROQ_MAX_UPLOAD_MB,
     IS_LOCAL_ONLY, ALLOWED_HOSTS, YTDLP_NO_CHECK_CERTIFICATE,
@@ -72,7 +74,7 @@ except ImportError:  # pragma: no cover
     TTLCache = None
 
 
-APP_VERSION = "3.0.0"
+APP_VERSION = "3.1.0"
 app = FastAPI(title="Clipadsk API", version=APP_VERSION)
 
 # ─── EJECUCIÓN EN SEGUNDO PLANO ──────────────────────────────────────────────
@@ -283,7 +285,8 @@ def find_cookie_file(url: str) -> Optional[str]:
     names = ['cookies_ig.txt', 'cookies.txt'] if is_instagram else ['cookies.txt']
     candidates = [os.environ.get('COOKIES_PATH', '')]
     for name in names:
-        candidates += [f'/etc/secrets/{name}', os.path.join(BASE_DIR, name), os.path.join(ROOT_DIR, name)]
+        candidates += [f'/etc/secrets/{name}', os.path.join(BASE_DIR, name), os.path.join(ROOT_DIR, name),
+                       os.path.join(HOME_DIR, name)]
     return next((p for p in candidates if p and os.path.exists(p)), None)
 
 
@@ -391,7 +394,8 @@ def detect_bunny_embed(page_url: str) -> Optional[str]:
         # Las cookies se pasan como "jar": requests manda a cada sitio SOLO las cookies de
         # ese dominio. (Antes se mandaban todas —incluidas las de YouTube— a cualquier página.)
         cookies = None
-        cookie_path = next((p for p in (os.path.join(BASE_DIR, 'cookies.txt'), os.path.join(ROOT_DIR, 'cookies.txt'))
+        cookie_path = next((p for p in (os.path.join(BASE_DIR, 'cookies.txt'), os.path.join(ROOT_DIR, 'cookies.txt'),
+                                         os.path.join(HOME_DIR, 'cookies.txt'))
                             if os.path.exists(p)), None)
         if cookie_path:
             try:
@@ -452,7 +456,16 @@ def get_instagram_info(url: str) -> dict:
         thumbnail = post.url
     except Exception:
         thumbnail = None
+    sidecar = None
+    if getattr(post, 'typename', '') == 'GraphSidecar':
+        sidecar = []
+        for node in post.get_sidecar_nodes():
+            is_video = bool(node.is_video)
+            sidecar.append({'url': node.video_url if is_video else node.display_url, 'thumb': node.display_url,
+                            'is_video': is_video, 'ext': 'mp4' if is_video else 'jpg'})
     return {
+        'sidecar': sidecar,
+        'caption': post.caption or '',
         'shortcode': shortcode,
         'title': post.caption[:100] if post.caption else f"Instagram Reel {shortcode}",
         'thumbnail': thumbnail,
@@ -461,6 +474,30 @@ def get_instagram_info(url: str) -> dict:
         'is_video': post.is_video,
         'video_url': post.video_url if post.is_video else None,
     }
+
+
+_GALLERY_LOCK = threading.Lock()
+
+
+def _gallery_dl_inprocess(url: str, cookies_path: Optional[str]) -> Optional[list]:
+    """gallery-dl como biblioteca (Clipa.exe no tiene el ejecutable gallery-dl)."""
+    try:
+        from gallery_dl import config as gdl_config, job as gdl_job
+    except ImportError:
+        logger.warning("gallery-dl no está instalado (pip install gallery-dl)")
+        return None
+    try:
+        with _GALLERY_LOCK:  # la configuración de gallery-dl es global
+            gdl_config.clear()
+            if cookies_path and os.path.exists(cookies_path):
+                gdl_config.set(("extractor",), "cookies", cookies_path)
+            job = gdl_job.DataJob(url, file=None)
+            job.run()
+        return [{"url": item[1], "metadata": item[2]} for item in job.data
+                if isinstance(item, (list, tuple)) and len(item) >= 3 and item[0] == 3]
+    except Exception:
+        logger.exception("Error extrayendo carrusel con gallery-dl (biblioteca)")
+        return None
 
 
 def get_instagram_carousel_info(url: str, cookies_path: Optional[str] = None) -> Optional[list]:
@@ -472,8 +509,7 @@ def get_instagram_carousel_info(url: str, cookies_path: Optional[str] = None) ->
     ]
     gallery_dl = next((c for c in candidates if os.path.exists(c)), None) or shutil.which("gallery-dl")
     if not gallery_dl:
-        logger.warning("gallery-dl no está instalado (pip install gallery-dl)")
-        return None
+        return _gallery_dl_inprocess(url, cookies_path)
     cmd = [gallery_dl, "-j"]
     if cookies_path and os.path.exists(cookies_path):
         cmd += ["--cookies", cookies_path]
@@ -488,6 +524,78 @@ def get_instagram_carousel_info(url: str, cookies_path: Optional[str] = None) ->
     except Exception:
         logger.exception("Error extrayendo carrusel con gallery-dl")
         return None
+
+
+# ─── CARRUSELES (galería) ────────────────────────────────────────────────────
+
+CAROUSEL_TTL = 15 * 60
+_CAROUSEL_CACHE: dict = {}  # url → (timestamp, datos): evita volver a consultar Instagram al descargar
+
+
+def _clean_ext(ext: Optional[str], is_video: bool) -> str:
+    ext = re.sub(r'[^a-z0-9]', '', (ext or '').lower())[:5]
+    return ext or ('mp4' if is_video else 'jpg')
+
+
+def carousel_from_gallery(files: list) -> dict:
+    """Normaliza la salida de gallery-dl a {items, username, description, shortcode}."""
+    items = []
+    for f in files:
+        meta = f.get('metadata') or {}
+        ext = (meta.get('extension') or '').lower()
+        is_video = ext in ('mp4', 'mov', 'webm', 'm4v') or bool(meta.get('video_url'))
+        thumb = meta.get('display_url') or (None if is_video else f.get('url'))
+        items.append({'url': f.get('url'), 'thumb': thumb, 'is_video': is_video, 'ext': _clean_ext(ext, is_video)})
+    meta = (files[0].get('metadata') or {}) if files else {}
+    return {'items': [i for i in items if i['url']], 'username': meta.get('username') or 'instagram',
+            'description': meta.get('description') or '', 'shortcode': meta.get('post_shortcode') or meta.get('shortcode') or ''}
+
+
+def remember_carousel(url: str, data: dict) -> dict:
+    now = time.time()
+    for k in [k for k, (t, _) in _CAROUSEL_CACHE.items() if now - t > CAROUSEL_TTL]:
+        _CAROUSEL_CACHE.pop(k, None)
+    _CAROUSEL_CACHE[url] = (now, data)
+    return data
+
+
+def get_carousel(url: str, try_instaloader: bool = True) -> Optional[dict]:
+    """Ítems de un carrusel de Instagram (bloqueante). Usa la caché, después instaloader y por último gallery-dl."""
+    hit = _CAROUSEL_CACHE.get(url)
+    if hit and time.time() - hit[0] < CAROUSEL_TTL:
+        return hit[1]
+    if try_instaloader and instaloader:
+        try:
+            ig = get_instagram_info(url)
+            if ig.get('sidecar'):
+                return remember_carousel(url, {'items': ig['sidecar'], 'username': ig.get('uploader') or 'instagram',
+                                               'description': ig.get('caption') or '', 'shortcode': ig.get('shortcode') or ''})
+        except Exception as e:
+            logger.debug(f"instaloader no pudo leer el carrusel: {e}")
+    files = get_instagram_carousel_info(url, find_cookie_file(url))
+    if not files:
+        return None
+    data = carousel_from_gallery(files)
+    return remember_carousel(url, data) if data['items'] else None
+
+
+def carousel_info_response(data: dict) -> dict:
+    """Respuesta de /api/video-info para un carrusel: incluye la lista de miniaturas para la galería."""
+    items = data['items']
+    n, n_videos = len(items), sum(1 for i in items if i['is_video'])
+    title = data.get('description') or f"Carrusel de Instagram {data.get('shortcode', '')}".strip()
+    first_thumb = next((i['thumb'] for i in items if i.get('thumb')), None)
+    thumb = proxied_thumbnail(first_thumb)
+    kind = 'archivos' if n_videos else 'imágenes'
+    return {
+        'title': title[:100] + ('...' if len(title) > 100 else ''), 'thumbnail': thumb, 'max_res_thumbnail': thumb,
+        'duration': None, 'uploader': data.get('username') or 'Instagram', 'description': data.get('description') or '',
+        'formats': [{'format_id': 'carousel_images', 'ext': 'zip', 'resolution': 'Carrusel (ZIP)', 'filesize': None,
+                     'label': f"Todo el carrusel: {n} {kind} (.zip)"}],
+        'carousel': [{'index': k, 'thumb': proxied_thumbnail(i.get('thumb')), 'is_video': i['is_video'], 'ext': i['ext']}
+                     for k, i in enumerate(items)],
+        'has_ffmpeg': HAS_FFMPEG, 'has_subtitles': False, 'can_transcribe': True,
+    }
 
 
 def proxied_thumbnail(url: Optional[str]) -> Optional[str]:
@@ -516,6 +624,7 @@ class VideoRequest(BaseModel):
     burn_subs: Optional[bool] = False      # quemar subtítulos en el recorte
     vertical: Optional[bool] = False       # recorte en 9:16 para redes
     segments: Optional[list] = None        # segmentos de la transcripción (para los subtítulos)
+    items: Optional[List[int]] = None      # carrusel: posiciones elegidas (desde 0); vacío = todas
 
 
 class ChatRequest(BaseModel):
@@ -598,6 +707,10 @@ async def get_video_info(req: VideoRequest):
     if is_instagram and instaloader:
         try:
             ig = await run_light(get_instagram_info, url)
+            if ig.get('sidecar'):
+                return carousel_info_response(remember_carousel(url, {
+                    'items': ig['sidecar'], 'username': ig.get('uploader') or 'instagram',
+                    'description': ig.get('caption') or '', 'shortcode': ig.get('shortcode') or ''}))
             formats = [BEST_FORMAT, MP3_FORMAT] if ig['is_video'] else [
                 {'format_id': 'best', 'ext': 'jpg', 'resolution': 'Imagen original', 'filesize': None, 'label': 'Imagen original (.jpg)'}]
             thumb = proxied_thumbnail(ig.get('thumbnail'))
@@ -613,18 +726,16 @@ async def get_video_info(req: VideoRequest):
         last_error = str(e)
         logger.error(f"No se pudo obtener info de {url}: {last_error[:300]}")
         if is_instagram:
-            files = await run_blocking(get_instagram_carousel_info, url, find_cookie_file(url))
-            if files:
-                meta = files[0].get("metadata", {})
-                title = meta.get("description") or f"Instagram Post {meta.get('post_shortcode', '')}"
-                thumb = proxied_thumbnail(files[0].get("url"))
-                return {'title': title[:100] + ("..." if len(title) > 100 else ""), 'thumbnail': thumb,
-                        'max_res_thumbnail': thumb, 'duration': None,
-                        'uploader': meta.get("username") or "Instagram User", 'description': meta.get("description") or "",
-                        'formats': [{'format_id': 'carousel_images', 'ext': 'zip', 'resolution': 'Imágenes (ZIP)',
-                                     'filesize': None, 'label': f"Conjunto de {len(files)} imágenes (.zip)"}],
-                        'has_ffmpeg': HAS_FFMPEG, 'has_subtitles': False, 'can_transcribe': True}
+            data = await run_blocking(get_carousel, url, False)
+            if data:
+                return carousel_info_response(data)
         raise HTTPException(status_code=400, detail=friendly_error(last_error))
+
+    # Carrusel con varios videos: yt-dlp lo devuelve como lista → galería
+    if is_instagram and (info.get('_type') == 'playlist' or info.get('entries')):
+        data = await run_blocking(get_carousel, url, False)
+        if data:
+            return carousel_info_response(data)
 
     formats = build_format_list(info.get('formats') or [], HAS_FFMPEG)
     if not formats:
@@ -936,16 +1047,32 @@ def _remove_later(background_tasks: BackgroundTasks, *paths):
     background_tasks.add_task(remove)
 
 
-def _build_carousel_zip(files: list, zip_path: str):
+def _carousel_name(index: int, item: dict) -> str:
+    return f"{index + 1:02d}_{'video' if item['is_video'] else 'imagen'}.{item['ext']}"
+
+
+def _fetch_carousel_item(item: dict) -> bytes:
+    r = requests.get(item['url'], headers={'User-Agent': DESKTOP_UA, 'Referer': 'https://www.instagram.com/'}, timeout=60)
+    r.raise_for_status()
+    return r.content
+
+
+def _build_carousel_zip(items: list, selected: list, zip_path: str) -> int:
+    """Arma el ZIP con los ítems elegidos. Devuelve cuántos se pudieron bajar."""
+    ok = 0
     with zipfile.ZipFile(zip_path, 'w') as zf:
-        for idx, item in enumerate(files):
-            ext = item.get("metadata", {}).get("extension") or "jpg"
+        for idx in selected:
             try:
-                r = requests.get(item["url"], headers={'User-Agent': DESKTOP_UA}, timeout=30)
-                if r.status_code == 200:
-                    zf.writestr(f"imagen_{idx + 1}.{ext}", r.content)
+                zf.writestr(_carousel_name(idx, items[idx]), _fetch_carousel_item(items[idx]))
+                ok += 1
             except Exception as e:
-                logger.warning(f"Error descargando imagen {idx + 1} para zip: {e}")
+                logger.warning(f"Error descargando el archivo {idx + 1} del carrusel: {e}")
+    return ok
+
+
+def _save_carousel_item(item: dict, path: str):
+    with open(path, 'wb') as f:
+        f.write(_fetch_carousel_item(item))
 
 
 def _instagram_download(ig: dict, uid: str, as_mp3: bool) -> str:
@@ -967,15 +1094,32 @@ async def download_video(req: VideoRequest, background_tasks: BackgroundTasks):
     format_id = req.format_id
     file_uid = uuid.uuid4().hex
 
-    # Carrusel de imágenes (gallery-dl) → ZIP
+    # Carrusel de Instagram → un archivo suelto o un ZIP con los elegidos (o con todos)
     if format_id == 'carousel_images':
-        files = await run_blocking(get_instagram_carousel_info, url, find_cookie_file(url))
-        if not files:
-            raise HTTPException(status_code=400, detail="No se pudieron extraer las imágenes del carrusel.")
+        data = await run_blocking(get_carousel, url)
+        if not data:
+            raise HTTPException(status_code=400, detail="No se pudieron leer los archivos del carrusel.")
+        items = data['items']
+        selected = sorted({i for i in (req.items or []) if isinstance(i, int) and 0 <= i < len(items)})
+        if req.items and not selected:
+            raise HTTPException(status_code=400, detail="Las fotos elegidas no están en el carrusel.")
+        selected = selected or list(range(len(items)))
+        user = safe_filename(data.get('username') or 'instagram', 30)
+        if len(selected) == 1:
+            idx = selected[0]
+            path = os.path.join(DOWNLOAD_FOLDER, f"instagram_carousel_{file_uid}.{items[idx]['ext']}")
+            try:
+                await run_blocking(_save_carousel_item, items[idx], path)
+            except Exception as e:
+                raise HTTPException(status_code=502, detail=friendly_error(str(e)))
+            _remove_later(background_tasks, path)
+            media_type = mimetypes.guess_type(path)[0] or 'application/octet-stream'
+            return FileResponse(path, filename=f"carrusel_{user}_{_carousel_name(idx, items[idx])}", media_type=media_type)
         zip_path = os.path.join(DOWNLOAD_FOLDER, f"instagram_carousel_{file_uid}.zip")
-        await run_blocking(_build_carousel_zip, files, zip_path)
+        ok = await run_blocking(_build_carousel_zip, items, selected, zip_path)
         _remove_later(background_tasks, zip_path)
-        user = safe_filename(files[0]["metadata"].get("username", "instagram"), 30)
+        if not ok:
+            raise HTTPException(status_code=502, detail="Instagram no dejó bajar las fotos. Probá de nuevo en un rato.")
         return FileResponse(zip_path, filename=f"carrusel_{user}_{file_uid[:6]}.zip", media_type='application/zip')
 
     # Instagram con instaloader
@@ -1436,7 +1580,7 @@ async def history_import(data: HistoryImport):
 
 # ─── VISUALIZADOR: VIDEO LIVIANO, FORMA DE ONDA, TRADUCCIÓN ─────────────────
 
-MEDIA_DIR = os.path.join(BASE_DIR, 'media_cache')
+MEDIA_DIR = os.path.join(DATA_DIR, 'media_cache')
 MEDIA_MAX_BYTES = int(float(os.environ.get('MEDIA_CACHE_MB', '3000')) * 1024 * 1024)
 MEDIA_MAX_AGE = 3 * 24 * 3600
 _MEDIA_ID = re.compile(r"[a-f0-9]{16}")
@@ -1817,7 +1961,14 @@ def _update_with_git(repo: str) -> tuple:
     return not ("Already up to date" in out or "Ya está actualizado" in out), out, None
 
 
+FROZEN_UPDATE_MSG = ("Este Clipa.exe trae el programa adentro y no se puede actualizar desde la app. "
+                     "Instalá Clipadsk en la carpeta (INSTALAR.bat) para que el exe use esa instalación, "
+                     "o generá un exe nuevo con CREAR_EXE.bat.")
+
+
 def _update_app() -> dict:
+    if getattr(sys, 'frozen', False):
+        return {"error": FROZEN_UPDATE_MSG}
     protected = [os.path.join(d, n) for d in (ROOT_DIR, BASE_DIR) for n in (".env", "cookies.txt", "cookies_ig.txt")]
     backups = {}
     for path in protected:
@@ -1871,6 +2022,8 @@ async def update_app(request: Request):
 
 
 def _update_engine() -> dict:
+    if getattr(sys, 'frozen', False):
+        return {"error": FROZEN_UPDATE_MSG}
     # El backend usa el paquete de Python yt_dlp, así que se actualiza ese (y el .exe si existe)
     res = subprocess.run([sys.executable, '-m', 'pip', 'install', '-U', '-q', 'yt-dlp[default]'],
                          capture_output=True, text=True, timeout=600)

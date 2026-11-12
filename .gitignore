@@ -11,6 +11,7 @@ backend/venv/
 
 # App data
 backend/downloads/
+backend/media_cache/
 backend/model/
 backend/transcripts_cache.json
 backend/transcripts_cache.json.migrated

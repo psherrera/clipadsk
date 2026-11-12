@@ -80,16 +80,80 @@ def _seg_field(segment, name, default):
     return getattr(segment, name, default)
 
 
+def normalize_words(words, offset: float = 0.0) -> list:
+    """
+    Tiempos por palabra en formato compacto {"w": palabra, "s": inicio, "e": fin}.
+    Acepta los formatos de Groq ({"word", "start", "end"}), faster-whisper (objetos
+    Word) y el propio formato compacto (para no perderlos al re-normalizar).
+    """
+    out = []
+    for w in words or []:
+        text = _seg_field(w, "word", None)
+        if text is None:
+            text = _seg_field(w, "w", "")
+        start = _seg_field(w, "start", None)
+        end = _seg_field(w, "end", None)
+        if start is None:
+            start, end = _seg_field(w, "s", 0), _seg_field(w, "e", 0)
+        text = (text or "").strip()
+        if not text:
+            continue
+        try:
+            out.append({"w": text, "s": round(float(start or 0) + offset, 3), "e": round(float(end or 0) + offset, 3)})
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
 def normalize_segments(segments, offset: float = 0.0) -> list:
     """Acepta segmentos como dict u objeto (Groq / faster-whisper) y devuelve dicts."""
     out = []
     for seg in segments or []:
         text = (_seg_field(seg, "text", "") or "").strip()
-        out.append({
+        item = {
             "start": float(_seg_field(seg, "start", 0) or 0) + offset,
             "end": float(_seg_field(seg, "end", 0) or 0) + offset,
             "text": text,
-        })
+        }
+        words = normalize_words(_seg_field(seg, "words", None), offset)
+        if words:
+            item["words"] = words
+        out.append(item)
+    return out
+
+
+def attach_words(segments: list, words: list) -> list:
+    """
+    Reparte una lista plana de palabras (con tiempos) entre los segmentos según el
+    momento en que se dicen. Groq devuelve las palabras aparte de los segmentos.
+    """
+    if not segments or not words:
+        return segments
+    idx = 0
+    for seg in segments:
+        seg.setdefault("words", [])
+    for w in sorted(words, key=lambda x: x["s"]):
+        mid = (w["s"] + w["e"]) / 2
+        while idx < len(segments) - 1 and mid >= segments[idx]["end"] and mid >= segments[idx + 1]["start"]:
+            idx += 1
+        segments[idx]["words"].append(w)
+    for seg in segments:
+        if not seg["words"]:
+            del seg["words"]
+    return segments
+
+
+def clip_segments(segments: list, start: float, end: float) -> list:
+    """
+    Segmentos que caen dentro de [start, end], con los tiempos corridos para que el
+    recorte empiece en 0 (para quemar subtítulos en un clip).
+    """
+    out = []
+    for seg in normalize_segments(segments):
+        if seg["end"] <= start or seg["start"] >= end:
+            continue
+        out.append({"start": max(seg["start"], start) - start, "end": min(seg["end"], end) - start,
+                    "text": seg["text"]})
     return out
 
 

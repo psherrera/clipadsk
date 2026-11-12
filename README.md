@@ -120,6 +120,22 @@ Los audios largos se dividen automáticamente en partes de 20 minutos. La limpie
 
 Las herramientas de IA (resumen, citas, datos, ángulos, diarización y chat) analizan la transcripción **completa**, aunque sea larga: la dividen en partes y combinan los resultados.
 
+Para verificar una cita palabra por palabra, el botón **Original** muestra el texto tal como salió de la transcripción, antes de la corrección con IA. Si la IA cambió palabras de lo dicho, Clipadsk descarta su versión de ese tramo y avisa.
+
+---
+
+## Novedades de la versión 3
+
+- **Pegar y listo:** un solo ítem "Pegar enlace" para todas las plataformas; al pegar un enlace se analiza solo.
+- **Trabajos en segundo plano:** las transcripciones corren en el servidor aunque cierres la pestaña. Desde el botón de trabajos (arriba a la derecha) podés pegar varios enlaces juntos; la app avisa con una notificación cuando cada uno termina.
+- **Historial en la PC:** se guarda en la base de datos de Clipadsk (`backend/clipadsk.db`), no en el navegador. La búsqueda encuentra también lo que se dijo, con o sin tildes. El historial viejo del navegador se pasa solo la primera vez.
+- **Visualizador ("Ver y cortar"):** reproduce el video con el texto sincronizado (resalta la frase y la palabra que se está diciendo). Clic en una frase o palabra para saltar; seleccioná un tramo de texto o arrastrá sobre la línea de tiempo para marcar el recorte. Con YouTube usa el reproductor de YouTube; con otras plataformas baja una copia liviana; los archivos propios se reproducen directo desde la PC.
+- **Recortes para redes:** descarga del tramo con subtítulos quemados y/o en vertical 9:16.
+- **Vista bilingüe:** traducción frase por frase al lado del original, alineada con los tiempos.
+- **Citas listas para pegar:** se copian con atribución, minuto y enlace al segundo exacto.
+- **Errores que dicen qué hacer** (cookies vencidas, video privado, límite de Groq, sin conexión...) y aviso al abrir la app si las cookies de YouTube vencieron.
+- **Detalles:** tiempos por palabra, forma de onda, estimación del tiempo de transcripción, búsqueda dentro de la transcripción, guardado automático al editar, arrastrar archivos a cualquier parte de la ventana, diálogos propios y atajos de teclado (tecla `?` para verlos).
+
 ---
 
 ## Estructura
@@ -132,10 +148,13 @@ clipadsk/
 │   ├── text_utils.py      ← subtítulos, SRT, citas, URLs (funciones puras)
 │   ├── media.py           ← FFmpeg + transcripción (Groq / Whisper local)
 │   ├── ai.py              ← limpieza, traducción y herramientas periodísticas
+│   ├── history.py         ← historial de transcripciones (SQLite)
+│   ├── errors.py          ← mensajes de error claros (causa + qué hacer)
 │   ├── requirements.txt
 │   ├── requirements-pinned.txt  ← versiones exactas probadas
-│   └── downloads/         ← archivos temporales (auto-creado)
-├── frontend/              ← index.html, main.js, style.css
+│   ├── downloads/         ← archivos temporales (auto-creado)
+│   └── media_cache/       ← copias livianas para el visualizador (se borran solas)
+├── frontend/              ← index.html, main.js, v3.js (funciones de la versión 3), style.css, v3.css
 ├── tests/                 ← tests (pytest)
 ├── docker-compose.yml
 ├── instalar.ps1           ← instalador / actualizador (Windows)
@@ -153,6 +172,7 @@ clipadsk/
 - Solo la propia app (o los orígenes de `FRONTEND_ALLOWED_ORIGINS`) puede llamar a la API:
   otras páginas web abiertas en el navegador no pueden usarla.
 - La API key de Groq cargada desde la app queda guardada solo en tu navegador.
+- Si usás Clipadsk desde otras PCs de la red, todas comparten el mismo historial (está en el servidor).
 
 ---
 

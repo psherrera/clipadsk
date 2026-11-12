@@ -11,7 +11,7 @@ from config import (
     logger, FFMPEG_BIN, HAS_FFMPEG, GROQ_WHISPER_MODELS, WHISPER_MODEL_SIZE,
     GROQ_MAX_UPLOAD_MB, AUDIO_CHUNK_SECONDS,
 )
-from text_utils import normalize_segments
+from text_utils import normalize_segments, normalize_words, attach_words
 
 try:
     from pydub import AudioSegment
@@ -81,21 +81,47 @@ def split_audio(path: str, out_dir: str, chunk_seconds: int = AUDIO_CHUNK_SECOND
 _dead_whisper: set = set()
 
 
+_word_timestamps_ok = True   # se apaga si Groq rechaza el parámetro (cuentas/modelos sin soporte)
+
+
+def _res_field(res, name):
+    value = getattr(res, name, None)
+    if value is None and isinstance(getattr(res, "model_extra", None), dict):
+        value = res.model_extra.get(name)
+    return value
+
+
 def _groq_transcribe_one(client, path: str, lang: str):
-    """Transcribe un archivo. Si Groq retiró el modelo de Whisper, prueba el siguiente de la lista."""
+    """
+    Transcribe un archivo. Devuelve (texto, segmentos, palabras con tiempos).
+    Si Groq retiró el modelo de Whisper, prueba el siguiente de la lista.
+    """
+    global _word_timestamps_ok
     ext = os.path.splitext(path)[1].lower()
     with open(path, "rb") as f:
         data = f.read()
     last_err = None
     for model in [m for m in GROQ_WHISPER_MODELS if m not in _dead_whisper] or GROQ_WHISPER_MODELS:
         try:
-            res = client.audio.transcriptions.create(
+            kwargs = dict(
                 file=(os.path.basename(path), data, MIME_BY_EXT.get(ext, 'audio/mpeg')),
                 model=model,
                 response_format="verbose_json",
                 language=lang if lang in ("es", "en") else None,
             )
-            return (getattr(res, "text", "") or ""), (getattr(res, "segments", None) or [])
+            if _word_timestamps_ok:
+                kwargs["timestamp_granularities"] = ["word", "segment"]
+            try:
+                res = client.audio.transcriptions.create(**kwargs)
+            except Exception as e:
+                if "timestamp_granularities" not in kwargs or "granularit" not in str(e).lower():
+                    raise
+                logger.info("Groq no acepta tiempos por palabra: se sigue sin ellos")
+                _word_timestamps_ok = False
+                kwargs.pop("timestamp_granularities")
+                res = client.audio.transcriptions.create(**kwargs)
+            return ((_res_field(res, "text") or ""), (_res_field(res, "segments") or []),
+                    (_res_field(res, "words") or []))
         except Exception as e:
             msg = str(e).lower()
             if any(k in msg for k in ("model_not_found", "does not exist", "decommissioned", "not have access to")):
@@ -113,8 +139,8 @@ def transcribe_with_groq(client, audio_path: str, lang: str, work_dir: str, prog
     if size_mb < GROQ_MAX_UPLOAD_MB:
         if progress:
             progress(40, "Transcribiendo con Groq Whisper...")
-        text, segs = _groq_transcribe_one(client, audio_path, lang)
-        return text.strip(), normalize_segments(segs)
+        text, segs, words = _groq_transcribe_one(client, audio_path, lang)
+        return text.strip(), attach_words(normalize_segments(segs), normalize_words(words))
 
     if not HAS_FFMPEG:
         raise RuntimeError(f"El audio pesa {size_mb:.1f} MB y hace falta FFmpeg para dividirlo.")
@@ -127,9 +153,9 @@ def transcribe_with_groq(client, audio_path: str, lang: str, work_dir: str, prog
     for idx, (chunk_path, offset) in enumerate(chunks):
         if progress:
             progress(25 + int(idx / len(chunks) * 50), f"Transcribiendo parte {idx + 1}/{len(chunks)} con Groq Whisper...")
-        text, segs = _groq_transcribe_one(client, chunk_path, lang)
+        text, segs, words = _groq_transcribe_one(client, chunk_path, lang)
         texts.append(text.strip())
-        segments.extend(normalize_segments(segs, offset=offset))
+        segments.extend(attach_words(normalize_segments(segs, offset=offset), normalize_words(words, offset=offset)))
         os.remove(chunk_path)
     return " ".join(t for t in texts if t), segments
 
@@ -152,7 +178,7 @@ def transcribe_with_local_whisper(audio_path: str, lang: str = "es", progress: P
         raise RuntimeError("No hay modelo Whisper local. Instalá faster-whisper para usar este modo.")
     if progress:
         progress(40, "Transcribiendo en local con Whisper (puede tardar)...")
-    segs, info = model.transcribe(audio_path, beam_size=5, vad_filter=True,
+    segs, info = model.transcribe(audio_path, beam_size=5, vad_filter=True, word_timestamps=True,
                                   language=lang if lang in ("es", "en") else None)
     segments = normalize_segments(list(segs))
     text = " ".join(s["text"] for s in segments if s["text"])

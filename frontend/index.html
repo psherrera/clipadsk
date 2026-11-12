@@ -4,7 +4,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Clipadsk 2.0 - Transcriptor para Periodistas</title>
+    <title>Clipadsk 3.0 - Transcriptor para Periodistas</title>
 
     <!-- Tema: se aplica antes de pintar para evitar parpadeo -->
     <script>
@@ -23,9 +23,11 @@
     <meta name="theme-color" content="#2a1566">
     <link rel="apple-touch-icon" href="icon.svg">
 
-    <link rel="stylesheet" href="style.css?v=5.4">
+    <link rel="stylesheet" href="style.css?v=3.0">
     <!-- Tailwind compilado (después de style.css, igual que antes con el CDN) -->
-    <link rel="stylesheet" href="vendor/tailwind.css?v=5.4">
+    <link rel="stylesheet" href="vendor/tailwind.css?v=3.0">
+    <!-- Componentes de la versión 3 (visualizador, trabajos, diálogos) -->
+    <link rel="stylesheet" href="v3.css?v=3.0">
     <!-- JSZip: crear archivos .zip en el navegador sin backend -->
     <script src="vendor/jszip.min.js"></script>
 </head>
@@ -38,7 +40,7 @@
             <img src="logo.png" alt="" class="sidebar-logo">
             <div>
                 <p class="sidebar-title">Clipadsk</p>
-                <p class="sidebar-version">versión 2.0</p>
+                <p class="sidebar-version">versión 3.0</p>
             </div>
             <button id="sidebar-close-btn" class="sidebar-close" aria-label="Cerrar menú">
                 <span class="material-symbols-outlined">close</span>
@@ -50,18 +52,9 @@
                 <span class="material-symbols-outlined">space_dashboard</span><span>Inicio</span>
             </button>
 
-            <p class="sidebar-group">Transcribir enlaces</p>
-            <button class="nav-item" data-tab="youtube">
-                <span class="material-symbols-outlined">subscriptions</span><span>YouTube</span>
-            </button>
-            <button class="nav-item" data-tab="instagram">
-                <span class="material-symbols-outlined">photo_library</span><span>Instagram</span>
-            </button>
-            <button class="nav-item" data-tab="tiktok">
-                <span class="material-symbols-outlined">movie</span><span>TikTok</span>
-            </button>
-            <button class="nav-item" data-tab="redes">
-                <span class="material-symbols-outlined">share</span><span>X / Facebook</span>
+            <p class="sidebar-group">Transcribir</p>
+            <button class="nav-item" data-tab="link" title="YouTube, Instagram, TikTok, X, Facebook o una web con video">
+                <span class="material-symbols-outlined">link</span><span>Pegar enlace</span>
             </button>
 
             <p class="sidebar-group">Archivos</p>
@@ -85,7 +78,7 @@
             <div class="sidebar-status">
                 <div id="status-badge" class="flex items-center gap-2">
                     <div id="status-dot" class="w-2 h-2 rounded-full bg-slate-600"></div>
-                    <span id="status-text" class="text-xs font-medium">Offline</span>
+                    <span id="status-text" class="text-xs font-medium">Conectando...</span>
                 </div>
                 <button id="pwa-install-btn" class="hidden sidebar-pill">Instalar app</button>
             </div>
@@ -520,7 +513,9 @@
         </main>
     </div>
 
-    <script src="main.js?v=5.4" defer></script>
+    <!-- v3.js va antes que main.js: define window.ClipaV3, que main.js usa -->
+    <script src="v3.js?v=3.0" defer></script>
+    <script src="main.js?v=3.0" defer></script>
     <script>
         if ('serviceWorker' in navigator) {
             window.addEventListener('load', () => {

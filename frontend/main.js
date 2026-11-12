@@ -1,7 +1,8 @@
 /**
- * Clipadsk - Frontend v2.0
+ * Clipadsk - Frontend 3.0
  * Herramienta de transcripción para periodistas y comunicadores.
- * Mejoras: WhatsApp upload, TikTok/Twitter/Facebook, herramientas periodísticas, historial.
+ * Las funciones nuevas de la versión 3 (historial en la PC, trabajos en segundo plano,
+ * visualizador, diálogos) están en v3.js; este archivo las usa a través de window.ClipaV3.
  */
 document.addEventListener('DOMContentLoaded', () => {
 
@@ -147,6 +148,7 @@ document.addEventListener('DOMContentLoaded', () => {
     // ─── PLATFORM DETECTION ─────────────────────────────────────────────────────
     const PLATFORMS = {
         home:      { hosts: [],                                       icon: 'space_dashboard', label: 'Inicio',  placeholder: '' },
+        link:      { hosts: [],                                       icon: 'link',          label: 'Enlace',    placeholder: 'Pegá el enlace (YouTube, Instagram, TikTok, X, Facebook o una web con video)...' },
         youtube:   { hosts: ['youtube.com', 'youtu.be'],             icon: 'subscriptions', label: 'YouTube',   placeholder: 'Pega el enlace de YouTube...' },
         instagram: { hosts: ['instagram.com'],                        icon: 'photo_library', label: 'Instagram', placeholder: 'Pega el enlace del Reel o Video...' },
         tiktok:    { hosts: ['tiktok.com', 'vm.tiktok.com'],          icon: 'movie',         label: 'TikTok',    placeholder: 'Pega el enlace de TikTok...' },
@@ -162,11 +164,10 @@ document.addEventListener('DOMContentLoaded', () => {
         for (const [key, cfg] of Object.entries(PLATFORMS)) {
             if (cfg.hosts.some(h => url.includes(h))) return key;
         }
-        return 'youtube';
+        return 'bunny';   // página web con un video embebido
     }
 
     // ─── HISTORY ─────────────────────────────────────────────────────────────────
-    const HISTORY_KEY = 'clipadsk_history';
     const GROQ_KEY_STORE = 'clipadsk_groq_api_key';
 
     if (groqApiKeyInput) {
@@ -245,7 +246,8 @@ document.addEventListener('DOMContentLoaded', () => {
         if (r.status === 403) {
             const detail = (await r.clone().json().catch(() => ({}))).detail || '';
             if (/token de administrador/i.test(detail)) {
-                const token = window.prompt('Esta operación pide el token de administrador (ADMIN_TOKEN del archivo .env):');
+                const token = await window.ClipaV3.prompt('Esta operación pide el token de administrador (ADMIN_TOKEN del archivo .env).',
+                    { title: 'Token de administrador', input: 'password', okText: 'Continuar' });
                 if (token && token.trim()) {
                     try { localStorage.setItem(ADMIN_TOKEN_STORE, token.trim()); } catch {}
                     r = await send();
@@ -259,7 +261,8 @@ document.addEventListener('DOMContentLoaded', () => {
     // ─── CLEAR DOWNLOADS ─────────────────────────────────────────────────────────
     const clearDownloadsBtn = document.getElementById('clear-downloads-btn');
     clearDownloadsBtn?.addEventListener('click', async () => {
-        if (!confirm('¿Estás seguro que deseas borrar todos los archivos descargados? Esto liberará espacio en el disco duro de la computadora.')) return;
+        if (!await window.ClipaV3.confirm('Se borran los archivos descargados que quedaron en la PC para liberar espacio. Tu historial no se toca.',
+            { title: '¿Vaciar descargas?', okText: 'Vaciar', danger: true })) return;
         
         const originalText = clearDownloadsBtn.innerHTML;
         clearDownloadsBtn.innerHTML = '<div class="w-4 h-4 border-2 border-orange-400 border-t-transparent rounded-full animate-spin"></div> Borrando...';
@@ -278,60 +281,34 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     });
 
+    // El historial se guarda en la base de datos de la PC (antes: localStorage del navegador).
+    // ClipaV3.history mantiene una copia en memoria para dibujar al instante.
     function getHistory() {
-        try { return JSON.parse(localStorage.getItem(HISTORY_KEY) || '[]'); }
-        catch { return []; }
+        return window.ClipaV3?.history.list() || [];
     }
 
-    function saveToHistory(entry) {
-        const history = getHistory();
-        const idx = history.findIndex(h => h.url === entry.url);
-        if (idx !== -1) history.splice(idx, 1);
-        history.unshift({ ...entry, date: new Date().toISOString() });
-        if (history.length > 50) history.pop();
-        
-        try {
-            localStorage.setItem(HISTORY_KEY, JSON.stringify(history));
-        } catch (e) {
-            console.warn("Storage quota exceeded, trying to clean up older/larger history entries...", e);
-            // If it exceeds the quota, keep removing the oldest items until it fits
-            let success = false;
-            while (history.length > 1) {
-                history.pop();
-                try {
-                    localStorage.setItem(HISTORY_KEY, JSON.stringify(history));
-                    success = true;
-                    break;
-                } catch (retryError) {
-                    // Continue loop
-                }
-            }
-            if (!success) {
-                // If it still doesn't fit (e.g. this single item is too large), save it without segments/srt
-                try {
-                    const minimalEntry = { ...entry, segments: [], srt: "" };
-                    localStorage.setItem(HISTORY_KEY, JSON.stringify([minimalEntry]));
-                } catch (finalError) {
-                    console.error("Failed to save even a single minimal entry:", finalError);
-                }
-            }
-        }
-        if (currentTab === 'history') renderHistory();
+    async function saveToHistory(entry) {
+        await window.ClipaV3?.history.save(entry);
+        if (currentTab === 'history') renderHistory(historySearchInput?.value || '');
         if (currentTab === 'home') renderHome();
     }
 
-    function renderHistory(filterText = '') {
+    document.addEventListener('clipa:history', () => {
+        if (currentTab === 'history' && !(historySearchInput?.value)) renderHistory();
+        if (currentTab === 'home') renderHome();
+    });
+
+    let historySearchSeq = 0;
+    async function renderHistory(filterText = '') {
         const container = document.getElementById('history-list');
         if (!container) return;
         let history = getHistory();
+        const seq = ++historySearchSeq;
 
         if (filterText) {
-            const query = filterText.toLowerCase();
-            history = history.filter(item => 
-                (item.title && item.title.toLowerCase().includes(query)) ||
-                (item.url && item.url.toLowerCase().includes(query)) ||
-                (item.transcript && item.transcript.toLowerCase().includes(query))
-            );
+            try { history = await window.ClipaV3.history.search(filterText); }
+            catch (e) { showToast(e.message, 'error'); history = []; }
+            if (seq !== historySearchSeq) return;   // llegó otra búsqueda mientras tanto
         }
 
         if (history.length === 0) {
@@ -348,8 +325,9 @@ document.addEventListener('DOMContentLoaded', () => {
             const date = new Date(item.date).toLocaleDateString('es-AR', { day:'2-digit', month:'short', year:'numeric' });
             const platformIcon = PLATFORMS[item.platform]?.icon || 'link';
             const safeTitle   = escapeHtml(item.title || item.url);
-            const preview     = escapeHtml(item.transcript ? item.transcript.substring(0, 140) + '...' : 'Sin transcripcion');
-            const dateKey     = escapeHtml(item.date);
+            const preview     = escapeHtml(item.snippet || item.preview || 'Sin transcripción');
+            const id          = Number(item.id);
+            const meta        = [itemDuration(item) ? fmtDuration(itemDuration(item)) : '', item.word_count ? `${item.word_count.toLocaleString('es-AR')} palabras` : ''].filter(Boolean).join(' · ');
             return `
             <div class="glass rounded-2xl p-5 space-y-3 fade-in">
                 <div class="flex items-start justify-between gap-3">
@@ -359,84 +337,100 @@ document.addEventListener('DOMContentLoaded', () => {
                     </div>
                     <span class="text-slate-500 text-[10px] flex-shrink-0 font-mono">${date}</span>
                 </div>
-                ${item.transcript ? `
+                ${meta ? `<p class="text-[11px] text-slate-500">${escapeHtml(meta)}</p>` : ''}
                 <p class="text-slate-400 text-xs leading-relaxed line-clamp-2">${preview}</p>
                 <div class="flex gap-2 flex-wrap">
-                    <button onclick="window._hist.load('${dateKey}')" class="text-[10px] font-bold uppercase tracking-widest bg-primary/20 text-primary px-3 py-1.5 rounded-full hover:bg-primary/30 transition-all flex items-center gap-1">
+                    <button onclick="window._hist.load(${id})" class="text-[10px] font-bold uppercase tracking-widest bg-primary/20 text-primary px-3 py-1.5 rounded-full hover:bg-primary/30 transition-all flex items-center gap-1">
                         <span class="material-symbols-outlined text-xs">visibility</span> Ver
                     </button>
-                    <button onclick="window._hist.copy('${dateKey}')" class="text-[10px] font-bold uppercase tracking-widest bg-accent/20 text-accent px-3 py-1.5 rounded-full hover:bg-accent/30 transition-all flex items-center gap-1">
+                    <button onclick="window._hist.copy(${id})" class="text-[10px] font-bold uppercase tracking-widest bg-accent/20 text-accent px-3 py-1.5 rounded-full hover:bg-accent/30 transition-all flex items-center gap-1">
                         <span class="material-symbols-outlined text-xs">content_copy</span> Copiar
                     </button>
-                    <button onclick="window._hist.download('${dateKey}')" class="text-[10px] font-bold uppercase tracking-widest bg-white/5 text-slate-300 px-3 py-1.5 rounded-full hover:bg-white/10 transition-all flex items-center gap-1">
+                    <button onclick="window._hist.download(${id})" class="text-[10px] font-bold uppercase tracking-widest bg-white/5 text-slate-300 px-3 py-1.5 rounded-full hover:bg-white/10 transition-all flex items-center gap-1">
                         <span class="material-symbols-outlined text-xs">download</span> .txt
                     </button>
-                    ${item.srt ? `
-                    <button onclick="window._hist.downloadSrt('${dateKey}')" class="text-[10px] font-bold uppercase tracking-widest bg-emerald-500/10 text-emerald-300 px-3 py-1.5 rounded-full hover:bg-emerald-500/25 transition-all flex items-center gap-1">
+                    ${item.has_srt ? `
+                    <button onclick="window._hist.downloadSrt(${id})" class="text-[10px] font-bold uppercase tracking-widest bg-emerald-500/10 text-emerald-300 px-3 py-1.5 rounded-full hover:bg-emerald-500/25 transition-all flex items-center gap-1">
                         <span class="material-symbols-outlined text-xs">subtitles</span> .srt
                     </button>
                     ` : ''}
-                    <button onclick="window._hist.remove('${dateKey}')" class="text-[10px] font-bold uppercase tracking-widest bg-red-500/10 text-red-400 px-3 py-1.5 rounded-full hover:bg-red-500/20 transition-all flex items-center gap-1 ml-auto">
+                    <button onclick="window._hist.remove(${id})" title="Borrar del historial" class="text-[10px] font-bold uppercase tracking-widest bg-red-500/10 text-red-400 px-3 py-1.5 rounded-full hover:bg-red-500/20 transition-all flex items-center gap-1 ml-auto">
                         <span class="material-symbols-outlined text-xs">delete</span>
                     </button>
-                </div>` : ''}
+                </div>
             </div>`;
         }).join('');
     }
 
+    let historySearchTimer = null;
+    historySearchInput?.addEventListener('input', () => {
+        clearTimeout(historySearchTimer);
+        historySearchTimer = setTimeout(() => renderHistory(historySearchInput.value.trim()), 250);
+    });
+
+    const fetchHistoryItem = async (id) => {
+        try { return await window.ClipaV3.history.get(id); }
+        catch (e) { showToast(e.message, 'error'); return null; }
+    };
+    const isFileItem = (item) => /^(whatsapp|video):/.test(item.url || '');
+
     window._hist = {
-        load: (date) => {
-            const item = getHistory().find(h => h.date === date);
+        load: async (id) => {
+            const item = await fetchHistoryItem(id);
             if (!item) return;
-            switchTab(item.platform || 'youtube');
-            if (videoUrlInput && !item.url.startsWith('whatsapp:') && !item.url.startsWith('video:')) {
+            switchTab(isFileItem(item) ? (item.platform || 'video') : (item.platform || 'link'));
+            if (videoUrlInput && !isFileItem(item)) {
                 videoUrlInput.value = item.url;
                 clearUrlBtn?.classList.remove('hidden');
             }
+            if (titleEl) titleEl.textContent = item.title || 'Transcripción';
+            if (uploaderEl) uploaderEl.textContent = item.uploader || '';
+            if (descriptionEl) descriptionEl.textContent = '';
             currentTranscript = item.transcript;
             currentSrt = item.srt || '';
             currentSegments = item.segments || [];
-            
-            renderTranscript(item.transcript, 'cache', item.srt, item.segments);
+            window.ClipaV3.history.currentId = item.id;
+
+            renderTranscript(item.transcript, 'cache', item.srt, item.segments, {
+                raw: item.raw_transcript,
+                source: isFileItem(item) ? { kind: 'file', name: item.url.split(':').slice(1).join(':') } : { kind: 'url', url: item.url },
+            });
             downloadTxtBtn?.classList.remove('hidden');
-            
-            if (titleEl) titleEl.textContent = item.title || 'Transcripción';
-            if (videoInfoCard && !item.url.startsWith('whatsapp:') && !item.url.startsWith('video:')) {
-                videoInfoCard.classList.remove('hidden');
-            }
+            if (videoInfoCard && !isFileItem(item)) videoInfoCard.classList.remove('hidden');
             showToast('Transcripción cargada', 'success');
         },
-        copy: (date) => {
-            const item = getHistory().find(h => h.date === date);
+        copy: async (id) => {
+            const item = await fetchHistoryItem(id);
             if (item?.transcript) { navigator.clipboard.writeText(item.transcript); showToast('Copiado', 'success'); }
         },
-        download: (date) => {
-            const item = getHistory().find(h => h.date === date);
+        download: async (id) => {
+            const item = await fetchHistoryItem(id);
             if (!item?.transcript) return;
-            const blob = new Blob([item.transcript], { type: 'text/plain' });
+            const blob = new Blob([item.transcript], { type: 'text/plain;charset=utf-8' });
             const a = document.createElement('a');
             a.href = URL.createObjectURL(blob);
-            a.download = `${(item.title || 'transcripcion').substring(0, 30)}.txt`;
+            a.download = `${(item.title || 'transcripcion').substring(0, 40)}.txt`;
             a.click();
+            setTimeout(() => URL.revokeObjectURL(a.href), 4000);
         },
-        downloadSrt: (date) => {
-            const item = getHistory().find(h => h.date === date);
+        downloadSrt: async (id) => {
+            const item = await fetchHistoryItem(id);
             if (!item?.srt) return;
             const blob = new Blob([item.srt], { type: 'text/srt;charset=utf-8' });
             const a = document.createElement('a');
             a.href = URL.createObjectURL(blob);
-            a.download = `${(item.title || 'subtitulos').substring(0, 30)}.srt`;
+            a.download = `${(item.title || 'subtitulos').substring(0, 40)}.srt`;
             a.click();
-            URL.revokeObjectURL(a.href);
+            setTimeout(() => URL.revokeObjectURL(a.href), 4000);
         },
-        remove: (date) => {
-            const history = getHistory();
-            const idx = history.findIndex(h => h.date === date);
-            if (idx === -1) return;
-            history.splice(idx, 1);
-            localStorage.setItem(HISTORY_KEY, JSON.stringify(history));
-            const searchVal = historySearchInput?.value || '';
-            renderHistory(searchVal);
+        remove: async (id) => {
+            const item = getHistory().find(h => h.id === id);
+            const ok = await window.ClipaV3.confirm(`¿Borrar «${item?.title || 'esta transcripción'}» del historial?`,
+                { title: 'Borrar transcripción', okText: 'Borrar', danger: true });
+            if (!ok) return;
+            try { await window.ClipaV3.history.remove(id); }
+            catch (e) { showToast(e.message, 'error'); return; }
+            renderHistory(historySearchInput?.value || '');
         }
     };
 
@@ -444,7 +438,8 @@ document.addEventListener('DOMContentLoaded', () => {
     function switchTab(tab) {
         currentTab = tab;
         navItems.forEach(i => { i.classList.remove('active', 'text-primary'); i.classList.add('text-slate-500'); });
-        const activeNav = document.querySelector(`[data-tab="${tab}"]`);
+        const isLinkTabNav = !['home', 'whatsapp', 'video', 'history', 'config'].includes(tab);
+        const activeNav = document.querySelector(`[data-tab="${isLinkTabNav ? 'link' : tab}"]`);
         if (activeNav) { activeNav.classList.add('active', 'text-primary'); activeNav.classList.remove('text-slate-500'); }
 
         const cfg         = PLATFORMS[tab];
@@ -494,6 +489,9 @@ document.addEventListener('DOMContentLoaded', () => {
 
         // Eliminar el panel de recorte inline para que se recree en la próxima transcripción
         document.getElementById('inline-clip-tool')?.remove();
+        document.getElementById('v3-estimate')?.remove();
+        document.dispatchEvent(new CustomEvent('clipa:tab', { detail: { tab } }));
+        if (window.ClipaV3) window.ClipaV3.history.currentId = null;
 
         // Estado interno
         currentTranscript = '';
@@ -509,7 +507,8 @@ document.addEventListener('DOMContentLoaded', () => {
         if (cfg) {
             const TITLES = {
                 home:     ['Inicio', 'Tu mesa de trabajo para desgrabar y analizar.'],
-                history:  ['Historial', 'Transcripciones guardadas en este navegador.'],
+                history:  ['Historial', 'Transcripciones guardadas en esta PC. Buscá por título o por lo que se dijo.'],
+                link:     ['Pegar enlace', 'YouTube, Instagram, TikTok, X, Facebook o una web con video: se detecta solo.'],
                 config:   ['Configuración', 'API Key, mantenimiento y diagnóstico.'],
                 whatsapp: ['Audio / WhatsApp', 'Subí una nota de voz o grabación y transcribila con IA.'],
                 video:    ['Video propio', 'Subí una entrevista o conferencia grabada.'],
@@ -546,15 +545,15 @@ document.addEventListener('DOMContentLoaded', () => {
         if (status === 'online') {
             statusDot.classList.add('bg-emerald-500', 'shadow-[0_0_8px_rgba(16,185,129,0.5)]');
             statusText.classList.add('text-emerald-500');
-            statusText.textContent = 'Online';
+            statusText.textContent = 'Conectado';
         } else if (status === 'issues') {
             statusDot.classList.add('bg-amber-500', 'animate-pulse');
             statusText.classList.add('text-amber-500');
-            statusText.textContent = 'Cookie Issues';
+            statusText.textContent = 'Revisar cookies';
         } else {
             statusDot.classList.add('bg-slate-600');
             statusText.classList.add('text-slate-500');
-            statusText.textContent = 'Offline';
+            statusText.textContent = 'Sin conexión';
         }
     };
     // /health es instantáneo; /health/cookies hace una prueba real contra YouTube
@@ -606,6 +605,7 @@ document.addEventListener('DOMContentLoaded', () => {
         return h ? `${h} h ${m} min` : `${m} min`;
     }
     function itemDuration(item) {
+        if (item.duration) return Number(item.duration) || 0;
         const segs = item.segments || [];
         return segs.length ? Number(segs[segs.length - 1].end) || 0 : 0;
     }
@@ -614,7 +614,7 @@ document.addEventListener('DOMContentLoaded', () => {
         const history = getHistory();
         const weekAgo = Date.now() - 7 * 24 * 3600 * 1000;
         const totalSec = history.reduce((acc, it) => acc + itemDuration(it), 0);
-        const words = history.reduce((acc, it) => acc + (it.transcript ? it.transcript.split(/\s+/).filter(Boolean).length : 0), 0);
+        const words = history.reduce((acc, it) => acc + (it.word_count || (it.transcript ? it.transcript.split(/\s+/).filter(Boolean).length : 0)), 0);
         const setText = (id, val) => { const el = document.getElementById(id); if (el) el.textContent = val; };
         setText('m-total', history.length);
         setText('m-week', history.filter(it => new Date(it.date).getTime() >= weekAgo).length);
@@ -635,7 +635,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     <span class="r-dim flex items-center gap-1.5"><span class="material-symbols-outlined text-base">${p.icon}</span>${escapeHtml(p.label)}</span>
                     <span class="r-dim">${fmtDuration(itemDuration(item))}</span>
                     <span class="r-dim">${date}</span>
-                    <button class="r-open" data-open-history="${escapeHtml(item.date)}">Abrir</button>
+                    <button class="r-open" data-open-history="${Number(item.id)}">Abrir</button>
                 </div>`;
             }).join('') : `<div class="recent-empty">Todavía no hay transcripciones. Pegá un enlace o subí un audio para empezar.</div>`;
         }
@@ -685,7 +685,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     document.addEventListener('click', (e) => {
         const open = e.target.closest('[data-open-history]');
-        if (open) { window._hist.load(open.dataset.openHistory); return; }
+        if (open) { window._hist.load(Number(open.dataset.openHistory)); return; }
         const go = e.target.closest('[data-goto]');
         if (go) switchTab(go.dataset.goto);
     });
@@ -714,12 +714,14 @@ document.addEventListener('DOMContentLoaded', () => {
         globalSearch.value = '';
     });
 
-    document.getElementById('history-clear-btn')?.addEventListener('click', () => {
-        if (getHistory().length && confirm('¿Borrar todo el historial de transcripciones?')) {
-            localStorage.removeItem(HISTORY_KEY);
-            renderHistory();
-            showToast('Historial borrado', 'success');
-        }
+    document.getElementById('history-clear-btn')?.addEventListener('click', async () => {
+        if (!getHistory().length) return;
+        const ok = await window.ClipaV3.confirm('Se borran todas las transcripciones guardadas en esta PC. No se puede deshacer.',
+            { title: '¿Borrar todo el historial?', okText: 'Borrar todo', danger: true });
+        if (!ok) return;
+        try { await window.ClipaV3.history.clear(); } catch (e) { showToast(e.message, 'error'); return; }
+        renderHistory();
+        showToast('Historial borrado', 'success');
     });
 
     // Tema claro / oscuro
@@ -830,6 +832,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
             videoInfoCard?.classList.remove('hidden');
             videoInfoCard?.classList.add('fade-in');
+            lastVideoInfo = { ...data, url, platform: detectPlatformFromUrl(url) };
+            document.dispatchEvent(new CustomEvent('clipa:videoinfo', { detail: lastVideoInfo }));
 
         } catch (err) { showToast(`Error: ${err.message}`, 'error'); }
         finally { loadingSpinner?.classList.add('hidden'); }
@@ -910,6 +914,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // ─── TRANSCRIPT FROM URL ─────────────────────────────────────────────────────
     let selectedTargetLang = 'es';
+    let lastVideoInfo = null;
     const langBtns = document.querySelectorAll('.lang-btn');
     langBtns.forEach(btn => {
         btn.addEventListener('click', (e) => {
@@ -935,7 +940,7 @@ document.addEventListener('DOMContentLoaded', () => {
             a.click();
         } catch (e) {
             console.error(e);
-            alert("No se pudo descargar el log.");
+            showToast('No se pudo descargar el reporte.', 'error');
         }
     };
 
@@ -993,57 +998,67 @@ document.addEventListener('DOMContentLoaded', () => {
         }, 800);
 
         try {
-            const reqBody = { url, groq_api_key: localStorage.getItem(GROQ_KEY_STORE) || undefined, uid: transcriptUid };
-            const r = await fetch(`${API_BASE}/transcript`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(reqBody),
-                signal: transcriptAbort.signal
-            });
+            // Se crea un trabajo en el servidor: si se cierra la pestaña, sigue y queda en el Historial.
             let data;
             try {
-                data = await r.json();
-            } catch (parseErr) {
-                throw new Error(`HTTP ${r.status} — Respuesta inválida del servidor. ¿El servidor está corriendo?`);
+                const info = (lastVideoInfo && lastVideoInfo.url === url) ? lastVideoInfo : {};
+                const job = await window.ClipaV3.jobs.create({
+                    url, lang: selectedTargetLang, title: (titleEl?.textContent || '').trim() || undefined,
+                    uploader: info.uploader, duration: info.duration });
+                clearInterval(activeTranscriptPollInterval);
+                activeTranscriptPollInterval = null;
+                data = await window.ClipaV3.jobs.waitFor(job.id, {
+                    signal: transcriptAbort.signal,
+                    onProgress: (pct, text) => {
+                        const textEl = document.getElementById('transcript-progress-text');
+                        const pctEl  = document.getElementById('transcript-progress-pct');
+                        const barEl  = document.getElementById('transcript-progress-bar');
+                        if (textEl && text) textEl.textContent = text;
+                        if (pctEl) pctEl.textContent = `${pct}%`;
+                        if (barEl) barEl.style.width = `${pct}%`;
+                    },
+                });
+                lastTranscriptUid = job.id;
+            } catch (jobErr) {
+                if (jobErr.name === 'AbortError') throw jobErr;
+                data = { error: jobErr.message, technical: jobErr.technical };
             }
 
             clearInterval(activeTranscriptPollInterval);
             activeTranscriptPollInterval = null;
 
-            // El servidor puede devolver el error en data.error (500 internal) o data.detail (FastAPI HTTPException)
             const serverError = data.error || data.detail;
-            if (!r.ok || serverError) {
-                    const errorMsg = escapeHtml((serverError || `HTTP ${r.status}`).replace(/\u001b\[[0-9;]*m/g, ''));
+            if (serverError) {
+                    const errorMsg = escapeHtml(String(serverError).replace(/\u001b\[[0-9;]*m/g, ''));
+                    const technical = data.technical ? `<details class="text-[11px] text-slate-500"><summary class="cursor-pointer">Detalle técnico</summary><p class="mt-1 font-mono break-all">${escapeHtml(data.technical)}</p></details>` : '';
 
                     transcriptContent.innerHTML = `
                         <div class="bg-red-500/10 p-6 rounded-2xl border border-red-500/20 text-red-400 text-sm space-y-4">
                             <div class="flex items-center gap-2">
                                 <span class="material-symbols-outlined">error</span>
-                                <p class="font-bold">Error en la transcripción</p>
+                                <p class="font-bold">No se pudo transcribir</p>
                             </div>
-                            <p class="opacity-80">${errorMsg}</p>
+                            <p class="opacity-90 leading-relaxed">${errorMsg}</p>
+                            ${technical}
                             <div class="pt-2 flex gap-2 flex-wrap">
-                                <p class="text-[10px] text-slate-500 w-full italic">Si el error persiste, descarga el reporte y envíaselo al administrador.</p>
-                                <button onclick="downloadErrorLog('${escapeHtml(transcriptUid)}')" class="bg-white/5 hover:bg-white/10 border border-white/10 px-4 py-2.5 rounded-xl text-xs font-bold transition-all flex items-center gap-2">
-                                    <span class="material-symbols-outlined text-sm">bug_report</span> Descargar Reporte
+                                <button onclick="document.getElementById('show-transcript-btn')?.click()" class="bg-white/5 hover:bg-white/10 border border-white/10 px-4 py-2.5 rounded-xl text-xs font-bold transition-all flex items-center gap-2">
+                                    <span class="material-symbols-outlined text-sm">refresh</span> Reintentar
                                 </button>
-                                <button onclick="document.querySelector('[data-tab=config]')?.click()" class="bg-white/5 hover:bg-white/10 border border-white/10 px-4 py-2.5 rounded-xl text-xs font-bold transition-all flex items-center gap-2">
-                                    <span class="material-symbols-outlined text-sm">terminal</span> Ver Logs
+                                <button onclick="downloadErrorLog('${escapeHtml(lastTranscriptUid || transcriptUid)}')" class="bg-white/5 hover:bg-white/10 border border-white/10 px-4 py-2.5 rounded-xl text-xs font-bold transition-all flex items-center gap-2">
+                                    <span class="material-symbols-outlined text-sm">bug_report</span> Descargar reporte
                                 </button>
                             </div>
                         </div>`;
-                    fetchAndShowLogs(transcriptUid);
                     return;
             }
 
-
-
             currentTranscript = data.transcript;
-            renderTranscript(data.transcript, data.method, data.srt, data.segments);
+            if (window.ClipaV3) window.ClipaV3.history.currentId = data.history_id || null;
+            renderTranscript(data.transcript, data.method, data.srt, data.segments,
+                { raw: data.raw_transcript, source: { kind: 'url', url } });
             showWarnings(data.warnings);
             downloadTxtBtn?.classList.remove('hidden');
-
-            saveToHistory({ url, platform: detectPlatformFromUrl(url), title: titleEl.textContent || url, transcript: data.transcript, srt: data.srt, segments: data.segments });
+            window.ClipaV3?.history.load();   // el servidor ya la guardó en el historial
 
         } catch (err) {
             clearInterval(activeTranscriptPollInterval);
@@ -1076,9 +1091,10 @@ document.addEventListener('DOMContentLoaded', () => {
                             clearInterval(recoveryInterval);
                             if (recData.transcript) {
                                 currentTranscript = recData.transcript;
-                                renderTranscript(recData.transcript, recData.method, recData.srt, recData.segments);
+                                renderTranscript(recData.transcript, recData.method, recData.srt, recData.segments,
+                                    { raw: recData.raw_transcript, source: { kind: 'url', url } });
                                 downloadTxtBtn?.classList.remove('hidden');
-                                saveToHistory({ url, platform: detectPlatformFromUrl(url), title: titleEl.textContent || url, transcript: recData.transcript, srt: recData.srt, segments: recData.segments });
+                                saveToHistory({ url, platform: detectPlatformFromUrl(url), title: titleEl.textContent || url, transcript: recData.transcript, raw_transcript: recData.raw_transcript, srt: recData.srt, segments: recData.segments, lang: selectedTargetLang, method: recData.method });
                                 showToast('¡Transcripción recuperada del servidor!', 'success');
                                 return;
                             }
@@ -1247,7 +1263,7 @@ document.addEventListener('DOMContentLoaded', () => {
         return html;
     }
 
-    function renderTranscript(text, method, srt = '', segments = []) {
+    function renderTranscript(text, method, srt = '', segments = [], extra = {}) {
         currentSrt = srt || '';
         currentSegments = segments || [];
         if (currentSrt) {
@@ -1260,7 +1276,8 @@ document.addEventListener('DOMContentLoaded', () => {
             groq_whisper_v3: 'IA Whisper v3 (Groq)', 
             groq_whisper_v3_file: 'IA Whisper v3 - Archivo', 
             local_whisper: 'IA Whisper Local', 
-            cache: 'Caché local' 
+            groq_vision_ocr: 'Texto de imágenes (OCR)',
+            cache: 'Guardada' 
         };
         
         // 1. Inyectar herramientas ARRIBA (antes del texto)
@@ -1343,6 +1360,10 @@ document.addEventListener('DOMContentLoaded', () => {
         // Limpiar historial de chat al cargar nueva transcripción
         const chatHistory = document.getElementById('chat-history');
         if (chatHistory) chatHistory.innerHTML = '';
+
+        // 5. Visualizador y "texto original" (v3.js)
+        document.dispatchEvent(new CustomEvent('clipa:transcript', { detail: {
+            text, method, segments: currentSegments, raw: extra.raw || '', source: extra.source || null } }));
     }
 
     /** Injects (or updates) the inline clip tool inside the transcript section */
@@ -1560,11 +1581,14 @@ document.addEventListener('DOMContentLoaded', () => {
             currentSrt = data.srt || '';
             
             // Usar la columna derecha (como YouTube)
-            renderTranscript(data.transcript, data.method || 'groq_whisper_v3_file', data.srt, data.segments);
+            renderTranscript(data.transcript, data.method || 'groq_whisper_v3_file', data.srt, data.segments,
+                { raw: data.raw_transcript, source: { kind: 'file', file, name: file.name } });
             showWarnings(data.warnings);
             downloadTxtBtn?.classList.remove('hidden');
+            if (titleEl) titleEl.textContent = file.name;
+            if (uploaderEl) uploaderEl.textContent = '';
 
-            saveToHistory({ url: `whatsapp:${file.name}`, platform: 'whatsapp', title: file.name, transcript: data.transcript, srt: data.srt, segments: data.segments });
+            saveToHistory({ url: `whatsapp:${file.name}`, platform: 'whatsapp', title: file.name, transcript: data.transcript, raw_transcript: data.raw_transcript, srt: data.srt, segments: data.segments, method: data.method, lang: selectedTargetLang });
 
         } catch (err) {
             clearInterval(localPollInterval);
@@ -1677,11 +1701,14 @@ document.addEventListener('DOMContentLoaded', () => {
             currentTranscript = response.transcript;
             currentSrt = response.srt || '';
 
-            renderTranscript(response.transcript, response.method || 'groq_whisper_v3_file', response.srt, response.segments);
+            renderTranscript(response.transcript, response.method || 'groq_whisper_v3_file', response.srt, response.segments,
+                { raw: response.raw_transcript, source: { kind: 'file', file, name: file.name } });
             showWarnings(response.warnings);
             downloadTxtBtn?.classList.remove('hidden');
+            if (titleEl) titleEl.textContent = file.name;
+            if (uploaderEl) uploaderEl.textContent = '';
 
-            saveToHistory({ url: `video:${file.name}`, platform: 'video', title: file.name, transcript: response.transcript, srt: response.srt, segments: response.segments });
+            saveToHistory({ url: `video:${file.name}`, platform: 'video', title: file.name, transcript: response.transcript, raw_transcript: response.raw_transcript, srt: response.srt, segments: response.segments, method: response.method, lang: selectedTargetLang });
 
         } catch (err) {
             clearInterval(serverPollInterval);
@@ -1792,6 +1819,7 @@ document.addEventListener('DOMContentLoaded', () => {
                         Copiar
                     </button>
                 </div>
+                ${mode === 'diarization' ? `<p class="v3-approx"><span class="material-symbols-outlined">warning</span> Los hablantes son aproximados: la IA los deduce del texto, no de las voces. Verificá con el audio antes de atribuir una frase.</p>` : ''}
                 <div class="ai-result-text text-slate-300 text-sm leading-relaxed">${formatAIResponse(data.result)}</div>
                 ${data.parts > 1 ? `<p class="mt-3 text-[10px] text-slate-500 italic">Transcripción larga: se analizó completa en ${Number(data.parts)} partes.</p>` : ''}`;
 
@@ -1864,7 +1892,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     ${timeBadge}
                     <div class="quote-buttons">
                         ${clipBtn}
-                        <button class="quote-copy-btn" data-quote="${escapeHtml(q.quote)}">
+                        <button class="quote-copy-btn" data-quote="${escapeHtml(q.quote)}" data-start="${hasTime ? Number(q.start) : ''}" title="Copia la cita con atribución, minuto y enlace">
                             <span class="material-symbols-outlined text-[13px]">content_copy</span> Copiar
                         </button>
                     </div>
@@ -1919,7 +1947,9 @@ document.addEventListener('DOMContentLoaded', () => {
         // Wire copy buttons
         outputEl.querySelectorAll('.quote-copy-btn').forEach(btn => {
             btn.addEventListener('click', () => {
-                navigator.clipboard.writeText(btn.dataset.quote || '');
+                const start = btn.dataset.start === '' ? null : Number(btn.dataset.start);
+                const text = window.ClipaV3 ? window.ClipaV3.formatQuote(btn.dataset.quote || '', { start }) : (btn.dataset.quote || '');
+                navigator.clipboard.writeText(text);
                 btn.innerHTML = '<span class="material-symbols-outlined text-[13px]">check</span> Copiada';
                 setTimeout(() => { btn.innerHTML = '<span class="material-symbols-outlined text-[13px]">content_copy</span> Copiar'; }, 2000);
             });
@@ -2011,6 +2041,30 @@ document.addEventListener('DOMContentLoaded', () => {
         setTimeout(() => { copyTranscriptBtn.innerHTML = orig; }, 2000);
     });
 
+    // Guardado automático mientras se edita (y al terminar)
+    let editSaveTimer = null;
+    async function saveEditedTranscript(final = false) {
+        const id = window.ClipaV3?.history.currentId;
+        const textContainer = document.getElementById('transcript-text-container');
+        if (textContainer && isEditing) currentTranscript = textContainer.innerText;
+        if (!id) { if (final) showToast('Cambios aplicados (esta transcripción no está en el historial)', 'info'); return; }
+        try {
+            await window.ClipaV3.history.update(id, { transcript: currentTranscript });
+            const status = document.getElementById('v3-edit-status');
+            if (status) status.textContent = `Guardado ${new Date().toLocaleTimeString('es-AR', { hour: '2-digit', minute: '2-digit' })}`;
+            if (final) showToast('Cambios guardados', 'success');
+        } catch (e) {
+            showToast(`No se pudieron guardar los cambios: ${e.message}`, 'error');
+        }
+    }
+    document.addEventListener('input', (e) => {
+        if (!isEditing || e.target.id !== 'transcript-text-container') return;
+        const status = document.getElementById('v3-edit-status');
+        if (status) status.textContent = 'Editando...';
+        clearTimeout(editSaveTimer);
+        editSaveTimer = setTimeout(() => saveEditedTranscript(false), 1500);
+    });
+
     editTranscriptBtn?.addEventListener('click', () => {
         const textContainer = document.getElementById('transcript-text-container');
         if (!textContainer) return;
@@ -2023,7 +2077,7 @@ document.addEventListener('DOMContentLoaded', () => {
             textContainer.style.padding = '8px';
             textContainer.style.borderRadius = '8px';
             textContainer.style.background = 'rgba(255, 255, 255, 0.02)';
-            editTranscriptBtn.innerHTML = '<span class="material-symbols-outlined text-sm">check</span> GUARDAR';
+            editTranscriptBtn.innerHTML = '<span class="material-symbols-outlined text-sm">check</span> LISTO <span id="v3-edit-status" class="font-normal normal-case opacity-70">Se guarda solo</span>';
             editTranscriptBtn.classList.remove('bg-white/5');
             editTranscriptBtn.classList.add('bg-emerald-500/20', 'text-emerald-300');
         } else {
@@ -2036,27 +2090,8 @@ document.addEventListener('DOMContentLoaded', () => {
             editTranscriptBtn.classList.remove('bg-emerald-500/20', 'text-emerald-300');
             
             currentTranscript = textContainer.innerText;
-            
-            // Sync history
-            const history = getHistory();
-            const videoUrl = videoUrlInput?.value || '';
-            const idx = history.findIndex(h => h.url === videoUrl);
-            if (idx !== -1) {
-                history[idx].transcript = currentTranscript;
-                try {
-                    localStorage.setItem(HISTORY_KEY, JSON.stringify(history));
-                } catch (e) {
-                    console.warn("Storage quota exceeded on sync edit, pruning segments/srt...", e);
-                    try {
-                        history[idx].segments = [];
-                        history[idx].srt = "";
-                        localStorage.setItem(HISTORY_KEY, JSON.stringify(history));
-                    } catch (err) {
-                        console.error("Failed to sync edited transcript even after pruning segments:", err);
-                    }
-                }
-            }
-            showToast('Cambios guardados', 'success');
+            saveEditedTranscript(true);
+
         }
     });
 
@@ -2371,9 +2406,11 @@ document.addEventListener('DOMContentLoaded', () => {
 
     document.getElementById('system-update-app-btn')?.addEventListener('click', (e) => callSystemEndpoint('update-app', e.currentTarget));
     document.getElementById('system-update-engine-btn')?.addEventListener('click', (e) => callSystemEndpoint('update-engine', e.currentTarget));
-    document.getElementById('system-reset-btn')?.addEventListener('click', (e) => {
-        if (confirm('¿Vaciar la carpeta de descargas? No se borrará tu historial.')) {
-            callSystemEndpoint('reset', e.currentTarget);
+    document.getElementById('system-reset-btn')?.addEventListener('click', async (e) => {
+        const btn = e.currentTarget;
+        if (await window.ClipaV3.confirm('Se vacía la carpeta de descargas y la caché de transcripciones. Tu historial no se toca.',
+            { title: '¿Resetear?', okText: 'Resetear', danger: true })) {
+            callSystemEndpoint('reset', btn);
         }
     });
 
@@ -2390,4 +2427,21 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     });
 
+
+    // ─── PUENTE CON v3.js ────────────────────────────────────────────────────────
+    window.Clipa = {
+        API_BASE, showToast, switchTab, escapeHtml, detectPlatformFromUrl,
+        openHistory: (id) => window._hist.load(id),
+        processAudioFile, processVideoFile,
+        formatText: (text, segments) => formatCleanTextWithTimestamps(text, segments),
+        getMeta: () => ({
+            title: (titleEl?.textContent || '').trim(),
+            uploader: (uploaderEl?.textContent || '').trim(),
+            url: (videoUrlInput?.value || '').trim(),
+        }),
+        getFormat: () => formatSelect?.value || 'best',
+        getQuality: () => getVideoQuality(),
+        serverHasGroq: false,
+    };
+    document.dispatchEvent(new CustomEvent('clipa:ready'));
 });

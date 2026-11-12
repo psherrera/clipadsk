@@ -1,10 +1,12 @@
-const CACHE_NAME = 'clipadsk-v5.4';
+const CACHE_NAME = 'clipadsk-v3.0';
 const ASSETS = [
     './',
     './index.html',
-    './style.css?v=5.4',
-    './main.js?v=5.4',
-    './vendor/tailwind.css?v=5.4',
+    './style.css?v=3.0',
+    './main.js?v=3.0',
+    './v3.js?v=3.0',
+    './v3.css?v=3.0',
+    './vendor/tailwind.css?v=3.0',
     './vendor/fonts.css',
     './vendor/jszip.min.js',
     './vendor/fonts/outfit-latin-wght-normal.woff2',

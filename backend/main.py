@@ -53,9 +53,11 @@ from formats import (
 from text_utils import (
     sanitize_url, parse_subtitles_to_segments, generate_srt_from_segments, remove_repetitions,
     find_segment_times_for_quote, ensure_paragraphs, host_matches, is_allowed_thumbnail_url, safe_filename,
-    is_trusted_host, is_partial_download,
+    is_trusted_host, is_partial_download, clip_segments,
     YOUTUBE_DOMAINS, INSTAGRAM_DOMAINS, TIKTOK_DOMAINS, TWITTER_DOMAINS, FACEBOOK_DOMAINS,
 )
+from errors import friendly_error
+import history as hist
 import media
 import ai
 
@@ -70,7 +72,8 @@ except ImportError:  # pragma: no cover
     TTLCache = None
 
 
-app = FastAPI(title="Clipadsk API")
+APP_VERSION = "3.0.0"
+app = FastAPI(title="Clipadsk API", version=APP_VERSION)
 
 # ─── EJECUCIÓN EN SEGUNDO PLANO ──────────────────────────────────────────────
 # Todo lo que bloquea (yt-dlp, FFmpeg, Groq, requests) se corre en hilos para que el
@@ -236,6 +239,7 @@ def cache_set(key: str, data: dict):
 
 
 init_db()
+hist.init(DB_FILE)
 
 
 # ─── YT-DLP ──────────────────────────────────────────────────────────────────
@@ -509,6 +513,9 @@ class VideoRequest(BaseModel):
     uid: Optional[str] = None
     target_lang: Optional[str] = "es"  # es, en, original
     quality: Optional[str] = "compatible"  # compatible (H.264) | max (VP9/AV1)
+    burn_subs: Optional[bool] = False      # quemar subtítulos en el recorte
+    vertical: Optional[bool] = False       # recorte en 9:16 para redes
+    segments: Optional[list] = None        # segmentos de la transcripción (para los subtítulos)
 
 
 class ChatRequest(BaseModel):
@@ -559,8 +566,9 @@ def ai_error(e: Exception) -> HTTPException:
 @app.get("/api/health")
 async def health():
     """Chequeo rápido (no sale a internet)."""
-    return {"status": "ok", "ffmpeg": HAS_FFMPEG, "whisper_local": media.WHISPER_MODEL_AVAILABLE,
-            "groq_server_key": ai.get_groq_client() is not None, "yt_dlp": yt_dlp.version.__version__}
+    return {"status": "ok", "version": APP_VERSION, "ffmpeg": HAS_FFMPEG, "whisper_local": media.WHISPER_MODEL_AVAILABLE,
+            "groq_server_key": ai.get_groq_client() is not None, "yt_dlp": yt_dlp.version.__version__,
+            "has_cookies": find_cookie_file("https://www.youtube.com/") is not None}
 
 
 @app.get("/api/health/cookies")
@@ -572,7 +580,7 @@ async def check_cookies():
         return {"status": "ok", "cookie_valid": True, "video_title": info.get('title'),
                 "server_time": time.strftime("%Y-%m-%d %H:%M:%S")}
     except Exception as e:
-        return {"status": "error", "cookie_valid": False, "error": str(e)[:300],
+        return {"status": "error", "cookie_valid": False, "error": friendly_error(e), "technical": str(e)[:300],
                 "server_time": time.strftime("%Y-%m-%d %H:%M:%S")}
 
 
@@ -616,9 +624,7 @@ async def get_video_info(req: VideoRequest):
                         'formats': [{'format_id': 'carousel_images', 'ext': 'zip', 'resolution': 'Imágenes (ZIP)',
                                      'filesize': None, 'label': f"Conjunto de {len(files)} imágenes (.zip)"}],
                         'has_ffmpeg': HAS_FFMPEG, 'has_subtitles': False, 'can_transcribe': True}
-            if "No video formats found" in last_error:
-                raise HTTPException(status_code=400, detail="Este post de Instagram no contiene video (es una publicación de fotos). Clipadsk solo puede descargar o transcribir videos y audios.")
-        raise HTTPException(status_code=400, detail=f"No pudimos procesar este video. Puede ser privado o la plataforma bloqueó la conexión. Errores: {last_error[:200]}")
+        raise HTTPException(status_code=400, detail=friendly_error(last_error))
 
     formats = build_format_list(info.get('formats') or [], HAS_FFMPEG)
     if not formats:
@@ -639,6 +645,7 @@ async def get_video_info(req: VideoRequest):
         'formats': formats,
         'has_ffmpeg': HAS_FFMPEG,
         'has_subtitles': bool(info.get('subtitles') or info.get('automatic_captions')),
+        'has_manual_subtitles': bool(info.get('subtitles')),
     }
 
 
@@ -738,24 +745,36 @@ def _only_images(files: list) -> bool:
     return True
 
 
-@app.post("/api/transcript")
-async def get_transcript(req: VideoRequest):
-    uid = req.uid
-    lang = req.target_lang or "es"
+class TranscriptionError(Exception):
+    """Error de transcripción con mensaje para el usuario (status HTTP incluido)."""
+    def __init__(self, message: str, status: int = 500, technical: str = ""):
+        super().__init__(message)
+        self.status, self.technical = status, technical
+
+
+async def transcribe_url(raw_url: str, lang: str, groq_api_key: Optional[str], uid: Optional[str]) -> dict:
+    """
+    Transcribe un enlace: caché → (Instagram con imágenes: OCR) → subtítulos de YouTube →
+    audio con Groq / Whisper local → limpieza con IA. Lo usan /api/transcript y los
+    trabajos en segundo plano. Lanza TranscriptionError con un mensaje claro.
+    """
+    lang = lang or "es"
     try:
-        url = await resolve_url(req.url)
+        url = await resolve_url(raw_url)
     except HTTPException as e:
-        return JSONResponse(status_code=e.status_code, content={"error": e.detail, "detail": e.detail})
+        raise TranscriptionError(str(e.detail), e.status_code)
     add_log(uid, f"Iniciando transcripción para: {url} | Idioma: {lang}")
 
     cache_key = f"{url}_{lang}"
     cached = await run_light(cache_get, cache_key)
     if cached:
         add_log(uid, "Resultado recuperado de la caché local.")
+        update_progress(uid, 100, "¡Transcripción lista!")
         return {"transcript": ensure_paragraphs(cached.get("transcript", "")), "srt": cached.get("srt", ""),
-                "segments": cached.get("segments", []), "method": "cache"}
+                "segments": cached.get("segments", []), "raw_transcript": cached.get("raw_transcript", ""),
+                "method": "cache", "resolved_url": url}
 
-    client = ai.get_groq_client(req.groq_api_key)
+    client = ai.get_groq_client(groq_api_key)
     warnings: List[str] = []
     try:
         # Carrusel de Instagram solo con imágenes → OCR
@@ -763,14 +782,15 @@ async def get_transcript(req: VideoRequest):
             files = await run_blocking(get_instagram_carousel_info, url, find_cookie_file(url))
             if files and _only_images(files):
                 if not client:
-                    return JSONResponse(status_code=400, content={"error": "Para extraer texto de imágenes (OCR) necesitás configurar la API Key de Groq en Configuración."})
+                    raise TranscriptionError("Para extraer texto de imágenes (OCR) necesitás configurar la API Key "
+                                             "de Groq en Configuración.", 400)
                 add_log(uid, f"Carrusel de {len(files)} imágenes: OCR con Groq Vision")
                 text = await run_blocking(transcribe_instagram_carousel, files, client, uid)
-                payload = {"transcript": text, "srt": "", "segments": [], "method": "groq_vision_ocr"}
+                payload = {"transcript": text, "srt": "", "segments": [], "raw_transcript": text,
+                           "method": "groq_vision_ocr"}
                 await run_light(cache_set, cache_key, payload)
                 update_progress(uid, 100, "¡Extracción de texto completa!")
-                store_result(uid, payload)
-                return payload
+                return {**payload, "resolved_url": url}
 
         with tempfile.TemporaryDirectory() as tmpdir:
             result = None
@@ -780,7 +800,8 @@ async def get_transcript(req: VideoRequest):
             if not result:
                 result = await run_blocking(transcribe_from_audio, url, lang, tmpdir, uid, client)
 
-        text = result["raw"]
+        raw_text = result["raw"]
+        text = raw_text
         if client:
             update_progress(uid, 85, f"Aplicando puntuación y párrafos con IA ({lang})...")
             text = await run_blocking(ai.cleanup_transcript, text, client, lang, warnings)
@@ -788,19 +809,30 @@ async def get_transcript(req: VideoRequest):
 
         segments = result["segments"]
         payload = {"transcript": text, "srt": generate_srt_from_segments(segments), "segments": segments,
-                   "method": result["method"]}
+                   "raw_transcript": ensure_paragraphs(raw_text), "method": result["method"]}
         if warnings:
             payload["warnings"] = warnings  # no se cachea: la próxima vez se reintenta la limpieza
         else:
             await run_light(cache_set, cache_key, payload)
         update_progress(uid, 100, "¡Transcripción lista!")
         add_log(uid, f"Transcripción completada ({result['method']}).")
-        store_result(uid, payload)
-        return payload
+        return {**payload, "resolved_url": url}
+    except TranscriptionError:
+        raise
     except Exception as e:
         logger.exception("Error en transcripción")
         add_log(uid, f"Error: {e}")
-        return JSONResponse(status_code=500, content={"error": str(e)[:500], "detail": str(e)[:500]})
+        raise TranscriptionError(friendly_error(e), 500, str(e)[:400])
+
+
+@app.post("/api/transcript")
+async def get_transcript(req: VideoRequest):
+    try:
+        payload = await transcribe_url(req.url, req.target_lang or "es", req.groq_api_key, req.uid)
+    except TranscriptionError as e:
+        return JSONResponse(status_code=e.status, content={"error": str(e), "detail": str(e), "technical": e.technical})
+    store_result(req.uid, payload)
+    return payload
 
 
 # ─── ENDPOINTS: TRANSCRIPCIÓN DE ARCHIVO ─────────────────────────────────────
@@ -867,6 +899,7 @@ async def transcript_audio_file(
                 media.transcribe_audio, audio_path, target_lang, client, tmpdir,
                 progress=lambda p, t: update_progress(uid, p, t), log=lambda m: add_log(uid, m))
             text = remove_repetitions(text.strip())
+            raw_text = text
 
             if client:
                 update_progress(uid, 80, "Aplicando puntuación y párrafos con IA...")
@@ -876,6 +909,7 @@ async def transcript_audio_file(
             update_progress(uid, 100, "Completado")
             add_log(uid, "Transcripción de archivo completada.")
             payload = {"transcript": text, "srt": generate_srt_from_segments(segments), "segments": segments,
+                       "raw_transcript": ensure_paragraphs(raw_text),
                        "method": method, "filename": file.filename, "size_mb": round(size_mb, 2)}
             if warnings:
                 payload["warnings"] = warnings
@@ -886,7 +920,7 @@ async def transcript_audio_file(
         except Exception as e:
             logger.exception("Error transcribiendo archivo")
             add_log(uid, f"Error en transcripción de archivo: {e}")
-            raise HTTPException(status_code=500, detail=f"Error al transcribir: {e}")
+            raise HTTPException(status_code=500, detail=friendly_error(e))
 
 
 # ─── ENDPOINTS: DESCARGA ─────────────────────────────────────────────────────
@@ -955,6 +989,10 @@ async def download_video(req: VideoRequest, background_tasks: BackgroundTasks):
                 raise HTTPException(status_code=400, detail="Para descargar como MP3 hace falta FFmpeg.")
             path = await run_blocking(_instagram_download, ig, file_uid, as_mp3)
             _remove_later(background_tasks, path)
+            if not as_mp3 and (req.burn_subs or req.vertical):
+                path = await run_blocking(postprocess_clip, path, req.segments or [], 0.0, float('inf'),
+                                          bool(req.burn_subs), bool(req.vertical))
+                _remove_later(background_tasks, path)
             ext = 'mp3' if as_mp3 else 'mp4'
             return FileResponse(path, filename=f"{safe_filename(ig['title'], 30)}_{file_uid[:6]}.{ext}",
                                 media_type='audio/mpeg' if as_mp3 else 'video/mp4')
@@ -1016,14 +1054,24 @@ async def download_video(req: VideoRequest, background_tasks: BackgroundTasks):
                            on_attempt=lambda n, name: update_progress(req.uid, 5 + n * 5, f"Conectando ({name})..."),
                            cleanup=remove_leftovers)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"No se pudo descargar: {str(e)[:300]}")
+        raise HTTPException(status_code=500, detail=friendly_error(e))
 
     path = find_output()
     if not path:
         raise HTTPException(status_code=500, detail="El archivo no apareció después de la descarga.")
-    update_progress(req.uid, 100, "¡Archivo listo!")
     _remove_later(background_tasks, path)
-    name = os.path.basename(path).replace(f"_{file_uid}", "")
+    if format_id != 'mp3' and (req.burn_subs or req.vertical):
+        update_progress(req.uid, 93, "Agregando subtítulos / formato vertical...")
+        clip_start = start_sec if (req.start_time or req.end_time) else 0.0
+        clip_end = end_sec if (req.start_time or req.end_time) else float('inf')
+        try:
+            path = await run_blocking(postprocess_clip, path, req.segments or [], clip_start, clip_end,
+                                      bool(req.burn_subs), bool(req.vertical))
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=friendly_error(e))
+        _remove_later(background_tasks, path)
+    update_progress(req.uid, 100, "¡Archivo listo!")
+    name = os.path.basename(path).replace(f"_{file_uid}", "").replace("_final.mp4", "_vertical.mp4" if req.vertical else ".mp4")
     return FileResponse(path, filename=name)
 
 
@@ -1184,6 +1232,511 @@ async def export_docx(req: ExportDocxRequest):
         headers={'Content-Disposition': f"attachment; filename=\"transcripcion.docx\"; filename*=UTF-8''{quote(fname)}.docx"})
 
 
+# ─── TRABAJOS EN SEGUNDO PLANO ───────────────────────────────────────────────
+# Una transcripción larga ya no depende de que la pestaña quede abierta: corre en el
+# servidor, el resultado se guarda solo en el historial y la app avisa al terminar.
+
+JOBS: dict = {}
+JOBS_TTL = 24 * 3600
+JOBS_MAX = 100
+_job_tasks: set = set()
+
+
+class JobRequest(BaseModel):
+    url: str
+    target_lang: Optional[str] = "es"
+    groq_api_key: Optional[str] = None
+    title: Optional[str] = None
+    uploader: Optional[str] = None
+    duration: Optional[float] = None
+
+
+def _job_public(job: dict, with_result: bool = False) -> dict:
+    out = {k: v for k, v in job.items() if k not in ("result", "api_key")}
+    prog = progress_store.get(job["id"]) or {}
+    if job["status"] == "running":
+        out["progress"], out["text"] = prog.get("progress", 0), prog.get("text", "Procesando...")
+    if with_result and job.get("result") is not None:
+        out["result"] = job["result"]
+    return out
+
+
+def _prune_jobs():
+    now = time.time()
+    for jid in [j for j, job in JOBS.items() if job["status"] in ("done", "error") and now - job["created"] > JOBS_TTL]:
+        JOBS.pop(jid, None)
+    finished = sorted((j for j in JOBS.values() if j["status"] in ("done", "error")), key=lambda j: j["created"])
+    for job in finished[:max(0, len(JOBS) - JOBS_MAX)]:
+        JOBS.pop(job["id"], None)
+
+
+async def _fill_job_metadata(job: dict):
+    """Título, autor y duración del video (si no los mandó la app) para el historial."""
+    if job.get("title"):
+        return
+    try:
+        url = await resolve_url(job["url"])
+        if host_matches(url, INSTAGRAM_DOMAINS) and instaloader:
+            ig = await run_light(get_instagram_info, url)
+            job.update(title=ig.get("title"), uploader=ig.get("uploader"), duration=ig.get("duration"))
+            return
+        info = await run_light(ytdlp_extract, url)
+        job.update(title=info.get("title"), uploader=info.get("uploader"), duration=info.get("duration"))
+    except Exception as e:
+        logger.debug(f"No se pudo obtener el título para el trabajo {job['id']}: {e}")
+
+
+async def _run_job(job: dict):
+    job["status"] = "running"
+    update_progress(job["id"], 2, "Preparando...")
+    try:
+        await _fill_job_metadata(job)
+        payload = await transcribe_url(job["url"], job["lang"], job.pop("api_key", None), job["id"])
+        url = job["url"].strip()
+        entry = {"url": url, "platform": job.get("platform") or "", "title": job.get("title") or url,
+                 "uploader": job.get("uploader") or "", "duration": job.get("duration"), "lang": job["lang"],
+                 "method": payload.get("method"), "transcript": payload["transcript"],
+                 "raw_transcript": payload.get("raw_transcript", ""), "srt": payload.get("srt", ""),
+                 "segments": payload.get("segments", [])}
+        job["history_id"] = await run_light(hist.upsert, DB_FILE, entry)
+        job["result"] = {**payload, "history_id": job["history_id"], "title": entry["title"],
+                         "uploader": entry["uploader"], "duration": entry["duration"]}
+        job["status"] = "done"
+        job["title"] = entry["title"]
+    except TranscriptionError as e:
+        job.update(status="error", error=str(e), technical=e.technical)
+    except Exception as e:  # pragma: no cover - red de seguridad
+        logger.exception("Error en trabajo en segundo plano")
+        job.update(status="error", error=friendly_error(e), technical=str(e)[:400])
+    finally:
+        job["finished"] = time.time()
+
+
+@app.post("/api/jobs")
+async def create_job(req: JobRequest):
+    url = sanitize_url(req.url)
+    if not url.startswith(("http://", "https://")):
+        raise HTTPException(status_code=400, detail="La URL debe empezar con http:// o https://")
+    _prune_jobs()
+    job_id = uuid.uuid4().hex[:16]
+    platform = next((name for name, domains in (("youtube", YOUTUBE_DOMAINS), ("instagram", INSTAGRAM_DOMAINS),
+                                                 ("tiktok", TIKTOK_DOMAINS), ("redes", TWITTER_DOMAINS + FACEBOOK_DOMAINS))
+                     if host_matches(url, domains)), "bunny")
+    job = {"id": job_id, "url": req.url.strip(), "lang": req.target_lang or "es", "status": "queued",
+           "title": (req.title or "").strip() or None, "uploader": req.uploader, "duration": req.duration,
+           "platform": platform, "created": time.time(), "finished": None, "error": None, "history_id": None,
+           "api_key": req.groq_api_key}
+    JOBS[job_id] = job
+    task = asyncio.create_task(_run_job(job))
+    _job_tasks.add(task)
+    task.add_done_callback(_job_tasks.discard)
+    return _job_public(job)
+
+
+@app.get("/api/jobs")
+async def list_jobs():
+    _prune_jobs()
+    jobs = sorted(JOBS.values(), key=lambda j: j["created"], reverse=True)
+    return {"jobs": [_job_public(j) for j in jobs]}
+
+
+@app.get("/api/jobs/{job_id}")
+async def get_job(job_id: str):
+    job = JOBS.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="El trabajo no existe (puede haber vencido o el servidor se reinició).")
+    return _job_public(job, with_result=True)
+
+
+@app.delete("/api/jobs/{job_id}")
+async def dismiss_job(job_id: str):
+    job = JOBS.get(job_id)
+    if not job:
+        return {"status": "ok"}
+    if job["status"] in ("queued", "running"):
+        raise HTTPException(status_code=409, detail="El trabajo todavía está corriendo.")
+    JOBS.pop(job_id, None)
+    return {"status": "ok"}
+
+
+# ─── HISTORIAL (SQLite) ──────────────────────────────────────────────────────
+
+class HistoryEntry(BaseModel):
+    url: str
+    platform: Optional[str] = ""
+    title: Optional[str] = ""
+    uploader: Optional[str] = ""
+    duration: Optional[float] = None
+    lang: Optional[str] = ""
+    method: Optional[str] = ""
+    transcript: str = ""
+    raw_transcript: Optional[str] = ""
+    srt: Optional[str] = ""
+    segments: list = []
+    date: Optional[str] = None
+
+
+class HistoryPatch(BaseModel):
+    transcript: Optional[str] = None
+    title: Optional[str] = None
+
+
+class HistoryImport(BaseModel):
+    items: List[dict] = []
+
+
+@app.get("/api/history")
+async def history_list(q: str = "", limit: int = 200, offset: int = 0):
+    return await run_light(hist.list_items, DB_FILE, q, max(1, min(limit, 1000)), max(0, offset))
+
+
+@app.get("/api/history/{item_id}")
+async def history_get(item_id: int):
+    item = await run_light(hist.get, DB_FILE, item_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="La transcripción no existe en el historial.")
+    return item
+
+
+@app.post("/api/history")
+async def history_save(entry: HistoryEntry):
+    try:
+        item_id = await run_light(hist.upsert, DB_FILE, entry.model_dump())
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"id": item_id}
+
+
+@app.patch("/api/history/{item_id}")
+async def history_update(item_id: int, patch: HistoryPatch):
+    if not await run_light(hist.update, DB_FILE, item_id, patch.transcript, patch.title):
+        raise HTTPException(status_code=404, detail="La transcripción no existe en el historial.")
+    return {"status": "ok"}
+
+
+@app.delete("/api/history/{item_id}")
+async def history_delete(item_id: int):
+    await run_light(hist.delete, DB_FILE, item_id)
+    return {"status": "ok"}
+
+
+@app.delete("/api/history")
+async def history_clear(request: Request):
+    require_admin(request)
+    deleted = await run_light(hist.clear, DB_FILE)
+    return {"status": "ok", "deleted": deleted}
+
+
+@app.post("/api/history/import")
+async def history_import(data: HistoryImport):
+    """Trae el historial viejo que estaba guardado en el navegador."""
+    imported = await run_light(hist.import_items, DB_FILE, data.items[:2000])
+    return {"imported": imported}
+
+
+# ─── VISUALIZADOR: VIDEO LIVIANO, FORMA DE ONDA, TRADUCCIÓN ─────────────────
+
+MEDIA_DIR = os.path.join(BASE_DIR, 'media_cache')
+MEDIA_MAX_BYTES = int(float(os.environ.get('MEDIA_CACHE_MB', '3000')) * 1024 * 1024)
+MEDIA_MAX_AGE = 3 * 24 * 3600
+_MEDIA_ID = re.compile(r"[a-f0-9]{16}")
+_media_locks: dict = {}
+os.makedirs(MEDIA_DIR, exist_ok=True)
+
+
+class MediaRequest(BaseModel):
+    url: str
+    uid: Optional[str] = None
+
+
+def media_id_for(url: str) -> str:
+    import hashlib
+    return hashlib.sha256(sanitize_url(url).encode()).hexdigest()[:16]
+
+
+def _media_file(media_id: str) -> Optional[str]:
+    if not _MEDIA_ID.fullmatch(media_id or ""):
+        return None
+    path = os.path.join(MEDIA_DIR, f"{media_id}.mp4")
+    return path if os.path.exists(path) else None
+
+
+def _prune_media_cache(keep: str = ""):
+    """Borra los videos del visualizador viejos o si la carpeta pasa del límite."""
+    try:
+        files = [os.path.join(MEDIA_DIR, f) for f in os.listdir(MEDIA_DIR)]
+        files = sorted((f for f in files if os.path.isfile(f)), key=os.path.getmtime)
+        now, total = time.time(), sum(os.path.getsize(f) for f in files)
+        for f in files:
+            if f.startswith(os.path.join(MEDIA_DIR, keep)) and keep:
+                continue
+            if now - os.path.getmtime(f) > MEDIA_MAX_AGE or total > MEDIA_MAX_BYTES:
+                total -= os.path.getsize(f)
+                os.remove(f)
+    except OSError as e:
+        logger.debug(f"Limpieza de media_cache: {e}")
+
+
+def _download_preview(url: str, media_id: str, uid: Optional[str]) -> str:
+    """Baja una copia liviana (hasta 360p, MP4) para reproducir en el visualizador. Bloqueante."""
+    final = os.path.join(MEDIA_DIR, f"{media_id}.mp4")
+    tmp_prefix = f"{media_id}.dl"
+
+    def done():
+        return any(f.startswith(tmp_prefix) and not is_partial_download(f) for f in os.listdir(MEDIA_DIR))
+
+    def cleanup():
+        for f in os.listdir(MEDIA_DIR):
+            if f.startswith(tmp_prefix):
+                try:
+                    os.remove(os.path.join(MEDIA_DIR, f))
+                except OSError:
+                    pass
+
+    if host_matches(url, INSTAGRAM_DOMAINS) and instaloader:
+        try:
+            ig = get_instagram_info(url)
+            if ig.get("video_url"):
+                http_download(ig["video_url"], final, {'User-Agent': MOBILE_UA})
+                return final
+        except Exception as e:
+            logger.debug(f"Instaloader falló para el visualizador: {e}")
+
+    def hook(d):
+        total = d.get('total_bytes') or d.get('total_bytes_estimate')
+        if d.get('status') == 'downloading' and total:
+            pct = d.get('downloaded_bytes', 0) / total * 100
+            update_progress(uid, 10 + int(pct * 0.85), f"Preparando el video: {pct:.0f}%")
+
+    fmt = ("b[height<=360][ext=mp4]/bv*[height<=360][ext=mp4]+ba[ext=m4a]/bv*[height<=360]+ba/b[height<=480]/b"
+           if HAS_FFMPEG else "b[height<=480][ext=mp4]/b[ext=mp4]/b")
+    extra = {'format': fmt, 'outtmpl': os.path.join(MEDIA_DIR, f"{tmp_prefix}.%(ext)s"), 'progress_hooks': [hook]}
+    if HAS_FFMPEG:
+        extra['merge_output_format'] = 'mp4'
+    ytdlp_download(url, extra, done, cleanup=cleanup)
+    produced = next(os.path.join(MEDIA_DIR, f) for f in os.listdir(MEDIA_DIR)
+                    if f.startswith(tmp_prefix) and not is_partial_download(f))
+    if not produced.endswith(".mp4") and HAS_FFMPEG:
+        media.run_ffmpeg(['-i', produced, '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '28', '-c:a', 'aac',
+                          '-movflags', '+faststart', final])
+        os.remove(produced)
+    else:
+        os.replace(produced, final)
+    return final
+
+
+@app.post("/api/media/prepare")
+async def media_prepare(req: MediaRequest):
+    """Deja listo un video liviano para el visualizador y devuelve su id."""
+    url = await resolve_url(req.url)
+    media_id = media_id_for(url)
+    if _media_file(media_id):
+        os.utime(os.path.join(MEDIA_DIR, f"{media_id}.mp4"))
+        return {"id": media_id, "url": f"/api/media/{media_id}"}
+    lock = _media_locks.setdefault(media_id, asyncio.Lock())
+    async with lock:
+        if not _media_file(media_id):
+            update_progress(req.uid, 5, "Preparando el video para verlo...")
+            await run_light(_prune_media_cache, media_id)
+            try:
+                await run_blocking(_download_preview, url, media_id, req.uid)
+            except Exception as e:
+                logger.warning(f"No se pudo preparar el video del visualizador: {e}")
+                raise HTTPException(status_code=500, detail=friendly_error(e))
+    update_progress(req.uid, 100, "Video listo")
+    return {"id": media_id, "url": f"/api/media/{media_id}"}
+
+
+def parse_range(header: str, size: int):
+    """'bytes=100-199' → (100, 199). None si no hay rango válido."""
+    m = re.fullmatch(r"bytes=(\d*)-(\d*)", (header or "").strip())
+    if not m or (not m.group(1) and not m.group(2)):
+        return None
+    if m.group(1):
+        start = int(m.group(1))
+        end = min(int(m.group(2)), size - 1) if m.group(2) else size - 1
+    else:  # sufijo: los últimos N bytes
+        start, end = max(0, size - int(m.group(2))), size - 1
+    if start > end or start >= size:
+        return None
+    return start, end
+
+
+@app.get("/api/media/{media_id}")
+async def media_serve(media_id: str, request: Request):
+    """Video del visualizador, con soporte de Range (para poder saltar a cualquier minuto)."""
+    path = _media_file(media_id)
+    if not path:
+        raise HTTPException(status_code=404, detail="El video ya no está disponible: preparalo de nuevo.")
+    size = os.path.getsize(path)
+    rng = parse_range(request.headers.get("range", ""), size)
+    if not rng:
+        return FileResponse(path, media_type="video/mp4", headers={"Accept-Ranges": "bytes"})
+    start, end = rng
+
+    def chunks():
+        with open(path, "rb") as f:
+            f.seek(start)
+            left = end - start + 1
+            while left > 0:
+                data = f.read(min(1024 * 1024, left))
+                if not data:
+                    break
+                left -= len(data)
+                yield data
+    return StreamingResponse(chunks(), status_code=206, media_type="video/mp4", headers={
+        "Content-Range": f"bytes {start}-{end}/{size}", "Accept-Ranges": "bytes",
+        "Content-Length": str(end - start + 1)})
+
+
+def compute_peaks(path: str, buckets: int = 1600) -> list:
+    """Forma de onda: el volumen máximo de cada tramo, de 0 a 100. Bloqueante."""
+    from array import array
+    cmd = [FFMPEG_BIN or 'ffmpeg', '-hide_banner', '-loglevel', 'error', '-i', path, '-vn', '-ac', '1',
+           '-ar', '1000', '-f', 's16le', '-']
+    res = subprocess.run(cmd, capture_output=True, timeout=600)
+    if res.returncode != 0:
+        raise RuntimeError(f"FFmpeg falló: {res.stderr.decode(errors='replace')[-300:]}")
+    samples = array('h')
+    samples.frombytes(res.stdout[:len(res.stdout) // 2 * 2])
+    if not samples:
+        return []
+    step = max(1, len(samples) // buckets)
+    peaks = []
+    for i in range(0, len(samples), step):
+        chunk = samples[i:i + step]
+        peaks.append(max(max(chunk), -min(chunk)))
+    top = max(peaks) or 1
+    return [round(p * 100 / top) for p in peaks]
+
+
+@app.get("/api/media/{media_id}/peaks")
+async def media_peaks(media_id: str):
+    path = _media_file(media_id)
+    if not path:
+        raise HTTPException(status_code=404, detail="El video ya no está disponible.")
+    if not HAS_FFMPEG:
+        return {"peaks": []}
+    cache = path + ".peaks.json"
+    if os.path.exists(cache):
+        with open(cache, encoding="utf-8") as f:
+            return {"peaks": json.load(f)}
+    try:
+        peaks = await run_blocking(compute_peaks, path)
+    except Exception as e:
+        logger.warning(f"No se pudo calcular la forma de onda: {e}")
+        return {"peaks": []}
+    with open(cache, "w", encoding="utf-8") as f:
+        json.dump(peaks, f)
+    return {"peaks": peaks}
+
+
+class TranslateSegmentsRequest(BaseModel):
+    texts: List[str]
+    target: str = "es"
+
+
+@app.post("/api/translate-segments")
+async def translate_segments(req: TranslateSegmentsRequest):
+    """Traduce frase por frase (mantiene la relación con los tiempos para la vista bilingüe)."""
+    if req.target not in ("es", "en", "pt", "fr", "it", "de"):
+        raise HTTPException(status_code=400, detail="Idioma no soportado.")
+    if len(req.texts) > 6000:
+        raise HTTPException(status_code=400, detail="Demasiados segmentos para traducir de una vez.")
+    try:
+        texts = await run_blocking(ai.translate_texts, list(req.texts), req.target)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=friendly_error(e))
+    return {"texts": texts}
+
+
+# ─── RECORTES: SUBTÍTULOS QUEMADOS Y FORMATO VERTICAL ───────────────────────
+
+VERTICAL_FILTER = ("crop='min(iw,ih*9/16)':ih,scale=1080:1920:force_original_aspect_ratio=decrease,"
+                   "pad=1080:1920:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1")
+SUBTITLE_STYLE = ("FontName=Arial,FontSize={size},PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,"
+                  "BorderStyle=1,Outline=2,Shadow=0,MarginV={margin},Alignment=2")
+
+
+def postprocess_clip(path: str, segments: list, clip_start: float, clip_end: float,
+                     burn_subs: bool, vertical: bool) -> str:
+    """
+    Quema los subtítulos del tramo y/o lo pasa a vertical 9:16 (para redes). Bloqueante.
+    Devuelve la ruta del archivo nuevo (borra el original).
+    """
+    if not (burn_subs or vertical):
+        return path
+    if not HAS_FFMPEG:
+        raise RuntimeError("Hace falta FFmpeg para quemar subtítulos o pasar a vertical.")
+    filters = []
+    with tempfile.TemporaryDirectory() as tmp:
+        if vertical:
+            filters.append(VERTICAL_FILTER)
+        if burn_subs:
+            subs = clip_segments(segments or [], clip_start, clip_end)
+            if subs:
+                with open(os.path.join(tmp, "subs.srt"), "w", encoding="utf-8") as f:
+                    f.write(generate_srt_from_segments(subs))
+                # Medidas sobre la resolución interna de los subtítulos (288 de alto), no en píxeles:
+                # margen 40 ≈ 14 % desde abajo (deja lugar a la interfaz de TikTok / Reels).
+                style = SUBTITLE_STYLE.format(size=13 if vertical else 18, margin=40 if vertical else 16)
+                # Ruta relativa (cwd=tmp): las rutas de Windows rompen la sintaxis de filtros de FFmpeg
+                filters.append(f"subtitles=subs.srt:charenc=UTF-8:force_style='{style}'")
+        if not filters:
+            return path
+        root, _ = os.path.splitext(path)
+        out = f"{root}_final.mp4"
+        cmd = [FFMPEG_BIN or 'ffmpeg', '-hide_banner', '-loglevel', 'error', '-y', '-i', path,
+               '-vf', ",".join(filters), *TRIM_FFMPEG_ARGS, out]
+        res = subprocess.run(cmd, capture_output=True, text=True, cwd=tmp, timeout=3600)
+        if res.returncode != 0:
+            raise RuntimeError(f"FFmpeg falló: {res.stderr.strip()[-400:]}")
+    os.remove(path)
+    return out
+
+
+@app.post("/api/clip-file")
+async def clip_uploaded_file(
+    background_tasks: BackgroundTasks,
+    file: UploadFile = File(...),
+    start: float = Form(...),
+    end: float = Form(...),
+    burn_subs: bool = Form(default=False),
+    vertical: bool = Form(default=False),
+    segments: str = Form(default="[]"),
+):
+    """Recorta un video subido desde la PC (el visualizador de archivos propios)."""
+    if not HAS_FFMPEG:
+        raise HTTPException(status_code=400, detail="Para recortar hace falta FFmpeg.")
+    if end <= start or start < 0:
+        raise HTTPException(status_code=400, detail="Rango de tiempo inválido.")
+    ext = os.path.splitext(file.filename or '')[1].lower()
+    if ext not in ALLOWED_AUDIO_EXTENSIONS:
+        raise HTTPException(status_code=400, detail=f"Formato no soportado: '{ext}'.")
+    try:
+        segs = json.loads(segments or "[]")
+    except ValueError:
+        segs = []
+    file_uid = uuid.uuid4().hex
+    src = os.path.join(DOWNLOAD_FOLDER, f"clipsrc_{file_uid}{ext}")
+    is_video = ext in VIDEO_EXTS
+    out = os.path.join(DOWNLOAD_FOLDER, f"clip_{file_uid}.{'mp4' if is_video else 'mp3'}")
+    _remove_later(background_tasks, src, out)
+    await save_upload(file, src, MAX_UPLOAD_MB)
+    codec = TRIM_FFMPEG_ARGS if is_video else ['-vn', '-c:a', 'libmp3lame', '-q:a', '2']
+    try:
+        await run_blocking(media.run_ffmpeg, ['-ss', str(start), '-to', str(end), '-i', src, *codec, out])
+        final = out
+        if is_video and (burn_subs or vertical):
+            final = await run_blocking(postprocess_clip, out, segs, start, end, burn_subs, vertical)
+            _remove_later(background_tasks, final)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=friendly_error(e))
+    base = safe_filename(os.path.splitext(file.filename or 'clip')[0], 40)
+    name = f"{base}_{int(start)}s-{int(end)}s{'_vertical' if vertical else ''}.{'mp4' if is_video else 'mp3'}"
+    return FileResponse(final, filename=name)
+
+
 # ─── ENDPOINTS: MANTENIMIENTO ────────────────────────────────────────────────
 
 def _pip_install_requirements() -> tuple:
@@ -1197,7 +1750,8 @@ GITHUB_REPO = os.environ.get('CLIPADSK_REPO', 'psherrera/clipadsk')
 GITHUB_BRANCH = os.environ.get('CLIPADSK_BRANCH', 'main')
 # Nunca se pisan al actualizar (datos y configuración del usuario)
 UPDATE_SKIP = {'.env', 'cookies.txt', 'cookies_ig.txt', '.git'}
-UPDATE_SKIP_DIRS = {os.path.join('backend', 'venv'), os.path.join('backend', 'downloads'), os.path.join('backend', 'model')}
+UPDATE_SKIP_DIRS = {os.path.join('backend', 'venv'), os.path.join('backend', 'downloads'), os.path.join('backend', 'model'),
+                    os.path.join('backend', 'media_cache')}
 
 
 def _update_from_zip(root: str) -> tuple:
@@ -1351,6 +1905,8 @@ async def reset_system(request: Request):
     def reset():
         shutil.rmtree(DOWNLOAD_FOLDER, ignore_errors=True)
         os.makedirs(DOWNLOAD_FOLDER, exist_ok=True)
+        shutil.rmtree(MEDIA_DIR, ignore_errors=True)   # copias livianas del visualizador
+        os.makedirs(MEDIA_DIR, exist_ok=True)
         with db_connect() as conn:
             conn.execute("DELETE FROM transcripts")
     try:

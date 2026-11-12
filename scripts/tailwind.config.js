@@ -4,7 +4,7 @@
         // bien en los dos temas sin reescribir cada plantilla.
         const v = (name) => `rgb(var(--${name}) / <alpha-value>)`;
         module.exports = {
-            content: ['./frontend/index.html', './frontend/setup.html', './frontend/main.js'],
+            content: ['./frontend/index.html', './frontend/setup.html', './frontend/main.js', './frontend/v3.js'],
             plugins: [require('@tailwindcss/forms'), require('@tailwindcss/container-queries')],
             darkMode: "class",
             theme: {

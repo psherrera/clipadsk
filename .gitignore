@@ -80,3 +80,4 @@ backend/test_*.html
 clipadsk_datos/
 backend/grabaciones/
 _para_borrar/
+*.lnk

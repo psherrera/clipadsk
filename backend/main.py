@@ -302,6 +302,22 @@ def find_cookie_file(url: str) -> Optional[str]:
     return next((p for p in candidates if p and os.path.exists(p)), None)
 
 
+def instagram_session_ok() -> bool:
+    """¿Hay cookies de Instagram con sesión iniciada (sessionid) y sin vencer?"""
+    path = find_cookie_file("https://www.instagram.com/")
+    if not path:
+        return False
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                parts = line.rstrip("\n").split("\t")
+                if len(parts) >= 7 and "instagram.com" in parts[0] and parts[5] == "sessionid" and parts[6]:
+                    return not parts[4].isdigit() or int(parts[4]) == 0 or int(parts[4]) > time.time()
+    except OSError:
+        pass
+    return False
+
+
 def get_robust_opts(target_url: str, extra: Optional[dict] = None) -> dict:
     """Opciones base de yt-dlp: cookies, user-agent y headers por plataforma."""
     opts = {
@@ -766,6 +782,11 @@ async def get_video_info(req: VideoRequest):
             data = await run_blocking(get_carousel, url, False)
             if data:
                 return carousel_info_response(data)
+            if not instagram_session_ok():
+                raise HTTPException(status_code=400, detail=(
+                    "Instagram no dejó ver esta publicación porque Clipadsk no tiene tu sesión de Instagram "
+                    "(falta o venció). Entrá a instagram.com con tu cuenta, exportá las cookies de nuevo y "
+                    "guardalas como cookies_ig.txt en la carpeta de Clipadsk. Después reiniciá Clipadsk."))
         raise HTTPException(status_code=400, detail=friendly_error(last_error))
 
     # Carrusel con varios videos: yt-dlp lo devuelve como lista → galería
@@ -2474,10 +2495,13 @@ if os.path.exists(FRONTEND_DIR):
     FRONTEND_ROOT = Path(FRONTEND_DIR).resolve()
     INDEX_HTML = FRONTEND_ROOT / 'index.html'
 
+    # Sin esto el navegador puede seguir mostrando la interfaz vieja durante días tras actualizar
+    NO_CACHE = {"Cache-Control": "no-cache"}
+
     @app.head("/", include_in_schema=False)
     @app.get("/", include_in_schema=False)
     async def serve_index():
-        return FileResponse(INDEX_HTML)
+        return FileResponse(INDEX_HTML, headers=NO_CACHE)
 
     @app.get("/{path:path}", include_in_schema=False)
     async def serve_static_or_index(path: str):
@@ -2486,10 +2510,10 @@ if os.path.exists(FRONTEND_DIR):
         try:
             resolved = (FRONTEND_ROOT / path).resolve()
             if FRONTEND_ROOT in resolved.parents and resolved.is_file():
-                return FileResponse(resolved)
+                return FileResponse(resolved, headers=NO_CACHE)
         except Exception as e:
             logger.debug(f"Error resolviendo ruta estática: {e}")
-        return FileResponse(INDEX_HTML)  # rutas de la SPA
+        return FileResponse(INDEX_HTML, headers=NO_CACHE)  # rutas de la SPA
 else:
     logger.warning(f"No se encontró la carpeta frontend en {FRONTEND_DIR}")
 

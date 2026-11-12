@@ -79,3 +79,4 @@ backend/test_*.html
 *.webm
 clipadsk_datos/
 backend/grabaciones/
+_para_borrar/

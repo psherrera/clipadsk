@@ -1980,12 +1980,78 @@
         mountRawToggle({ text: d.text, raw: d.raw, segments: d.segments });
     });
 
-    document.addEventListener('clipa:tab', () => { viewer.unmount(); gallery.unmount(); motor.clear(); });
-    document.addEventListener('clipa:videoinfo', (e) => { showEstimate(e.detail || {}); gallery.mount(e.detail || {}); motor.onVideoInfo(e.detail || {}); });
+    // ─── COPY DE LA PUBLICACIÓN ──────────────────────────────────────────────
+    // Muestra el texto que acompaña el post (Instagram, TikTok, YouTube…) y lo analiza con IA sin transcribir.
+    const copyBox = (() => {
+        function unmount() { document.getElementById('v3-copy')?.remove(); }
+
+        function mount(info) {
+            unmount();
+            const text = (info?.copy || '').trim();
+            if (text.length < 10 || info.playlist) return;
+            const body = document.querySelector('#video-info-card .p-6');
+            if (!body) return;
+            const box = document.createElement('div');
+            box.id = 'v3-copy';
+            box.className = 'v3-copy';
+            box.innerHTML = `
+                <div class="v3-carousel-head">
+                    <div><strong>Copy de la publicación</strong> <span class="v3-hint">· ${text.length} caracteres</span></div>
+                    <button type="button" class="v3-link" data-act="copy-text">Copiar</button>
+                </div>
+                <div class="v3-copy-text">${esc(text)}</div>
+                <button type="button" class="v3-link v3-copy-more hidden" data-act="more">Ver todo</button>
+                <button type="button" class="btn-soft w-full" data-act="analyze">
+                    <span class="material-symbols-outlined">edit_note</span> Analizar el copy
+                </button>
+                <div class="v3-copy-out hidden"></div>`;
+            const anchor = document.getElementById('v3-carousel') || body.firstElementChild;
+            anchor ? anchor.insertAdjacentElement('afterend', box) : body.prepend(box);
+            const txt = box.querySelector('.v3-copy-text');
+            requestAnimationFrame(() => { if (txt.scrollHeight > txt.clientHeight + 4) box.querySelector('.v3-copy-more').classList.remove('hidden'); });
+            box.addEventListener('click', async (e) => {
+                const btn = e.target.closest('button[data-act]');
+                if (!btn) return;
+                if (btn.dataset.act === 'more') { txt.classList.toggle('open'); btn.textContent = txt.classList.contains('open') ? 'Ver menos' : 'Ver todo'; }
+                else if (btn.dataset.act === 'copy-text') { navigator.clipboard?.writeText(text); toast('Copy copiado', 'success'); }
+                else if (btn.dataset.act === 'analyze') analyze(text, btn, box.querySelector('.v3-copy-out'));
+            });
+        }
+
+        async function analyze(text, btn, out) {
+            btn.disabled = true;
+            out.classList.remove('hidden');
+            out.innerHTML = '<p class="v3-hint">Analizando el copy con IA…</p>';
+            try {
+                const data = await api('/analyze', { method: 'POST', body: {
+                    mode: 'copy', copy: text, transcript: window.Clipa?.getTranscript?.() || '',
+                    groq_api_key: localStorage.getItem('clipadsk_groq_api_key') || undefined } });
+                const html = window.Clipa?.formatAI ? window.Clipa.formatAI(data.result) : esc(data.result).replace(/\n/g, '<br>');
+                out.innerHTML = `<div class="v3-carousel-head"><strong>Análisis del copy</strong>
+                    <button type="button" class="v3-link" data-act="copy-result">Copiar</button></div>
+                    <div class="v3-copy-result">${html}</div>`;
+                out.querySelector('[data-act="copy-result"]').onclick = (ev) => {
+                    ev.stopPropagation();
+                    navigator.clipboard?.writeText(out.querySelector('.v3-copy-result').innerText);
+                    toast('Análisis copiado', 'success');
+                };
+            } catch (err) {
+                out.innerHTML = `<p class="v3-copy-err">${esc(err.message || 'No se pudo analizar el copy')}</p>`;
+            } finally {
+                btn.disabled = false;
+            }
+        }
+
+        return { mount, unmount };
+    })();
+
+    document.addEventListener('clipa:tab', () => { viewer.unmount(); gallery.unmount(); motor.clear(); copyBox.unmount(); });
+    document.addEventListener('clipa:videoinfo', (e) => { showEstimate(e.detail || {}); gallery.mount(e.detail || {}); motor.onVideoInfo(e.detail || {}); copyBox.mount(e.detail || {}); });
 
     window.ClipaV3 = {
         gallery,
         motor,
+        copyBox,
         version: '3.0.0', api, history, jobs, viewer, confirm: confirmDialog, prompt: promptDialog, dialog,
         formatQuote, linkAt, fmtTime, parseTime, youtubeId, estimateTranscription,
     };

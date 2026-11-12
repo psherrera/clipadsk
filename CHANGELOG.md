@@ -1,5 +1,12 @@
 # Registro de cambios
 
+## 3.3.0 — 2026-11-12
+
+- **Análisis del copy**: al analizar un enlace (Instagram, TikTok, YouTube…) aparece el texto completo de la publicación con un botón "Analizar el copy": mensaje central, tono y estrategia, recursos (gancho, hashtags, menciones, llamados a la acción), afirmaciones para verificar, lo que no dice y cómo usarlo en una nota. No hace falta transcribir; si ya hay transcripción o texto de las imágenes, se usa como contexto. También está como botón "Copy" en las herramientas periodísticas.
+- **Cookies protegidas**: yt-dlp y gallery-dl trabajan con una copia del archivo de cookies; antes podían borrar la sesión de Instagram del archivo original.
+- La interfaz se sirve sin caché (no queda una versión vieja después de actualizar).
+- Acceso directo al Escritorio con `CREAR_ACCESO_DIRECTO.bat`; carpeta ordenada.
+
 ## 3.2.0 — noviembre 2026
 
 ### Nuevo

@@ -309,6 +309,22 @@ Respondé directamente con los 3 ángulos, sin introducción.
 TRANSCRIPCIÓN:
 {transcript}""",
 
+    "copy": """Sos un analista de comunicación política e imagen pública que trabaja para una redacción.
+Analizá el COPY (el texto que acompaña la publicación en redes). Si hay contenido de la publicación
+(transcripción del video o texto de las imágenes), usalo solo como contexto para ver si el copy lo refleja.
+
+Respondé con estas secciones, en este orden y con estos títulos en negrita:
+**Mensaje central**: qué quiere instalar la publicación, en 1 o 2 oraciones.
+**Tono y estrategia**: registro (emotivo, confrontativo, institucional, didáctico…), a quién le habla y qué busca (adhesión, movilizar, defenderse, atacar, vender…).
+**Recursos**: gancho de la primera línea, emojis, mayúsculas, preguntas, llamados a la acción, hashtags y menciones (listalos).
+**Afirmaciones para verificar**: cada dato, cifra o afirmación de hecho que un periodista debería chequear. Si no hay, decilo.
+**Lo que no dice**: omisiones, ambigüedades o diferencias entre el copy y el contenido de la publicación.
+**Para la nota**: 1 o 2 líneas sobre cómo puede usarse esta publicación en una cobertura.
+
+No inventes datos que no estén en el texto. Respondé directamente, sin introducción.
+
+{transcript}""",
+
     "diarization": """Sos un asistente para periodistas experto en análisis de diálogos.
 Dado el siguiente texto transcripto, tu tarea es analizar la conversación y dividirla en un diálogo estructurado, identificando a los diferentes hablantes.
 
@@ -360,6 +376,17 @@ def _extract_speakers(text: str) -> list:
     return list(dict.fromkeys(re.findall(r'^\*\*([^*\n]{1,40})\*\*\s*:', text, flags=re.MULTILINE)))
 
 
+def copy_source(copy_text: str, content: str = "", max_content: int = 12000) -> str:
+    """Arma el texto para el modo copy: el copy completo y, si hay, el contenido como contexto."""
+    out = f"COPY DE LA PUBLICACIÓN:\n{copy_text.strip()}"
+    content = (content or "").strip()
+    if content:
+        if len(content) > max_content:
+            content = content[:max_content] + " […]"
+        out += f"\n\nCONTENIDO DE LA PUBLICACIÓN (transcripción o texto de las imágenes):\n{content}"
+    return out
+
+
 def analyze_transcript(client, transcript: str, mode: str) -> dict:
     """
     Corre una herramienta periodística sobre la transcripción COMPLETA.
@@ -384,7 +411,7 @@ def analyze_transcript(client, transcript: str, mode: str) -> dict:
             outputs.append(out)
         return {"result": "\n\n".join(outputs), "model_used": model_used, "parts": n}
 
-    if n == 1:
+    if n == 1 or mode == "copy":
         source = transcript
     else:
         notes = []

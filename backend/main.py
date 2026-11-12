@@ -77,7 +77,7 @@ except ImportError:  # pragma: no cover
     TTLCache = None
 
 
-APP_VERSION = "3.2.0"
+APP_VERSION = "3.3.0"
 @contextlib.asynccontextmanager
 async def lifespan(_app):
     task = asyncio.create_task(watch_loop())
@@ -642,6 +642,7 @@ def carousel_info_response(data: dict) -> dict:
     return {
         'title': title[:100] + ('...' if len(title) > 100 else ''), 'thumbnail': thumb, 'max_res_thumbnail': thumb,
         'duration': None, 'uploader': data.get('username') or 'Instagram', 'description': data.get('description') or '',
+        'copy': (data.get('description') or '').strip()[:8000],
         'formats': [{'format_id': 'carousel_images', 'ext': 'zip', 'resolution': 'Carrusel (ZIP)', 'filesize': None,
                      'label': f"Todo el carrusel: {n} {kind} (.zip)"}],
         'carousel': [{'index': k, 'thumb': proxied_thumbnail(i.get('thumb')), 'is_video': i['is_video'], 'ext': i['ext']}
@@ -688,8 +689,9 @@ class ChatRequest(BaseModel):
 
 class AnalyzeRequest(BaseModel):
     transcript: str
-    mode: str  # summary | data | angle | diarization
+    mode: str  # summary | data | angle | diarization | copy
     groq_api_key: Optional[str] = None
+    copy: Optional[str] = None  # texto de la publicación (modo copy)
 
 
 class QuotesRequest(BaseModel):
@@ -787,6 +789,7 @@ async def get_video_info(req: VideoRequest):
             thumb = proxied_thumbnail(ig.get('thumbnail'))
             return {'title': ig['title'], 'thumbnail': thumb, 'max_res_thumbnail': thumb, 'duration': ig.get('duration'),
                     'uploader': ig.get('uploader') or 'Instagram', 'description': ig['title'], 'formats': formats,
+                    'copy': (ig.get('caption') or '').strip()[:8000],
                     'has_ffmpeg': HAS_FFMPEG, 'has_subtitles': False}
         except Exception as e:
             logger.debug(f"Instaloader falló, intentando con yt-dlp: {e}")
@@ -837,6 +840,7 @@ async def get_video_info(req: VideoRequest):
         'duration': info.get('duration'),
         'uploader': info.get('uploader') or "Desconocido",
         'description': (info.get('description') or 'Sin descripción')[:200] + '...',
+        'copy': (info.get('description') or '').strip()[:8000],
         'formats': formats,
         'has_ffmpeg': HAS_FFMPEG,
         'has_subtitles': bool(info.get('subtitles') or info.get('automatic_captions')),
@@ -1356,14 +1360,20 @@ async def chat_with_transcript(req: ChatRequest):
 
 @app.post("/api/analyze")
 async def analyze_transcript(req: AnalyzeRequest):
-    """Modos: summary (resumen), data (datos duros), angle (ángulos), diarization (hablantes)."""
+    """Modos: summary (resumen), data (datos duros), angle (ángulos), diarization (hablantes), copy (texto de la publicación)."""
     client = require_groq(req.groq_api_key)
     if req.mode not in ai.JOURNALIST_PROMPTS:
         raise HTTPException(status_code=400, detail=f"Modo inválido. Opciones: {list(ai.JOURNALIST_PROMPTS)}")
-    if len(req.transcript.strip()) < 50:
+    text = req.transcript or ""
+    if req.mode == "copy":
+        copy_text = (req.copy or "").strip()
+        if len(copy_text) < 10:
+            raise HTTPException(status_code=400, detail="Esta publicación no tiene copy (texto) para analizar.")
+        text = ai.copy_source(copy_text, text)
+    elif len(text.strip()) < 50:
         raise HTTPException(status_code=400, detail="La transcripción es demasiado corta para analizar.")
     try:
-        out = await run_blocking(ai.analyze_transcript, client, req.transcript, req.mode)
+        out = await run_blocking(ai.analyze_transcript, client, text, req.mode)
         return {"result": out["result"], "mode": req.mode, "model_used": out["model_used"], "parts": out["parts"]}
     except Exception as e:
         raise ai_error(e)

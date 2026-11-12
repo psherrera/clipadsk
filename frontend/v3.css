@@ -308,3 +308,14 @@ html.dark .v3-err { color: #f87171; }
 .v3-comments-bar input { min-width: 0; }
 .v3-comments-bar .icon-btn-sm { flex-shrink: 0; }
 .v3-st.v3-warn { color: #d97706; }
+
+/* Copy de la publicación */
+.v3-copy { display: flex; flex-direction: column; gap: 8px; margin-top: 12px; padding: 12px; border-radius: 14px;
+  background: rgba(56, 189, 248, .06); border: 1px solid rgba(56, 189, 248, .18); }
+.v3-copy-text { font-size: 13px; line-height: 1.5; color: var(--ink); white-space: pre-wrap; word-break: break-word;
+  max-height: 6.2em; overflow: hidden; }
+.v3-copy-text.open { max-height: none; }
+.v3-copy-more { align-self: flex-start; }
+.v3-copy-out { display: flex; flex-direction: column; gap: 6px; padding-top: 8px; border-top: 1px solid rgba(255,255,255,.06); }
+.v3-copy-result { font-size: 13px; line-height: 1.55; }
+.v3-copy-err { font-size: 13px; color: #f87171; }

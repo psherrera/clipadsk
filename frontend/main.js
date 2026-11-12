@@ -1737,7 +1737,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 <h5 class="font-bold text-white text-sm">Herramientas periodísticas</h5>
                 <span class="ml-auto text-[10px] font-bold text-slate-600 uppercase tracking-widest">IA</span>
             </div>
-            <div class="grid grid-cols-2 sm:grid-cols-5 gap-2 mb-4">
+            <div class="grid grid-cols-3 sm:grid-cols-6 gap-2 mb-4">
                 <button data-tool="summary" data-prefix="${prefix}" class="j-tool-btn group bg-primary/10 hover:bg-primary/25 border border-primary/20 hover:border-primary/40 py-3.5 px-3 rounded-xl text-slate-200 text-sm font-bold flex flex-col items-center gap-1.5 transition-all active:scale-95">
                     <span class="material-symbols-outlined text-xl text-primary group-hover:scale-110 transition-transform">summarize</span>
                     <span>Resumen</span>
@@ -1758,6 +1758,10 @@ document.addEventListener('DOMContentLoaded', () => {
                     <span class="material-symbols-outlined text-xl text-purple-400 group-hover:scale-110 transition-transform">group</span>
                     <span>Hablantes</span>
                 </button>
+                <button data-tool="copy" data-prefix="${prefix}" title="Analiza el texto que acompaña la publicación" class="j-tool-btn group bg-sky-500/10 hover:bg-sky-500/20 border border-sky-500/20 hover:border-sky-500/40 py-3.5 px-3 rounded-xl text-slate-200 text-sm font-bold flex flex-col items-center gap-1.5 transition-all active:scale-95">
+                    <span class="material-symbols-outlined text-xl text-sky-400 group-hover:scale-110 transition-transform">edit_note</span>
+                    <span>Copy</span>
+                </button>
             </div>
             <div id="${prefix}-ai-output" class="hidden mt-2 bg-black/30 rounded-2xl p-5 border border-white/5 fade-in"></div>
         </div>`;
@@ -1772,7 +1776,10 @@ document.addEventListener('DOMContentLoaded', () => {
         const prefix = btn.dataset.prefix;
         if (!mode || !prefix) return;
 
-        if (!currentTranscript || currentTranscript.length < 50) {
+        const postCopy = (lastVideoInfo?.copy || '').trim();
+        if (mode === 'copy') {
+            if (postCopy.length < 10) { showToast('Esta publicación no tiene copy (texto) para analizar', 'error'); return; }
+        } else if (!currentTranscript || currentTranscript.length < 50) {
             showToast('Primero transcribí un audio o video', 'error'); return;
         }
 
@@ -1791,6 +1798,7 @@ document.addEventListener('DOMContentLoaded', () => {
             data    : { label: 'Datos duros',        icon: 'data_object',  color: 'text-orange-400' },
             angle   : { label: 'Ángulos de nota',    icon: 'lightbulb',    color: 'text-emerald-400' },
             diarization: { label: 'Identificación de hablantes', icon: 'group', color: 'text-purple-400' },
+            copy    : { label: 'Análisis del copy',  icon: 'edit_note',    color: 'text-sky-400' },
         }[mode];
         if (!cfg) return;
 
@@ -1804,7 +1812,8 @@ document.addEventListener('DOMContentLoaded', () => {
             <p class="text-slate-500 text-xs animate-pulse">Analizando con IA...</p>`;
 
         try {
-            const reqBody = { transcript: currentTranscript, mode, groq_api_key: localStorage.getItem(GROQ_KEY_STORE) || undefined };
+            const reqBody = { transcript: currentTranscript || '', mode, groq_api_key: localStorage.getItem(GROQ_KEY_STORE) || undefined };
+            if (mode === 'copy') reqBody.copy = postCopy;
             const r    = await fetch(`${API_BASE}/analyze`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(reqBody) });
             const data = await r.json();
             if (!r.ok) throw new Error(data.detail || 'Error en el analisis');
@@ -2434,6 +2443,8 @@ document.addEventListener('DOMContentLoaded', () => {
         openHistory: (id) => window._hist.load(id),
         processAudioFile, processVideoFile,
         formatText: (text, segments) => formatCleanTextWithTimestamps(text, segments),
+        formatAI: (text) => formatAIResponse(text),
+        getTranscript: () => currentTranscript || '',
         getMeta: () => ({
             title: (titleEl?.textContent || '').trim(),
             uploader: (uploaderEl?.textContent || '').trim(),

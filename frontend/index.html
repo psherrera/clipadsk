@@ -4,7 +4,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Clipadsk 3.3 - Transcriptor para Periodistas</title>
+    <title>Clipadsk 3.4 - Transcriptor para Periodistas</title>
 
     <!-- Tema: se aplica antes de pintar para evitar parpadeo -->
     <script>
@@ -21,13 +21,14 @@
 
     <link rel="manifest" href="manifest.json">
     <meta name="theme-color" content="#2a1566">
-    <link rel="apple-touch-icon" href="icon.svg">
+    <link rel="apple-touch-icon" href="icon-192.png">
+    <link rel="icon" type="image/png" sizes="192x192" href="icon-192.png">
 
-    <link rel="stylesheet" href="style.css?v=3.3">
+    <link rel="stylesheet" href="style.css?v=3.4">
     <!-- Tailwind compilado (después de style.css, igual que antes con el CDN) -->
-    <link rel="stylesheet" href="vendor/tailwind.css?v=3.3">
+    <link rel="stylesheet" href="vendor/tailwind.css?v=3.4">
     <!-- Componentes de la versión 3 (visualizador, trabajos, diálogos) -->
-    <link rel="stylesheet" href="v3.css?v=3.3">
+    <link rel="stylesheet" href="v3.css?v=3.4">
     <!-- JSZip: crear archivos .zip en el navegador sin backend -->
     <script src="vendor/jszip.min.js"></script>
 </head>
@@ -40,7 +41,7 @@
             <img src="logo.png" alt="" class="sidebar-logo">
             <div>
                 <p class="sidebar-title">Clipadsk</p>
-                <p class="sidebar-version">versión 3.3</p>
+                <p class="sidebar-version">versión 3.4</p>
             </div>
             <button id="sidebar-close-btn" class="sidebar-close" aria-label="Cerrar menú">
                 <span class="material-symbols-outlined">close</span>
@@ -311,7 +312,9 @@
                             <div class="flex gap-2">
                                 <input type="password" id="groq-api-key-input" placeholder="gsk_..." class="field flex-1">
                                 <button id="save-api-key-btn" class="btn-primary">Guardar</button>
+                                <button id="test-api-key-btn" class="btn-ghost" title="Comprueba con Groq que la key funcione">Probar</button>
                             </div>
+                            <p id="api-key-status" class="text-xs hidden"></p>
                         </div>
 
                         <div class="glass card space-y-3">
@@ -483,6 +486,9 @@
                                 <button id="edit-transcript-btn" class="hidden bg-white/5 hover:bg-white/10 border border-white/10 text-slate-300 px-4 py-2 rounded-lg text-xs font-bold transition-all flex items-center gap-2" title="Editar transcripción">
                                     <span class="material-symbols-outlined text-sm">edit</span> EDITAR
                                 </button>
+                                <button id="replace-transcript-btn" class="hidden bg-white/5 hover:bg-white/10 border border-white/10 text-slate-300 px-4 py-2 rounded-lg text-xs font-bold transition-all flex items-center gap-2" title="Buscar una palabra y cambiarla en toda la transcripción">
+                                    <span class="material-symbols-outlined text-sm">find_replace</span> REEMPLAZAR
+                                </button>
                                 <button id="download-docx-btn" class="hidden chip-btn chip-blue"><span class="material-symbols-outlined text-sm">description</span> DOCX</button>
                                 <button id="download-srt-btn" class="hidden chip-btn chip-green"><span class="material-symbols-outlined text-sm">subtitles</span> SRT</button>
                                 <button id="copy-transcript-btn" class="chip-btn chip-primary"><span class="material-symbols-outlined text-sm">content_copy</span> COPIAR</button>
@@ -514,8 +520,9 @@
     </div>
 
     <!-- v3.js va antes que main.js: define window.ClipaV3, que main.js usa -->
-    <script src="v3.js?v=3.3" defer></script>
-    <script src="main.js?v=3.3" defer></script>
+    <script src="vendor/qrcode.min.js?v=3.4" defer></script>
+    <script src="v3.js?v=3.4" defer></script>
+    <script src="main.js?v=3.4" defer></script>
     <script>
         if ('serviceWorker' in navigator) {
             window.addEventListener('load', () => {

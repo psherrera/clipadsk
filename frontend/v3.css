@@ -319,3 +319,20 @@ html.dark .v3-err { color: #f87171; }
 .v3-copy-out { display: flex; flex-direction: column; gap: 6px; padding-top: 8px; border-top: 1px solid rgba(255,255,255,.06); }
 .v3-copy-result { font-size: 13px; line-height: 1.55; }
 .v3-copy-err { font-size: 13px; color: #f87171; }
+
+/* Glosario (3.4) */
+.v3-glossary { font-family: ui-monospace, Consolas, monospace; font-size: .8rem; line-height: 1.5; resize: vertical; min-height: 7rem; }
+.v3-set-help code { background: rgba(255,255,255,.08); padding: 0 .3em; border-radius: 4px; }
+
+.v3-new-badge { margin-left: auto; background: #10b981; color: #fff; font-size: 10px; font-weight: 700; padding: 2px 8px; border-radius: 999px; text-transform: uppercase; letter-spacing: .05em; }
+
+/* Celular (3.4) */
+.v3-mobile-grid { display: flex; gap: 18px; align-items: center; flex-wrap: wrap; }
+.v3-qr { background: #fff; border-radius: 12px; padding: 6px; }
+.v3-mobile-data p { margin: 0 0 10px; font-size: 13px; color: var(--ink-dim); }
+.v3-mobile-data code, .v3-set-help code { word-break: break-all; }
+.v3-pin { font-size: 22px; letter-spacing: 6px; font-weight: 700; color: var(--ink, #fff); }
+.v3-howto { font-size: 13px; color: var(--ink-dim); }
+.v3-howto summary { cursor: pointer; font-weight: 600; color: var(--ink, #fff); padding: 4px 0; }
+.v3-howto ol { margin: 8px 0 8px 20px; padding: 0; display: grid; gap: 6px; line-height: 1.5; }
+.v3-howto p { margin: 6px 0 0; }

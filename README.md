@@ -180,7 +180,9 @@ clipadsk/
 ## Seguridad
 
 - Por defecto el servidor **solo acepta conexiones desde esta PC** (`127.0.0.1`).
-  Para usarlo desde otras PCs de la red, poné `HOST=0.0.0.0` en `.env` y definí `ADMIN_TOKEN`.
+  Para usarlo desde el celular u otras PCs de la red, hacé doble clic en `ACTIVAR_CELULAR.bat`: pone `HOST=0.0.0.0`, crea un `ACCESS_PIN`
+  (el celular lo pide una vez; la PC nunca) y abre el puerto en el firewall para redes privadas. `DESACTIVAR_CELULAR.bat` lo apaga.
+  Si lo hacés a mano (`HOST=0.0.0.0`), definí `ACCESS_PIN` y `ADMIN_TOKEN`.
 - Solo la propia app (o los orígenes de `FRONTEND_ALLOWED_ORIGINS`) puede llamar a la API:
   otras páginas web abiertas en el navegador no pueden usarla.
 - La API key de Groq cargada desde la app queda guardada solo en tu navegador.

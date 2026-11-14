@@ -10,6 +10,7 @@ from config import (
     logger, GROQ_API_KEY, GROQ_TEXT_MODELS, GROQ_CHAT_MODELS, GROQ_VISION_MODELS,
     AI_CHUNK_CHARS, AI_CLEANUP_MAX_CHARS, ANALYSIS_CHUNK_CHARS, CHAT_CONTEXT_CHARS, AI_FIDELITY_MIN,
 )
+import glossary
 from text_utils import split_text_chunks, pick_relevant_chunks, parse_json_from_llm, word_fidelity
 
 try:
@@ -45,6 +46,13 @@ def get_groq_client(api_key: Optional[str] = None):
             _client_cache[key] = Groq(api_key=key, max_retries=3)
         return _client_cache[key]
     return _default_client
+
+
+def check_key(client) -> dict:
+    """Prueba la key pidiendo a Groq la lista de modelos. Levanta la excepción de Groq si no sirve."""
+    ids = sorted(m.id for m in client.models.list().data)
+    whisper = [m for m in ids if "whisper" in m]
+    return {"models": len(ids), "whisper": bool(whisper), "text": any(m in ids for m in GROQ_TEXT_MODELS)}
 
 
 def is_rate_limit(err: Exception) -> bool:
@@ -165,7 +173,7 @@ Corrección de formato: limitate a corregir puntuación (comas, puntos, signos d
 Párrafos (obligatorio): dividí el texto en párrafos cortos de 2 a 5 oraciones, separados por UNA LÍNEA EN BLANCO (punto y aparte). Empezá un párrafo nuevo cada vez que cambia el tema, cuando alguien hace una pregunta o cuando responde otra persona. Nunca devuelvas todo en un solo bloque.
 
 Limpieza mínima: solo podés quitar tartamudeos o muletillas extremas ("eh...", "este...") si interrumpen gravemente la lectura. No elimines anécdotas, datos repetidos ni interacciones.
-{translate_rule}
+{translate_rule}{glossary_rule}
 Regla estricta de formato (cero artefactos): respondé ÚNICAMENTE con la desgrabación procesada. Prohibido incluir saludos, introducciones ("Aquí tienes...", "Texto corregido:"), viñetas explicativas o conclusiones. Empezá directamente con la primera palabra y terminá con el último punto.
 {part_note}
 Procesá el texto que está entre [INICIO DEL TEXTO] y [FIN DEL TEXTO]:
@@ -186,6 +194,7 @@ def cleanup_transcript(text: str, client, target_lang: str = "es", warnings: lis
     una traducción pedida (otro idioma) y se acepta.
     """
     warnings = warnings if warnings is not None else []
+    text = glossary.apply(text)
     if not client or not text or len(text) < 50:
         return text
     if len(text) > AI_CLEANUP_MAX_CHARS:
@@ -200,7 +209,8 @@ def cleanup_transcript(text: str, client, target_lang: str = "es", warnings: lis
     for i, chunk in enumerate(chunks):
         part_note = (f"\nEste es el fragmento {i + 1} de {len(chunks)} de una transcripción más larga: "
                      "no agregues ni quites nada al principio o al final.\n") if len(chunks) > 1 else ""
-        prompt = CLEANUP_PROMPT.format(translate_rule=translate_rule, part_note=part_note, text=chunk)
+        prompt = CLEANUP_PROMPT.format(translate_rule=translate_rule, glossary_rule=glossary.ai_rule(),
+                                       part_note=part_note, text=chunk)
         try:
             cleaned, _ = chat_completion(client, prompt, max_tokens=4000, temperature=0.2)
             # Si el modelo devolvió algo sospechosamente corto, preferimos el original
@@ -224,7 +234,7 @@ def cleanup_transcript(text: str, client, target_lang: str = "es", warnings: lis
     if altered:
         warnings.append(f"En {altered} de {len(chunks)} partes la IA cambió palabras de lo dicho: "
                         "se dejó el texto original de esas partes (sin corrección de puntuación).")
-    return "\n\n".join(out)
+    return glossary.apply("\n\n".join(out))
 
 
 # ─── TRADUCCIÓN (Google, para subtítulos en inglés) ──────────────────────────

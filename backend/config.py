@@ -55,6 +55,9 @@ IS_RENDER = os.environ.get('RENDER') is not None
 HOST = os.environ.get('HOST', '0.0.0.0' if IS_RENDER else '127.0.0.1')
 PORT = int(os.environ.get('PORT', '5000'))
 ADMIN_TOKEN = os.environ.get('ADMIN_TOKEN', '').strip()
+# PIN para usar Clipadsk desde otros dispositivos de la red (celular). Desde esta PC no se pide.
+# Lo define ACTIVAR_CELULAR.bat junto con HOST=0.0.0.0.
+ACCESS_PIN = os.environ.get('ACCESS_PIN', '').strip()
 
 _DEFAULT_ORIGINS = [
     f"http://127.0.0.1:{PORT}", f"http://localhost:{PORT}",

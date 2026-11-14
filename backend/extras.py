@@ -24,11 +24,13 @@ DEFAULT_SETTINGS = {
     "watch_auto_transcribe": False,  # transcribir solo cada video nuevo
     "windows_toasts": True,          # aviso de Windows además del aviso del navegador
     "record_max_hours": 6,           # corte de seguridad de las grabaciones
+    "glossary": "",                  # nombres propios, una línea por nombre (ver glossary.py)
 }
 _SETTING_RULES = {
     "subtitles_mode": lambda v: v in ("auto", "manual", "never"),
     "watch_interval_min": lambda v: isinstance(v, int) and 5 <= v <= 1440,
     "record_max_hours": lambda v: isinstance(v, (int, float)) and 0.25 <= v <= 24,
+    "glossary": lambda v: isinstance(v, str) and len(v) <= 6000,
 }
 
 

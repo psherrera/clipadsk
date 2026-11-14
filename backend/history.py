@@ -174,7 +174,8 @@ def get(db_path: str, item_id: int) -> Optional[dict]:
     }
 
 
-def update(db_path: str, item_id: int, transcript: Optional[str] = None, title: Optional[str] = None) -> bool:
+def update(db_path: str, item_id: int, transcript: Optional[str] = None, title: Optional[str] = None,
+           segments: Optional[list] = None) -> bool:
     item = get(db_path, item_id)
     if not item:
         return False
@@ -184,6 +185,8 @@ def update(db_path: str, item_id: int, transcript: Optional[str] = None, title: 
     with _connect(db_path) as conn:
         conn.execute("UPDATE history SET transcript = ?, title = ?, search_text = ?, updated_at = ? WHERE id = ?",
                      (transcript, title, search_text, _now(), item_id))
+        if segments is not None:
+            conn.execute("UPDATE history SET segments = ? WHERE id = ?", (json.dumps(segments, ensure_ascii=False), item_id))
     return True
 
 

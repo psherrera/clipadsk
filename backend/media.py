@@ -12,6 +12,7 @@ from config import (
     GROQ_MAX_UPLOAD_MB, AUDIO_CHUNK_SECONDS,
 )
 from text_utils import normalize_segments, normalize_words, attach_words
+import glossary
 
 try:
     from pydub import AudioSegment
@@ -109,6 +110,9 @@ def _groq_transcribe_one(client, path: str, lang: str):
                 response_format="verbose_json",
                 language=lang if lang in ("es", "en") else None,
             )
+            hint = glossary.whisper_prompt()
+            if hint:
+                kwargs["prompt"] = hint
             if _word_timestamps_ok:
                 kwargs["timestamp_granularities"] = ["word", "segment"]
             try:
@@ -179,7 +183,8 @@ def transcribe_with_local_whisper(audio_path: str, lang: str = "es", progress: P
     if progress:
         progress(40, "Transcribiendo en local con Whisper (puede tardar)...")
     segs, info = model.transcribe(audio_path, beam_size=5, vad_filter=True, word_timestamps=True,
-                                  language=lang if lang in ("es", "en") else None)
+                                  language=lang if lang in ("es", "en") else None,
+                                  initial_prompt=glossary.whisper_prompt() or None)
     segments = normalize_segments(list(segs))
     text = " ".join(s["text"] for s in segments if s["text"])
     logger.info(f"Whisper local terminado ({getattr(info, 'duration', '?')} s de audio)")
@@ -198,7 +203,7 @@ def transcribe_audio(audio_path: str, lang: str, groq_client, work_dir: str,
     if groq_client:
         try:
             text, segments = transcribe_with_groq(groq_client, audio_path, lang, work_dir, progress)
-            return text, segments, "groq_whisper_v3_file"
+            return glossary.apply(text), glossary.apply_to_segments(segments), "groq_whisper_v3_file"
         except Exception as e:
             log(f"Error en Groq Whisper: {e}")
             if not WHISPER_MODEL_AVAILABLE:
@@ -208,4 +213,4 @@ def transcribe_audio(audio_path: str, lang: str, groq_client, work_dir: str,
         raise RuntimeError("No hay API Key de Groq configurada ni Whisper local instalado.")
 
     text, segments = transcribe_with_local_whisper(audio_path, lang, progress)
-    return text, segments, "local_whisper"
+    return glossary.apply(text), glossary.apply_to_segments(segments), "local_whisper"

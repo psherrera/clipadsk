@@ -1662,6 +1662,11 @@
                     </div>
                 </div>
                 <div class="v3-set-block">
+                    <p class="v3-set-title">Glosario de nombres propios</p>
+                    <p class="v3-set-help">Un nombre por línea. Se le pasa a Whisper y a la limpieza con IA para que los escriba bien. Para corregir un error fijo: <code>Yemini = Gemini</code> (varias formas: <code>Cloud | Clod = Claude</code>).</p>
+                    <textarea class="field w-full v3-glossary" data-s="glossary" rows="6" spellcheck="false" placeholder="Anthropic&#10;Yemini = Gemini&#10;Cloud = Claude">${esc(st.glossary || '')}</textarea>
+                </div>
+                <div class="v3-set-block">
                     <p class="v3-set-title">Grabación de vivos</p>
                     <label class="v3-watch-opts">Cortar sola después de
                         <select class="field" data-s="record_max_hours">
@@ -1964,7 +1969,139 @@
     })();
 
     // ─── Arranque ────────────────────────────────────────────────────────────────
+    // ─── Usar desde el celular (3.4) ─────────────────────────────────────────────
+    const mobileCard = (() => {
+        async function mount() {
+            const section = document.getElementById('config-section');
+            if (!section || document.getElementById('v3-mobile-card')) return;
+            let info;
+            try { info = await api('/mobile/info'); } catch { return; }
+            if (!info.from_pc) return;           // desde el celular no hace falta explicarlo
+            const card = document.createElement('div');
+            card.id = 'v3-mobile-card';
+            card.className = 'glass card space-y-3';
+            const head = `
+                <div class="flex items-center gap-3">
+                    <span class="quick-icon bg-primary/10 text-primary"><span class="material-symbols-outlined">smartphone</span></span>
+                    <h3 class="font-semibold text-white">Usar desde el celular</h3>
+                </div>`;
+            if (info.enabled) {
+                card.innerHTML = head + `
+                    <p class="v3-set-help">Activado. Con el celular en el mismo Wi-Fi, escaneá el código con la cámara o abrí la dirección, y escribí el PIN la primera vez. La PC tiene que estar prendida con Clipadsk abierto.</p>
+                    <div class="v3-mobile-grid">
+                        <div class="v3-qr" id="v3-qr-box" aria-label="Código QR"></div>
+                        <div class="v3-mobile-data">
+                            ${info.urls.map(u => `<p><b>Dirección</b><br><code>${esc(u)}</code></p>`).join('') || '<p class="v3-err">No se encontró la dirección de la PC en la red.</p>'}
+                            <p><b>PIN</b><br><code class="v3-pin">${esc(info.pin || '')}</code></p>
+                        </div>
+                    </div>
+                    <details class="v3-howto">
+                        <summary>Cómo dejar un ícono en el celular (Android)</summary>
+                        <ol>
+                            <li>Abrí la dirección en <b>Chrome</b> del celular (con el QR o escribiéndola) y poné el PIN.</li>
+                            <li>Tocá los tres puntos <b>⋮</b>, arriba a la derecha, y elegí <b>Agregar a la pantalla principal</b>.</li>
+                            <li>En el cartel "Instalar y crear acceso directo" tocá <b>Crear acceso directo</b>. "Instalar" sale como "No se puede instalar esta app" porque la dirección es http, y es normal.</li>
+                            <li>Confirmá el nombre y tocá <b>Agregar</b>. El ícono de Clipadsk queda en la pantalla de inicio y abre la app directo, dentro de Chrome.</li>
+                        </ol>
+                        <p>Si el ícono sale genérico, borralo y creá el acceso directo de nuevo. Funciona solo con la PC prendida, Clipadsk abierto y el celular en el mismo Wi-Fi.</p>
+                    </details>
+                    <p class="v3-set-help">Desde el celular se puede transcribir, leer el historial y analizar. Actualizar la app y los ajustes quedan solo en la PC.</p>
+                    <button class="btn-ghost" data-m="off"><span class="material-symbols-outlined text-base">phonelink_erase</span> Desactivar acceso desde el celular</button>`;
+            } else if (info.exposed) {
+                card.innerHTML = head + `<p class="v3-err">Clipadsk está abierto a la red pero sin PIN: cualquiera en tu Wi-Fi podría usarlo. Activalo desde acá para ponerle un PIN.</p>
+                    <button class="btn-primary" data-m="on"><span class="material-symbols-outlined text-base">smartphone</span> Activar con PIN</button>`;
+            } else {
+                card.innerHTML = head + `
+                    <p class="v3-set-help">Hoy Clipadsk solo se abre en esta PC. Para usarlo también desde el celular (mismo Wi-Fi, con un PIN), tocá el botón. Windows va a pedir permiso de administrador solo la primera vez (es para abrir el puerto en el firewall) y Clipadsk se reinicia solo, unos 10 segundos. Se apaga cuando quieras desde acá.</p>
+                    <button class="btn-primary" data-m="on"><span class="material-symbols-outlined text-base">smartphone</span> Activar acceso desde el celular</button>`;
+            }
+            const motorCard = document.getElementById('v3-motor-card');
+            if (motorCard) motorCard.after(card); else section.appendChild(card);
+            drawQr(card.querySelector('#v3-qr-box'), info.urls && info.urls[0]);
+            card.addEventListener('click', (e) => {
+                const b = e.target.closest('[data-m]');
+                if (b) toggle(b.dataset.m === 'on', b);
+            });
+        }
+        /** Activa/desactiva desde la app: el servidor lanza el script, se reinicia, y la página se recarga sola. */
+        async function toggle(enable, btn) {
+            const msg = enable
+                ? 'Clipadsk se va a reiniciar (unos 10 segundos) y, solo la primera vez, Windows va a pedir permiso de administrador para abrir el puerto en el firewall. Aceptalo. Los trabajos en curso se cortan.'
+                : 'Clipadsk se va a reiniciar (unos 10 segundos) y va a volver a funcionar solo en esta PC. Los trabajos en curso se cortan.';
+            if (!await confirmDialog(msg, { title: enable ? 'Activar acceso desde el celular' : 'Desactivar acceso desde el celular',
+                                            okText: enable ? 'Activar' : 'Desactivar' })) return;
+            if (btn) btn.disabled = true;
+            try {
+                await api('/mobile/toggle', { method: 'POST', body: { enable } });
+            } catch (err) {
+                toast(err.message, 'error');
+                if (btn) btn.disabled = false;
+                return;
+            }
+            const card = document.getElementById('v3-mobile-card');
+            if (card) card.insertAdjacentHTML('beforeend', '<p class="v3-set-help v3-restarting">Reiniciando Clipadsk... aceptá el permiso de Windows si aparece. Esta página se recarga sola.</p>');
+            // Esperar a que el servidor se apague y vuelva a responder
+            await new Promise(r => setTimeout(r, 5000));
+            for (let i = 0; i < 40; i++) {
+                try {
+                    const r = await fetch(`${API}/health`, { cache: 'no-store' });
+                    if (r.ok) { location.reload(); return; }
+                } catch { /* todavía reiniciando */ }
+                await new Promise(r => setTimeout(r, 2000));
+            }
+            toast('Clipadsk tarda en volver. Recargá la página en unos segundos.', 'info', 8000);
+        }
+
+        /** QR dibujado en el navegador (librería incluida en vendor/): no depende de nada instalado en Python. */
+        function drawQr(box, url) {
+            if (!box) return;
+            if (!url || typeof window.qrcode !== 'function') { box.remove(); return; }
+            try {
+                const qr = window.qrcode(0, 'M');
+                qr.addData(url);
+                qr.make();
+                box.innerHTML = qr.createSvgTag({ cellSize: 5, margin: 2, scalable: true });
+                const svg = box.querySelector('svg');
+                if (svg) { svg.setAttribute('width', '160'); svg.setAttribute('height', '160'); }
+            } catch { box.remove(); }
+        }
+        return { mount };
+    })();
+
+    // En http (no https) los navegadores del celular no tienen el portapapeles moderno: se usa el método viejo.
+    if (!navigator.clipboard) {
+        const legacyCopy = (text) => new Promise((resolve, reject) => {
+            const ta = document.createElement('textarea');
+            ta.value = text;
+            ta.style.cssText = 'position:fixed;top:0;left:0;opacity:0';
+            document.body.appendChild(ta);
+            ta.focus();
+            ta.select();
+            let ok = false;
+            try { ok = document.execCommand('copy'); } catch { ok = false; }
+            ta.remove();
+            ok ? resolve() : reject(new Error('No se pudo copiar'));
+        });
+        try { Object.defineProperty(navigator, 'clipboard', { value: { writeText: legacyCopy }, configurable: true }); } catch { /* sin portapapeles */ }
+    }
+
+    // ─── Aviso de versión nueva (consulta a GitHub como mucho cada 12 horas) ─────
+    async function checkNewVersion() {
+        try {
+            const last = Number(store.get('clipadsk_version_check') || 0);
+            if (Date.now() - last < 12 * 3600 * 1000) return;
+            const v = await api('/version/latest');
+            store.set('clipadsk_version_check', String(Date.now()));
+            if (!v.newer) return;
+            toast(`Hay una versión nueva de Clipadsk (${v.latest}; tenés la ${v.current}). Actualizá desde Configuración → Actualizar aplicación.`, 'info', 12000);
+            const btn = document.getElementById('system-update-app-btn');
+            if (btn && !btn.querySelector('.v3-new-badge')) btn.insertAdjacentHTML('beforeend', `<span class="v3-new-badge">Nueva ${esc(v.latest)}</span>`);
+        } catch { /* sin internet o GitHub no responde: no molesta */ }
+    }
+
     document.addEventListener('clipa:ready', () => {
+        setTimeout(checkNewVersion, 4000);
+        setTimeout(() => mobileCard.mount(), 800);
         mountJobsPanel();
         mountGlobalDrop();
         mountPasteToAnalyze();

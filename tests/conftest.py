@@ -7,4 +7,7 @@ sys.path.insert(0, BACKEND)
 # Los tests nunca deben usar una API key real ni el .env del usuario
 os.environ["GROQ_API_KEY"] = ""
 os.environ.pop("ADMIN_TOKEN", None)
+# ...ni la configuración de red/celular del .env (ACTIVAR_CELULAR.bat la escribe ahí)
+os.environ["HOST"] = "127.0.0.1"
+os.environ["ACCESS_PIN"] = ""
 os.environ.pop("FRONTEND_ALLOWED_ORIGINS", None)

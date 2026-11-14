@@ -1,5 +1,22 @@
 # Registro de cambios
 
+## 3.4.0 — 2026-11-13
+
+### Nuevo
+- **Glosario de nombres propios** (Configuración → Glosario): un nombre por línea; `Yemini = Gemini` corrige siempre esa forma. Se le pasa a Whisper (Groq y local) como pista, se agrega como regla a la limpieza con IA y se aplica sobre el texto y los segmentos al terminar.
+- **Reemplazar** en la transcripción: busca una palabra o frase (palabra completa, sin importar mayúsculas), cuenta cuántas veces aparece, la cambia en el texto y en los tiempos, lo guarda en el historial y ofrece sumarlo al glosario.
+- **Renombrar hablantes**: en el resultado de "Hablantes", un botón por cada nombre cambia ese nombre en todo el diálogo.
+- **Word**: minuto al comienzo de cada párrafo, "Citas destacadas" (si se corrió "Citas") y "Diálogo por hablantes" al final (si se corrió "Hablantes", con los nombres ya renombrados).
+- **Probar API Key** (Configuración): comprueba con Groq que la key funcione y que haya Whisper disponible; también se prueba sola al guardar.
+- **Aviso de versión nueva**: consulta GitHub como mucho cada 12 horas y marca el botón de actualizar.
+- **Uso desde el celular** (mismo Wi-Fi): se activa y desactiva con un botón en Configuración → "Usar desde el celular" (la app se reinicia sola; Windows pide permiso de administrador solo la primera vez, porque la regla del firewall queda creada); `ACTIVAR_CELULAR.bat` hace lo mismo desde fuera de la app y abre Clipadsk a la red con un PIN de 6 dígitos y abre el puerto en el firewall (solo redes privadas); `DESACTIVAR_CELULAR.bat` lo apaga. En Configuración aparece el QR (se dibuja en el navegador, sin librerías extra), la dirección y el PIN. Desde la PC no se pide PIN; desde el celular se pide una vez (30 días), con límite de intentos. Actualizar la app y cambiar ajustes quedan solo en la PC.
+
+### Cambios
+- Íconos PNG (192, 512 y maskable) y manifiesto corregido (nombre "Clipadsk") para "Agregar a la pantalla principal" en Android. El manifiesto y los íconos se sirven sin PIN.
+- `PATCH /api/history/{id}` acepta `segments` (para que reemplazar no deje tiempos con el texto viejo).
+- `require_admin` permite el mantenimiento desde la propia PC aunque Clipadsk esté abierto a la red con PIN.
+- Copiar al portapapeles funciona también desde el celular (en http no existe `navigator.clipboard`).
+
 ## 3.3.0 — 2026-11-12
 
 - **Análisis del copy**: al analizar un enlace (Instagram, TikTok, YouTube…) aparece el texto completo de la publicación con un botón "Analizar el copy": mensaje central, tono y estrategia, recursos (gancho, hashtags, menciones, llamados a la acción), afirmaciones para verificar, lo que no dice y cómo usarlo en una nota. No hace falta transcribir; si ya hay transcripción o texto de las imágenes, se usa como contexto. También está como botón "Copy" en las herramientas periodísticas.

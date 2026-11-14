@@ -47,7 +47,7 @@ from pydantic import BaseModel
 
 from config import (
     logger, BASE_DIR, ROOT_DIR, HOME_DIR, DATA_DIR, FRONTEND_DIR, DOWNLOAD_FOLDER, DB_FILE, CACHE_FILE,
-    HOST, PORT, ADMIN_TOKEN, ALLOWED_ORIGINS, HAS_FFMPEG, FFMPEG_BIN,
+    HOST, PORT, ADMIN_TOKEN, ACCESS_PIN, ALLOWED_ORIGINS, HAS_FFMPEG, FFMPEG_BIN,
     MAX_WORKERS, MAX_CONCURRENT_JOBS, MAX_UPLOAD_MB, GROQ_MAX_UPLOAD_MB,
     IS_LOCAL_ONLY, ALLOWED_HOSTS, YTDLP_NO_CHECK_CERTIFICATE,
 )
@@ -63,6 +63,7 @@ from text_utils import (
 from errors import friendly_error
 import history as hist
 import extras
+import glossary
 import media
 import ai
 
@@ -77,7 +78,7 @@ except ImportError:  # pragma: no cover
     TTLCache = None
 
 
-APP_VERSION = "3.3.0"
+APP_VERSION = "3.4.0"
 @contextlib.asynccontextmanager
 async def lifespan(_app):
     task = asyncio.create_task(watch_loop())
@@ -142,6 +143,134 @@ async def block_foreign_origins(request: Request, call_next):
     return await call_next(request)
 
 
+# ─── ACCESO DESDE EL CELULAR (PIN) ───────────────────────────────────────────
+# Con ACCESS_PIN en .env, cualquier dispositivo que no sea esta PC tiene que ingresar el PIN
+# una vez (queda una cookie). Sin ACCESS_PIN no cambia nada.
+_PIN_FAILS: dict = {}
+# Lo que el navegador pide sin cookie (manifiesto e íconos para "agregar a la pantalla principal"): nada privado.
+_PIN_FREE_PATHS = {"/api/login", "/manifest.json", "/icon.svg", "/icon-192.png", "/icon-512.png", "/icon-maskable-512.png"}
+_PIN_MAX_FAILS, _PIN_WINDOW = 5, 300
+
+
+def _is_loopback(request: Request) -> bool:
+    host = request.client.host if request.client else ""
+    # Detrás de un proxy (Docker, Render) todo parece local: ahí no se confía en la IP.
+    return host in ("127.0.0.1", "::1", "localhost") and "x-forwarded-for" not in request.headers
+
+
+def _pin_token() -> str:
+    return hmac.new(ACCESS_PIN.encode(), b"clipadsk-session-v1", hashlib.sha256).hexdigest()
+
+
+def _pin_ok(request: Request) -> bool:
+    return hmac.compare_digest(request.cookies.get("clipa_auth", ""), _pin_token())
+
+
+LOGIN_HTML = """<!doctype html><html lang="es"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1"><title>Clipadsk</title>
+<style>body{font-family:system-ui,sans-serif;background:#0b1020;color:#e5e7eb;display:flex;min-height:100vh;
+align-items:center;justify-content:center;margin:0}form{background:#141a30;padding:28px;border-radius:16px;width:min(320px,86vw)}
+h1{font-size:20px;margin:0 0 6px}p{margin:0 0 16px;color:#94a3b8;font-size:14px}input{width:100%;box-sizing:border-box;padding:14px;
+font-size:22px;letter-spacing:6px;text-align:center;border-radius:10px;border:1px solid #334155;background:#0b1020;color:#fff}
+button{width:100%;margin-top:14px;padding:14px;font-size:16px;font-weight:700;border:0;border-radius:10px;background:#6366f1;color:#fff}
+#e{color:#f87171;font-size:13px;margin-top:10px;min-height:18px}</style></head><body>
+<form onsubmit="return go(event)"><h1>Clipadsk</h1><p>Ingresá el PIN que aparece en Configuración, en la PC.</p>
+<input id="p" inputmode="numeric" autocomplete="one-time-code" autofocus placeholder="••••••"><button>Entrar</button><div id="e"></div></form>
+<script>async function go(ev){ev.preventDefault();const e=document.getElementById('e');e.textContent='';
+try{const r=await fetch('/api/login',{method:'POST',headers:{'Content-Type':'application/json'},
+body:JSON.stringify({pin:document.getElementById('p').value.trim()})});const d=await r.json();
+if(r.ok){location.reload()}else{e.textContent=d.detail||'PIN incorrecto'}}catch(x){e.textContent='No se pudo conectar'}return false}</script>
+</body></html>"""
+
+
+@app.middleware("http")
+async def require_pin(request: Request, call_next):
+    if (not ACCESS_PIN or _is_loopback(request) or request.url.path in _PIN_FREE_PATHS or _pin_ok(request)):
+        return await call_next(request)
+    if request.url.path.startswith("/api/"):
+        return JSONResponse(status_code=401, content={"detail": "Falta el PIN de acceso.", "pin_required": True})
+    return Response(LOGIN_HTML, status_code=401, media_type="text/html; charset=utf-8", headers={"Cache-Control": "no-store"})
+
+
+class LoginRequest(BaseModel):
+    pin: str = ""
+
+
+@app.post("/api/login")
+async def login(req: LoginRequest, request: Request, response: Response):
+    if not ACCESS_PIN:
+        return {"status": "ok"}
+    ip = request.client.host if request.client else "?"
+    now = time.time()
+    fails = [t for t in _PIN_FAILS.get(ip, []) if now - t < _PIN_WINDOW]
+    if len(fails) >= _PIN_MAX_FAILS:
+        raise HTTPException(status_code=429, detail="Demasiados intentos. Esperá unos minutos.")
+    if not hmac.compare_digest(req.pin.strip().encode(), ACCESS_PIN.encode()):
+        fails.append(now)
+        _PIN_FAILS[ip] = fails
+        raise HTTPException(status_code=403, detail="PIN incorrecto.")
+    _PIN_FAILS.pop(ip, None)
+    response.set_cookie("clipa_auth", _pin_token(), max_age=60 * 60 * 24 * 30, httponly=True, samesite="lax")
+    return {"status": "ok"}
+
+
+class MobileToggleRequest(BaseModel):
+    enable: bool = True
+
+
+@app.post("/api/mobile/toggle")
+async def mobile_toggle(req: MobileToggleRequest, request: Request):
+    """
+    Activa o desactiva el acceso desde el celular desde la propia app (solo desde esta PC).
+    Cambiar HOST exige reiniciar el servidor, así que se lanza scripts/celular.ps1 aparte:
+    él escribe .env, abre el firewall (Windows pide permiso) y reinicia Clipadsk.
+    """
+    if not _is_loopback(request):
+        raise HTTPException(status_code=403, detail="Esto solo se puede hacer desde la PC donde corre Clipadsk.")
+    if sys.platform != "win32":
+        raise HTTPException(status_code=400, detail="La activación automática es solo para Windows. En otros sistemas poné "
+                            "HOST=0.0.0.0 y ACCESS_PIN en .env y reiniciá.")
+    script = os.path.join(ROOT_DIR, "scripts", "celular.ps1")
+    if not os.path.isfile(script):
+        raise HTTPException(status_code=404, detail="No encuentro scripts\\celular.ps1 al lado de Clipadsk. Usá ACTIVAR_CELULAR.bat.")
+    cmd = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", script]
+    if not req.enable:
+        cmd.append("-Desactivar")
+    flags = getattr(subprocess, "DETACHED_PROCESS", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+    subprocess.Popen(cmd, cwd=ROOT_DIR, creationflags=flags, close_fds=True)
+    return {"status": "ok", "restarting": True}
+
+
+def lan_urls() -> list:
+    """Direcciones con las que otro dispositivo de la red puede abrir Clipadsk."""
+    import socket
+    ips = []
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.connect(("10.255.255.255", 1))   # no manda nada: solo elige la placa de red activa
+            ips.append(s.getsockname()[0])
+    except OSError:
+        pass
+    try:
+        ips += socket.gethostbyname_ex(socket.gethostname())[2]
+    except OSError:
+        pass
+    seen = []
+    for ip in ips:
+        if ip and not ip.startswith(("127.", "169.254.")) and ip not in seen:
+            seen.append(ip)
+    return [f"http://{ip}:{PORT}" for ip in seen]
+
+
+@app.get("/api/mobile/info")
+async def mobile_info(request: Request):
+    exposed = not IS_LOCAL_ONLY
+    local = _is_loopback(request)
+    return {"exposed": exposed, "pin_set": bool(ACCESS_PIN), "enabled": exposed and bool(ACCESS_PIN),
+            "urls": lan_urls() if exposed else [], "pin": ACCESS_PIN if (local and ACCESS_PIN) else None,
+            "from_pc": local}
+
+
 def require_admin(request: Request):
     """
     Operaciones de mantenimiento (actualizar, resetear, borrar descargas).
@@ -153,7 +282,7 @@ def require_admin(request: Request):
         provided = request.headers.get('X-ADMIN-TOKEN', '')
         if not hmac.compare_digest(provided.encode(), ADMIN_TOKEN.encode()):
             raise HTTPException(status_code=403, detail="Se requiere token de administrador para esta operación.")
-    elif not IS_LOCAL_ONLY:
+    elif not IS_LOCAL_ONLY and not (ACCESS_PIN and _is_loopback(request)):
         raise HTTPException(status_code=403, detail="Mantenimiento deshabilitado: el servidor está expuesto a la red "
                             "y no tiene ADMIN_TOKEN. Definí ADMIN_TOKEN en .env y reiniciá.")
 
@@ -255,6 +384,7 @@ def cache_set(key: str, data: dict):
 init_db()
 hist.init(DB_FILE)
 extras.init(DB_FILE)
+glossary.set_text(extras.get_settings(DB_FILE).get("glossary", ""))
 
 
 # ─── YT-DLP ──────────────────────────────────────────────────────────────────
@@ -706,6 +836,15 @@ class ExportDocxRequest(BaseModel):
     url: Optional[str] = ""
     description: Optional[str] = ""
     transcript: str
+    starts: Optional[List[Optional[float]]] = None   # segundo de inicio de cada párrafo (3.4)
+    quotes: Optional[List[dict]] = None              # citas destacadas: {quote, note, start}
+    dialogue: Optional[str] = ""                     # diálogo por hablantes (herramienta Hablantes)
+
+
+def fmt_clock(sec) -> str:
+    sec = int(sec or 0)
+    h, m, s = sec // 3600, (sec % 3600) // 60, sec % 60
+    return f"{h}:{m:02d}:{s:02d}" if h else f"{m:02d}:{s:02d}"
 
 
 def require_groq(api_key: Optional[str]):
@@ -732,6 +871,56 @@ async def health():
     return {"status": "ok", "version": APP_VERSION, "ffmpeg": HAS_FFMPEG, "whisper_local": media.WHISPER_MODEL_AVAILABLE,
             "groq_server_key": ai.get_groq_client() is not None, "yt_dlp": yt_dlp.version.__version__,
             "has_cookies": find_cookie_file("https://www.youtube.com/") is not None}
+
+
+class KeyTestRequest(BaseModel):
+    groq_api_key: Optional[str] = None
+
+
+@app.post("/api/groq/test")
+async def test_groq_key(req: KeyTestRequest):
+    """Prueba de verdad la API Key de Groq (la del navegador o, si no hay, la del .env)."""
+    client = ai.get_groq_client(req.groq_api_key)
+    if client is None:
+        return {"ok": False, "error": "Todavía no cargaste ninguna API Key de Groq."}
+    try:
+        info = await run_light(ai.check_key, client)
+    except Exception as e:
+        return {"ok": False, "error": friendly_error(e)}
+    if not info["whisper"]:
+        return {"ok": False, "error": "La key funciona, pero esta cuenta no tiene modelos de Whisper disponibles."}
+    return {"ok": True, **info}
+
+
+_latest_cache = {"at": 0.0, "data": None}
+
+
+def _version_tuple(v: str) -> tuple:
+    return tuple(int(x) for x in re.findall(r"\d+", v or "")[:4])
+
+
+def _fetch_latest_version() -> Optional[str]:
+    url = f"https://raw.githubusercontent.com/{GITHUB_REPO}/{GITHUB_BRANCH}/backend/main.py"
+    r = requests.get(url, timeout=8, headers={"User-Agent": "Clipadsk"})
+    r.raise_for_status()
+    m = re.search(r'^APP_VERSION\s*=\s*"([\d.]+)"', r.text, flags=re.MULTILINE)
+    return m.group(1) if m else None
+
+
+@app.get("/api/version/latest")
+async def latest_version():
+    """¿Hay una versión más nueva en GitHub? (se consulta como mucho cada 6 horas)"""
+    now = time.time()
+    if not _latest_cache["data"] or now - _latest_cache["at"] > 6 * 3600:
+        try:
+            latest = await run_light(_fetch_latest_version)
+        except Exception as e:
+            logger.info(f"No se pudo consultar la versión nueva: {e}")
+            return {"current": APP_VERSION, "latest": None, "newer": False}
+        _latest_cache.update(at=now, data=latest)
+    latest = _latest_cache["data"]
+    newer = bool(latest) and _version_tuple(latest) > _version_tuple(APP_VERSION)
+    return {"current": APP_VERSION, "latest": latest, "newer": newer}
 
 
 @app.get("/api/health/cookies")
@@ -1440,24 +1629,59 @@ async def export_docx(req: ExportDocxRequest):
             p.paragraph_format.left_indent = Inches(0.25)
             p.paragraph_format.space_after = Pt(18)
 
+        quotes = [q for q in (req.quotes or []) if str(q.get("quote", "")).strip()]
+        if quotes:
+            r = doc.add_paragraph().add_run("Citas destacadas:")
+            r.bold, r.font.size, r.font.color.rgb = True, Pt(14), RGBColor(0x4f, 0x46, 0xe5)
+            for q in quotes:
+                p = doc.add_paragraph()
+                p.paragraph_format.left_indent = Inches(0.25)
+                p.paragraph_format.space_after = Pt(8)
+                p.add_run(f"\u201c{str(q['quote']).strip()}\u201d").italic = True
+                if q.get("start") is not None:
+                    t = p.add_run(f"  [{fmt_clock(q['start'])}]")
+                    t.bold, t.font.size, t.font.color.rgb = True, Pt(9), RGBColor(0x63, 0x66, 0xf1)
+            doc.add_paragraph()
+
         sep = doc.add_paragraph("─" * 40)
         sep.alignment = WD_ALIGN_PARAGRAPH.CENTER
 
         r = doc.add_paragraph().add_run("Transcripción:")
         r.bold, r.font.size, r.font.color.rgb = True, Pt(14), RGBColor(0x4f, 0x46, 0xe5)
 
-        for para in ensure_paragraphs(req.transcript).split("\n\n"):
+        paragraphs = ensure_paragraphs(req.transcript).split("\n\n")
+        starts = req.starts if req.starts and len(req.starts) == len(paragraphs) else None
+        for idx, para in enumerate(paragraphs):
             para = para.strip()
             if not para:
                 continue
             p = doc.add_paragraph()
             p.paragraph_format.space_after = Pt(6)
+            if starts and starts[idx] is not None:
+                t = p.add_run(f"[{fmt_clock(starts[idx])}] ")
+                t.bold, t.font.size, t.font.color.rgb = True, Pt(9), RGBColor(0x63, 0x66, 0xf1)
             if para.startswith("--- ") and para.endswith(" ---"):
                 r = p.add_run(para)
                 r.bold, r.font.size, r.font.color.rgb = True, Pt(12), RGBColor(0x63, 0x66, 0xf1)
             else:
                 # Respetar **negritas** (nombres de hablantes en la diarización)
                 for i, piece in enumerate(re.split(r'\*\*(.+?)\*\*', para)):
+                    if piece:
+                        p.add_run(piece).bold = (i % 2 == 1)
+
+        dialogue = (req.dialogue or "").strip()
+        if dialogue:
+            doc.add_page_break()
+            r = doc.add_paragraph().add_run("Diálogo por hablantes (aproximado):")
+            r.bold, r.font.size, r.font.color.rgb = True, Pt(14), RGBColor(0x4f, 0x46, 0xe5)
+            doc.add_paragraph("Los hablantes los dedujo la IA a partir del texto, no de las voces: verificá con el audio antes de atribuir.").runs[0].italic = True
+            for para in re.split(r"\n\s*\n|\n", dialogue):
+                para = para.strip()
+                if not para:
+                    continue
+                p = doc.add_paragraph()
+                p.paragraph_format.space_after = Pt(6)
+                for i, piece in enumerate(re.split(r"\*\*(.+?)\*\*", para)):
                     if piece:
                         p.add_run(piece).bold = (i % 2 == 1)
         stream = io.BytesIO()
@@ -1638,7 +1862,9 @@ async def get_settings_endpoint():
 async def put_settings(request: Request, patch: dict = Body(...)):
     require_admin(request)
     try:
-        return await run_light(extras.update_settings, DB_FILE, patch)
+        out = await run_light(extras.update_settings, DB_FILE, patch)
+        glossary.set_text(out.get("glossary", ""))
+        return out
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -1978,6 +2204,7 @@ class HistoryEntry(BaseModel):
 class HistoryPatch(BaseModel):
     transcript: Optional[str] = None
     title: Optional[str] = None
+    segments: Optional[list] = None
 
 
 class HistoryImport(BaseModel):
@@ -2008,7 +2235,7 @@ async def history_save(entry: HistoryEntry):
 
 @app.patch("/api/history/{item_id}")
 async def history_update(item_id: int, patch: HistoryPatch):
-    if not await run_light(hist.update, DB_FILE, item_id, patch.transcript, patch.title):
+    if not await run_light(hist.update, DB_FILE, item_id, patch.transcript, patch.title, patch.segments):
         raise HTTPException(status_code=404, detail="La transcripción no existe en el historial.")
     return {"status": "ok"}
 

@@ -67,6 +67,8 @@ document.addEventListener('DOMContentLoaded', () => {
     let currentMaxResThumbnail = '';
     let currentSegments        = [];
     let isEditing              = false;
+    let lastQuotes             = [];   // citas y diálogo mostrados, para incluirlos en el Word
+    let lastDialogue           = '';
 
     // ─── SEGURIDAD: escapeHtml para evitar XSS en datos de usuario ───────────────
     function escapeHtml(str) {
@@ -174,11 +176,34 @@ document.addEventListener('DOMContentLoaded', () => {
         groqApiKeyInput.value = localStorage.getItem(GROQ_KEY_STORE) || '';
     }
     
+    async function testGroqKey() {
+        const status = document.getElementById('api-key-status');
+        const btn = document.getElementById('test-api-key-btn');
+        const key = groqApiKeyInput?.value.trim() || localStorage.getItem(GROQ_KEY_STORE) || '';
+        if (btn) btn.disabled = true;
+        if (status) { status.className = 'text-xs text-slate-400'; status.textContent = 'Probando con Groq...'; }
+        try {
+            const r = await fetch(`${API_BASE}/groq/test`, { method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ groq_api_key: key || undefined }) });
+            const data = await r.json();
+            if (status) {
+                status.className = 'text-xs ' + (data.ok ? 'text-emerald-400' : 'text-red-400');
+                status.textContent = data.ok ? '✓ La key funciona: Groq responde y tiene Whisper disponible.' : `✗ ${data.error}`;
+            }
+            return data.ok;
+        } catch (e) {
+            if (status) { status.className = 'text-xs text-red-400'; status.textContent = `✗ No se pudo probar: ${e.message}`; }
+            return false;
+        } finally { if (btn) btn.disabled = false; }
+    }
+    document.getElementById('test-api-key-btn')?.addEventListener('click', testGroqKey);
+
     saveApiKeyBtn?.addEventListener('click', () => {
         const key = groqApiKeyInput?.value.trim();
         if (key) {
             localStorage.setItem(GROQ_KEY_STORE, key);
             showToast('API Key guardada correctamente', 'success');
+            testGroqKey();
         } else {
             localStorage.removeItem(GROQ_KEY_STORE);
             showToast('API Key eliminada', 'info');
@@ -1264,6 +1289,8 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     function renderTranscript(text, method, srt = '', segments = [], extra = {}) {
+        lastQuotes = [];
+        lastDialogue = '';
         currentSrt = srt || '';
         currentSegments = segments || [];
         if (currentSrt) {
@@ -1292,6 +1319,7 @@ document.addEventListener('DOMContentLoaded', () => {
         document.getElementById('empty-state-panel')?.classList.add('hidden');
 
         editTranscriptBtn?.classList.remove('hidden');
+        document.getElementById('replace-transcript-btn')?.classList.remove('hidden');
         downloadDocxBtn?.classList.remove('hidden');
 
         // 3. Crear cabecera con etiqueta de método y selectores de vista
@@ -1831,11 +1859,51 @@ document.addEventListener('DOMContentLoaded', () => {
                 ${mode === 'diarization' ? `<p class="v3-approx"><span class="material-symbols-outlined">warning</span> Los hablantes son aproximados: la IA los deduce del texto, no de las voces. Verificá con el audio antes de atribuir una frase.</p>` : ''}
                 <div class="ai-result-text text-slate-300 text-sm leading-relaxed">${formatAIResponse(data.result)}</div>
                 ${data.parts > 1 ? `<p class="mt-3 text-[10px] text-slate-500 italic">Transcripción larga: se analizó completa en ${Number(data.parts)} partes.</p>` : ''}`;
+            if (mode === 'diarization') { lastDialogue = data.result || ''; setupSpeakerRename(outputEl, data.result); }
 
         } catch (err) {
             renderAnalyzeError(outputEl, err);
         }
     });
+
+    /** Hablantes: botones para ponerle el nombre real a cada uno, en todo el diálogo (3.4) */
+    function speakersIn(text) {
+        return [...new Set([...text.matchAll(/^\*\*([^*\n]{1,40}?):?\*\*\s*:?/gm)].map(m => m[1].trim()))];
+    }
+
+    function setupSpeakerRename(outputEl, initialText) {
+        let text = initialText;
+        const textEl = outputEl.querySelector('.ai-result-text');
+        if (!textEl) return;
+        const bar = document.createElement('div');
+        bar.className = 'v3-speakers mb-3 flex flex-wrap items-center gap-2';
+        textEl.before(bar);
+        const draw = () => {
+            const names = speakersIn(text);
+            bar.innerHTML = names.length
+                ? `<span class="text-[10px] font-bold uppercase tracking-widest text-slate-500">Renombrar:</span>` +
+                  names.map(n => `<button class="chip-btn chip-primary" data-speaker="${escapeHtml(n)}" title="Cambiar este nombre en todo el diálogo">
+                        <span class="material-symbols-outlined text-sm">edit</span> ${escapeHtml(n)}</button>`).join('')
+                : '';
+            textEl.innerHTML = formatAIResponse(text);
+        };
+        bar.addEventListener('click', async (e) => {
+            const btn = e.target.closest('[data-speaker]');
+            if (!btn) return;
+            const oldName = btn.dataset.speaker;
+            const newName = await window.ClipaV3.prompt(`¿Cómo se llama "${oldName}"? Se cambia en todos sus turnos.`,
+                { title: 'Renombrar hablante', okText: 'Renombrar', placeholder: oldName });
+            if (!newName || newName === oldName) return;
+            const clean = newName.replace(/[*\n]/g, ' ').trim().slice(0, 40);
+            if (!clean) return;
+            const re = new RegExp('^\\*\\*' + escapeRegExp(oldName) + ':?\\*\\*(\\s*:)?', 'gm');
+            text = text.replace(re, () => `**${clean}**:`);
+            lastDialogue = text;
+            draw();
+            showToast(`"${oldName}" ahora es "${clean}"`, 'success');
+        });
+        draw();
+    }
 
     /** Llama a /api/quotes y renderiza las cards con tiempos y botones de recorte */
     async function runQuotesWithTimes(outputEl, prefix) {
@@ -1872,6 +1940,7 @@ document.addEventListener('DOMContentLoaded', () => {
             return;
         }
 
+        lastQuotes = quotes.map(q => ({ quote: q.quote, note: q.note, start: q.has_time ? q.start : null }));
         const cardsHtml = quotes.map((q, i) => {
             const hasTime = q.has_time && q.start != null;
             const startFmt = hasTime ? formatHHMMSS(q.start) : null;
@@ -2020,6 +2089,12 @@ document.addEventListener('DOMContentLoaded', () => {
         return out;
     }
 
+    /** Minuto de inicio de cada párrafo (mismo orden que el texto del Word); [] si no hay tiempos. */
+    function wordStarts() {
+        if (!currentTranscript || !currentSegments?.length) return null;
+        return getParagraphTimestamps(splitParagraphs(currentTranscript), currentSegments).map(v => (v == null ? null : v));
+    }
+
     function getFormattedPlainText() {
         if (!currentTranscript) return '';
         return splitParagraphs(currentTranscript).join('\n\n');
@@ -2134,7 +2209,10 @@ document.addEventListener('DOMContentLoaded', () => {
                     uploader,
                     url,
                     description: desc,
-                    transcript: getFormattedPlainText()
+                    transcript: getFormattedPlainText(),
+                    starts: wordStarts(),
+                    quotes: lastQuotes,
+                    dialogue: lastDialogue
                 })
             });
 
@@ -2436,6 +2514,60 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     });
 
+
+    // ─── BUSCAR Y REEMPLAZAR EN LA TRANSCRIPCIÓN (3.4) ───────────────────────────
+    function escapeRegExp(s) { return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
+    function wordRegex(find) {
+        return new RegExp('(?<![\\p{L}\\p{N}_])' + escapeRegExp(find) + '(?![\\p{L}\\p{N}_])', 'giu');
+    }
+
+    function countInTranscript(find) {
+        if (!find || !currentTranscript) return 0;
+        return (currentTranscript.match(wordRegex(find)) || []).length;
+    }
+
+    async function replaceInTranscript(find, replacement) {
+        const re = wordRegex(find);
+        currentTranscript = currentTranscript.replace(re, () => replacement);
+        currentSegments = (currentSegments || []).map(seg => {
+            const out = { ...seg, text: String(seg.text || '').replace(re, () => replacement) };
+            if (Array.isArray(seg.words)) out.words = seg.words.map(w => ({ ...w, w: String(w.w || '').replace(re, () => replacement) }));
+            return out;
+        });
+        const container = document.getElementById('transcript-text-container');
+        if (container) container.innerHTML = formatCleanTextWithTimestamps(currentTranscript, currentSegments);
+        const id = window.ClipaV3?.history.currentId;
+        if (id) {
+            try { await window.ClipaV3.history.update(id, { transcript: currentTranscript, segments: currentSegments }); }
+            catch (e) { showToast(`No se pudo guardar en el historial: ${e.message}`, 'error'); }
+        }
+    }
+
+    document.getElementById('replace-transcript-btn')?.addEventListener('click', async () => {
+        if (!currentTranscript) return;
+        if (isEditing) { showToast('Primero tocá LISTO para terminar de editar', 'info'); return; }
+        const V3 = window.ClipaV3;
+        const find = await V3.prompt('¿Qué palabra o frase querés cambiar? (se busca palabra completa, sin importar mayúsculas)',
+            { title: 'Buscar y reemplazar', okText: 'Buscar', placeholder: 'Ej.: Yemini' });
+        if (!find) return;
+        const n = countInTranscript(find);
+        if (!n) { showToast(`No aparece "${find}" en la transcripción`, 'info'); return; }
+        const repl = await V3.prompt(`"${find}" aparece ${n} ${n === 1 ? 'vez' : 'veces'}. ¿Por qué lo reemplazo?`,
+            { title: 'Buscar y reemplazar', okText: `Reemplazar ${n}`, placeholder: 'Ej.: Gemini' });
+        if (!repl) return;
+        await replaceInTranscript(find, repl);
+        showToast(`${n} ${n === 1 ? 'cambio hecho' : 'cambios hechos'}`, 'success');
+        if (await V3.confirm(`¿Agregar "${find} = ${repl}" al glosario para que se corrija solo en las próximas transcripciones?`,
+                { title: 'Glosario', okText: 'Agregar', cancelText: 'No' })) {
+            try {
+                const st = await V3.api('/settings');
+                const line = `${find} = ${repl}`;
+                const glossary = ((st.glossary || '').trim() + '\n' + line).trim();
+                await V3.api('/settings', { method: 'PUT', body: { glossary } });
+                showToast('Agregado al glosario', 'success');
+            } catch (e) { showToast(e.message, 'error'); }
+        }
+    });
 
     // ─── PUENTE CON v3.js ────────────────────────────────────────────────────────
     window.Clipa = {
